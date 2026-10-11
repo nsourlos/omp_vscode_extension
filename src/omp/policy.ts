@@ -41,6 +41,14 @@ export function parseApprovalMessage(message: string): { toolName: string; detai
 /** Tools whose output always passes through our diff review before it is saved. */
 export const DIFF_REVIEWED_TOOLS = new Set(["edit", "write"]);
 
+/** Message returned to the agent (as a failed write) when the file changed while its review was open. */
+export function staleFileMessage(displayPath: string): string {
+	return [
+		`${displayPath} changed while this change was waiting for review (edited by the user or by another session).`,
+		"Nothing was saved. Read the file again and redo the change on its current content.",
+	].join(" ");
+}
+
 /** Message returned to the agent (as a failed write) when the user rejected some or all hunks. */
 export function rejectionMessage(displayPath: string, hunks: Hunk[], accepted: readonly boolean[]): string {
 	const rejected = hunks.filter((_, i) => !accepted[i]);

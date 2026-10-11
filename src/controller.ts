@@ -23,6 +23,7 @@ import {
 	fileChangeWarning,
 	parseApprovalMessage,
 	rejectionMessage,
+	staleFileMessage,
 } from "./omp/policy";
 import { applyDecisions } from "./review/hunks";
 import type { ReviewManager } from "./review/reviewManager";
@@ -254,6 +255,10 @@ export class Controller implements vscode.Disposable {
 		}
 
 		const outcome = await this.reviews.review(uri, displayPath, original, params.content);
+		if ((await this.#currentText(uri)) !== current) {
+			this.#notice("warning", `${displayPath} changed during the review, so omp's change was not saved.`);
+			throw new RpcError(-32000, staleFileMessage(displayPath));
+		}
 		if (outcome.accepted.some(Boolean)) {
 			await saveText(uri, applyDecisions(outcome.diff, outcome.accepted), current !== undefined);
 		}

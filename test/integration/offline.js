@@ -51,6 +51,21 @@ exports.run = async function run() {
 			assert.equal(fakeLog().at(-1).error, undefined);
 			await waitFor(() => reviewTabs().length === 0, "the diff tab to close");
 		},
+
+		async "a file changed during its review is not overwritten"() {
+			fs.writeFileSync(file("b.txt"), "x\n");
+			const seen = reviews.length;
+			const turn = api.controller.send(steps({ write: { path: file("b.txt"), content: "x\ny\n" } }));
+			const review = await nextOpenReview(seen);
+			const document = await vscode.workspace.openTextDocument(file("b.txt"));
+			const edit = new vscode.WorkspaceEdit();
+			edit.insert(document.uri, new vscode.Position(0, 0), "typed by the user\n");
+			await vscode.workspace.applyEdit(edit);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", review.id, 0);
+			await turn;
+			assert.equal(document.getText(), "typed by the user\nx\n");
+			assert.match(fakeLog().at(-1).error ?? "", /changed while/);
+		},
 	};
 
 	for (const [name, test] of Object.entries(tests)) {
