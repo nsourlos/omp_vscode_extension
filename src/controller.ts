@@ -297,9 +297,10 @@ export class Controller implements vscode.Disposable {
 	}
 
 	async #elicit(params: ElicitationParams): Promise<ElicitationResult> {
-		if (params.mode === "url" && params.url) {
-			void vscode.env.openExternal(vscode.Uri.parse(params.url));
-			return { action: "accept", content: {} };
+		if (params.mode === "url") {
+			// Not advertised in clientCapabilities; opening an agent-chosen URL unasked is unsafe.
+			this.output.appendLine(`declined a request to open ${params.url}`);
+			return { action: "decline" };
 		}
 		const properties = params.requestedSchema?.properties ?? {};
 		const approval = parseApprovalMessage(params.message);

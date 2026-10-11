@@ -66,6 +66,11 @@ exports.run = async function run() {
 			assert.equal(document.getText(), "typed by the user\nx\n");
 			assert.match(fakeLog().at(-1).error ?? "", /changed while/);
 		},
+
+		async "a request to open a URL is declined"() {
+			await api.controller.send(steps({ elicitUrl: "https://example.com" }));
+			assert.deepEqual(fakeLog().at(-1).result, { action: "decline" });
+		},
 	};
 
 	for (const [name, test] of Object.entries(tests)) {
