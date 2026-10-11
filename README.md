@@ -54,7 +54,7 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 
 ## Tests
 
-- `npm test`: unit tests for hunk splitting, rebuilding, shell warnings and rejection messages.
+- `npm test`: unit tests for hunk splitting, rebuilding, shell warnings and rejection messages, plus the chat page itself (cards, replay, streaming) in jsdom, a simulated browser.
 - `npm run test:vscode`: opens a separate, throwaway VS Code with the extension, has omp make an edit, accepts the first change and rejects the rest, then checks the result (uses a few model tokens). Set `VSCODE_PATH` to an installed VS Code executable to skip downloading one.
 - `npm run test:offline`: the same throwaway VS Code, but against a fake omp (`test/fixtures/fake-omp.mjs`) that follows a script instead of calling a model. Free and needs no network once VS Code is available.
 - `node test/live/partial-review.mjs <empty-dir>`: runs a real `omp acp` session (uses a few model tokens). It accepts only the first of two changes and prints what omp saw.
