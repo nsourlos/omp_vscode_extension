@@ -106,8 +106,12 @@ export class Controller implements vscode.Disposable {
 
 	#ensureAgent(): Promise<OmpAgent> {
 		if (this.#agent?.sessionId) return Promise.resolve(this.#agent);
-		this.#starting ??= this.#startAgent().finally(() => (this.#starting = undefined));
-		return this.#starting;
+		if (this.#starting) return this.#starting;
+		const starting = this.#startAgent().finally(() => {
+			if (this.#starting === starting) this.#starting = undefined;
+		});
+		this.#starting = starting;
+		return starting;
 	}
 
 	async #startAgent(): Promise<OmpAgent> {
@@ -140,9 +144,11 @@ export class Controller implements vscode.Disposable {
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
 		} catch (error) {
-			if (this.#agent === agent) this.#agent = undefined;
 			agent.dispose();
-			this.chat.post({ type: "status", state: "stopped" });
+			if (this.#agent === agent) {
+				this.#agent = undefined;
+				this.chat.post({ type: "status", state: "stopped" });
+			}
 			throw error;
 		}
 	}
@@ -151,6 +157,7 @@ export class Controller implements vscode.Disposable {
 		this.#cancelPending(reason);
 		const agent = this.#agent;
 		this.#agent = undefined;
+		this.#starting = undefined;
 		agent?.dispose();
 	}
 

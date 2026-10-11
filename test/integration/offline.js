@@ -71,6 +71,22 @@ exports.run = async function run() {
 			await api.controller.send(steps({ elicitUrl: "https://example.com" }));
 			assert.deepEqual(fakeLog().at(-1).result, { action: "decline" });
 		},
+
+		async "New Session during startup starts a fresh session"() {
+			const config = vscode.workspace.getConfiguration("omp");
+			const args = config.get("extraArgs");
+			await config.update("extraArgs", [...args, "--init-delay", "1000"], vscode.ConfigurationTarget.Workspace);
+			try {
+				const before = fakeLog().length;
+				const first = api.controller.newSession();
+				await sleep(200);
+				await api.controller.newSession();
+				await first;
+				assert.equal(fakeLog().slice(before).filter(entry => entry.event === "session/new").length, 1);
+			} finally {
+				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
+			}
+		},
 	};
 
 	for (const [name, test] of Object.entries(tests)) {
