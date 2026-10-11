@@ -143,6 +143,41 @@ exports.run = async function run() {
 			assert.equal(fs.readFileSync(file("s2.txt"), "utf8"), "b\n");
 		},
 
+		async "Accept All, Reject All and Submit never finish another session's review"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("w1.txt"), "a\n");
+			fs.writeFileSync(file("w2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("w1.txt"), content: "b\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("w2.txt"), content: "b\n" } }));
+			const reviewOne = await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().length === 2, "both diff tabs");
+			const finished = () => reviews.slice(seen).filter(info => info.state === "done").map(info => info.id);
+
+			api.sessions.all[0].panel.reveal(); // a chat tab has focus, not a diff
+			await waitFor(() => !vscode.window.activeTextEditor, "the chat tab to take focus");
+			for (const command of ["omp.review.acceptAll", "omp.review.rejectAll", "omp.review.submit"]) {
+				await vscode.commands.executeCommand(command);
+			}
+			await sleep(300);
+			assert.deepEqual(finished(), [], "with two reviews open and none focused, nothing is decided");
+
+			await api.reviews.open(reviewTwo.id);
+			await waitFor(() => vscode.window.activeTextEditor?.document.uri.path.startsWith(`/${reviewTwo.id}/`), "session 2's diff to take focus");
+			await vscode.commands.executeCommand("omp.review.rejectAll");
+			await turnTwo;
+			assert.deepEqual(finished(), [reviewTwo.id], "only the focused review was decided");
+			assert.equal(fs.readFileSync(file("w2.txt"), "utf8"), "a\n");
+
+			api.sessions.all[0].panel.reveal();
+			await waitFor(() => !vscode.window.activeTextEditor, "the chat tab to take focus");
+			await vscode.commands.executeCommand("omp.review.submit");
+			await turnOne;
+			assert.deepEqual(finished(), [reviewTwo.id, reviewOne.id], "with one review left, Submit finishes it");
+			assert.equal(fs.readFileSync(file("w1.txt"), "utf8"), "b\n");
+		},
+
 		async "closing a session's tab ends it and leaves the others running"() {
 			const second = api.sessions.all[1];
 			fs.writeFileSync(file("c.txt"), "a\n");

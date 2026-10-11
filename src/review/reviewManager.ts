@@ -206,11 +206,18 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		return this.#queues.get(session.owner)?.includes(session) ?? false;
 	}
 
-	/** The review in the focused editor, else the first one waiting. */
+	/**
+	 * The review in the focused editor, else the only one waiting. With several waiting and none
+	 * focused, guessing could finish another session's review, so the user is asked to pick one.
+	 */
 	#activeSession(): ReviewSession | undefined {
 		const uri = vscode.window.activeTextEditor?.document.uri;
 		const session = uri ? this.#sessionForUri(uri) : undefined;
-		return session && this.#isPending(session) ? session : this.#pending()[0];
+		if (session && this.#isPending(session)) return session;
+		const pending = this.#pending();
+		if (pending.length === 1) return pending[0];
+		if (pending.length > 1) void vscode.window.showInformationMessage("Several omp reviews are open. Click into the diff you want to finish first.");
+		return undefined;
 	}
 
 	#decide(id: string, index: number, decision: Decision): void {
