@@ -1,0 +1,82 @@
+#!/usr/bin/env node
+// Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
+// The prompt text is a JSON list of steps, run in order:
+//   {"write": {"path", "content"}}  ask the editor to write a file
+//   {"elicitUrl": "<url>"}          send a URL-mode elicitation
+//   {"say": "<text>"}               stream a message chunk
+//   {"hang": true}                  wait until session/cancel
+//   {"exit": <code>}                exit immediately
+// Flags: --init-delay <ms> delays the initialize reply; --log <file> appends one JSON line per outcome.
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const args = process.argv.slice(2);
+const flag = name => {
+	const index = args.indexOf(name);
+	return index === -1 ? undefined : args[index + 1];
+};
+const initDelay = Number(flag("--init-delay") ?? 0);
+const logFile = flag("--log");
+const sessionId = `fake-${process.pid}`;
+
+let nextId = 1;
+const waiting = new Map();
+let cancelTurn;
+
+const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+const record = entry => logFile && appendFileSync(logFile, `${JSON.stringify({ sessionId, ...entry })}\n`);
+const request = (method, params) =>
+	new Promise(resolve => {
+		const id = nextId++;
+		waiting.set(id, resolve);
+		send({ id, method, params });
+	});
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function runTurn(steps) {
+	for (const step of steps) {
+		if (step.write) {
+			const reply = await request("fs/write_text_file", { sessionId, ...step.write });
+			record({ event: "write", path: step.write.path, error: reply.error?.message });
+		} else if (step.elicitUrl) {
+			const reply = await request("elicitation/create", { sessionId, mode: "url", message: "Open this", url: step.elicitUrl });
+			record({ event: "elicitUrl", result: reply.result });
+		} else if (step.say) {
+			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
+		} else if (step.hang) {
+			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
+			if (cancelled) return "cancelled";
+		} else if (step.exit !== undefined) {
+			process.exit(step.exit);
+		}
+	}
+	return "end_turn";
+}
+
+async function handle(message) {
+	switch (message.method) {
+		case "initialize":
+			await sleep(initDelay);
+			return send({ id: message.id, result: { protocolVersion: 1 } });
+		case "session/new":
+			record({ event: "session/new", cwd: message.params.cwd });
+			return send({ id: message.id, result: { sessionId } });
+		case "session/prompt": {
+			const steps = JSON.parse(message.params.prompt[0].text);
+			const stopReason = await runTurn(steps);
+			return send({ id: message.id, result: { stopReason } });
+		}
+		case "session/cancel":
+			return cancelTurn?.(true);
+	}
+}
+
+createInterface({ input: process.stdin }).on("line", line => {
+	const message = JSON.parse(line);
+	if (message.method === undefined) {
+		waiting.get(message.id)?.(message);
+		waiting.delete(message.id);
+		return;
+	}
+	void handle(message);
+});

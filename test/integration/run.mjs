@@ -1,7 +1,9 @@
-// Starts a separate, throwaway VS Code with this extension and runs suite.js in it.
-// Uses a few model tokens. Set VSCODE_PATH to an installed VS Code executable to skip the download.
-// Usage: npm run build && node test/integration/run.mjs
-import { mkdtempSync, writeFileSync } from "node:fs";
+// Starts a separate, throwaway VS Code with this extension and runs a suite in it.
+// Default suite: suite.js against a real omp (uses a few model tokens).
+// `offline`: offline.js against test/fixtures/fake-omp.mjs (no model, no network).
+// Set VSCODE_PATH to an installed VS Code executable to skip the download.
+// Usage: npm run build && node test/integration/run.mjs [offline]
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,11 +20,22 @@ writeFileSync(
 	'def greet():\n    print("Hi")\n\n\ndef add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n',
 );
 
+const offline = process.argv[2] === "offline";
+const fakeLog = join(workspace, ".fake-omp.log");
+if (offline) {
+	mkdirSync(join(workspace, ".vscode"));
+	writeFileSync(
+		join(workspace, ".vscode", "settings.json"),
+		JSON.stringify({ "omp.path": join(root, "test", "fixtures", "fake-omp.mjs"), "omp.extraArgs": ["--log", fakeLog] }),
+	);
+}
+
 try {
 	await runTests({
 		...(process.env.VSCODE_PATH ? { vscodeExecutablePath: process.env.VSCODE_PATH } : {}),
 		extensionDevelopmentPath: root,
-		extensionTestsPath: join(root, "test", "integration", "suite.js"),
+		extensionTestsPath: join(root, "test", "integration", offline ? "offline.js" : "suite.js"),
+		extensionTestsEnv: { OMP_FAKE_LOG: fakeLog },
 		launchArgs: [workspace, "--user-data-dir", userData, "--disable-workspace-trust", "--disable-extensions"],
 	});
 } catch (error) {
