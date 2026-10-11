@@ -6,8 +6,9 @@
 //   {"say": "<text>"}               stream a message chunk
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
+//   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
 // Flags: --init-delay <ms> delays the initialize reply; --log <file> appends one JSON line per outcome.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, closeSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
@@ -48,6 +49,12 @@ async function runTurn(steps) {
 			if (cancelled) return "cancelled";
 		} else if (step.exit !== undefined) {
 			process.exit(step.exit);
+		} else if (step.closeStdin) {
+			process.stdin.destroy();
+			try {
+				closeSync(0);
+			} catch {} // already closed by destroy()
+			setInterval(() => {}, 60_000); // stay alive like a hung agent
 		}
 	}
 	return "end_turn";

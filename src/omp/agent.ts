@@ -96,6 +96,8 @@ export class OmpAgent {
 			stderrTail = (stderrTail + text).slice(-2000);
 			handlers.log(`[omp stderr] ${text.trimEnd()}`);
 		});
+		// A write racing omp's exit fails with EPIPE; the exit handler below reports the exit itself.
+		child.stdin!.on("error", error => handlers.log(`[omp stdin] ${error.message}`));
 
 		const rpc = new JsonRpcConnection(
 			child.stdout!,

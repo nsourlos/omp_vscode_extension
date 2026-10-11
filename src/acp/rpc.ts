@@ -60,6 +60,7 @@ export class JsonRpcConnection {
 	}
 
 	#send(message: Record<string, unknown>): void {
+		if (this.#closed) return;
 		const line = JSON.stringify({ jsonrpc: "2.0", ...message });
 		this.log(`→ ${line}`);
 		this.output.write(`${line}\n`);
