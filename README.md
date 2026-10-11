@@ -1,0 +1,67 @@
+# OMP for VS Code (prototype)
+
+Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code, with:
+
+- **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning.
+- **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected (and why, if you say).
+- **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
+
+## How it works
+
+The extension starts `omp acp` (omp's built-in editor mode, the Agent Client Protocol) in the background. omp sends approval requests and file writes to the extension instead of acting on its own. Nothing is written until you finish reviewing.
+
+```
+src/
+  acp/rpc.ts              JSON-RPC over stdio
+  omp/agent.ts            starts `omp acp`, session, prompts (no VS Code code)
+  omp/policy.ts           prompt text, shell-command warnings, messages back to omp
+  review/hunks.ts         split a change into hunks, rebuild from accepted hunks
+  review/reviewManager.ts diff editor, Accept/Reject buttons, review queue
+  chatView.ts + media/    chat panel
+  controller.ts           connects all of the above
+```
+
+## Install
+
+Requirements: `omp` installed and logged in (run `omp` once in a terminal), Node 20+.
+
+```sh
+npm install
+npm run package                                   # builds omp-vscode-0.1.0.vsix
+code --install-extension omp-vscode-0.1.0.vsix --force
+```
+
+Reload VS Code. Click the **OMP** icon in the left activity bar: the chat opens as a tab next to your files, and the sidebar switches back to the Explorer. The buttons in the chat tab's title bar start a new session, move the chat into its own window, or show the log. **OMP: Open Chat** in the Command Palette does the same as the icon. After changing the code, run the last two commands again.
+
+To work on the extension itself, open this folder and press **F5** to start a test window with the current code.
+
+While reviewing: click **Accept** / **Reject** above each change, or put the cursor on a change and press **Alt+Y** / **Alt+N**. The buttons in the editor title accept all, reject all, or submit (undecided changes count as accepted). The review finishes on its own once every change is decided.
+
+## Settings
+
+| Setting | Default | What it does |
+|---|---|---|
+| `omp.path` | `omp` | Path to omp (falls back to `~/.bun/bin/omp`) |
+| `omp.extraArgs` | `[]` | Extra flags for `omp acp`, e.g. `["--model", "opus"]` |
+| `omp.preferEditTool` | `true` | Tell omp to change files only through its edit tool |
+| `omp.autoApproveEditPrompts` | `true` | Skip omp's yes/no prompt for edits, since the diff review follows anyway |
+| `omp.warnOnShellFileChanges` | `true` | Warn on shell commands that look like they change files |
+
+The extension also turns on `diffEditor.codeLens`, which VS Code hides by default; without it the per-change buttons don't show.
+
+## Tests
+
+- `npm test`: unit tests for hunk splitting, rebuilding, shell warnings and rejection messages.
+- `npm run test:vscode`: opens a separate, throwaway VS Code with the extension, has omp make an edit, accepts the first change and rejects the rest, then checks the result (uses a few model tokens). Set `VSCODE_PATH` to an installed VS Code executable to skip downloading one.
+- `node test/live/partial-review.mjs <empty-dir>`: runs a real `omp acp` session (uses a few model tokens). It accepts only the first of two changes and prints what omp saw.
+
+## Known limits
+
+- Changes made by shell commands (scripts, `sed -i`, …) skip the diff review. You only see the command approval.
+- "Always allow" on a shell command allows **all** shell commands for the rest of the session (that's how omp groups it).
+- Shell commands run inside omp, not in a VS Code terminal.
+- One chat session per window. **New Session** in the chat tab's title bar restarts omp.
+
+## License
+
+MIT (see the `LICENSE` file): free for anyone to use, copy, change and share, including commercially. Keep the license notice when you redistribute it.

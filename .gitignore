@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.vsix
+.vscode/hunkwise/
+.vscode-test/
+.DS_Store

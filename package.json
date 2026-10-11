@@ -1,0 +1,241 @@
+{
+  "name": "omp-vscode",
+  "displayName": "OMP for VS Code",
+  "description": "Chat with oh-my-pi (omp) inside VS Code, approve every command, and review each file change hunk by hunk.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "omp",
+          "title": "OMP",
+          "icon": "media/omp.svg"
+        }
+      ]
+    },
+    "views": {
+      "omp": [
+        {
+          "type": "webview",
+          "id": "omp.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "omp.openChat",
+        "title": "Open Chat",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.newSession",
+        "title": "New Session",
+        "category": "OMP",
+        "icon": "$(add)"
+      },
+      {
+        "command": "omp.cancel",
+        "title": "Stop",
+        "category": "OMP",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "omp.showLog",
+        "title": "Show Log",
+        "category": "OMP",
+        "icon": "$(output)"
+      },
+      {
+        "command": "omp.openInWindow",
+        "title": "Open Chat in New Window",
+        "category": "OMP",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "omp.review.acceptHunk",
+        "title": "Accept Change",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.review.rejectHunk",
+        "title": "Reject Change",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.review.acceptAll",
+        "title": "Accept All Changes",
+        "category": "OMP",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "omp.review.rejectAll",
+        "title": "Reject All Changes",
+        "category": "OMP",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "omp.review.submit",
+        "title": "Submit Review (accept undecided changes)",
+        "category": "OMP",
+        "icon": "$(send)"
+      },
+      {
+        "command": "omp.review.open",
+        "title": "Open Pending Review",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.review.acceptAtCursor",
+        "title": "Accept Change at Cursor",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.review.rejectAtCursor",
+        "title": "Reject Change at Cursor",
+        "category": "OMP"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "omp.review.acceptAtCursor",
+        "key": "alt+y",
+        "when": "editorTextFocus && resourceScheme == omp-review"
+      },
+      {
+        "command": "omp.review.rejectAtCursor",
+        "key": "alt+n",
+        "when": "editorTextFocus && resourceScheme == omp-review"
+      }
+    ],
+    "configurationDefaults": {
+      "diffEditor.codeLens": true
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "omp.review.acceptAtCursor",
+          "when": "resourceScheme == omp-review",
+          "group": "0_omp@1"
+        },
+        {
+          "command": "omp.review.rejectAtCursor",
+          "when": "resourceScheme == omp-review",
+          "group": "0_omp@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "omp.newSession",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.openInWindow",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.showLog",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "navigation@3"
+        },
+        {
+          "command": "omp.review.acceptAll",
+          "when": "resourceScheme == omp-review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.review.rejectAll",
+          "when": "resourceScheme == omp-review",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.review.submit",
+          "when": "resourceScheme == omp-review",
+          "group": "navigation@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "omp.review.acceptHunk",
+          "when": "false"
+        },
+        {
+          "command": "omp.review.rejectHunk",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "OMP",
+      "properties": {
+        "omp.path": {
+          "type": "string",
+          "default": "omp",
+          "description": "Path to the omp executable. If 'omp' is not on PATH, ~/.bun/bin/omp is tried."
+        },
+        "omp.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra command-line flags passed to `omp acp` (for example [\"--model\", \"opus\"])."
+        },
+        "omp.preferEditTool": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tell the agent to change files only through its edit/write tools (so every change gets a diff review), never through shell commands."
+        },
+        "omp.autoApproveEditPrompts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip omp's yes/no prompt for the edit and write tools, because every change is reviewed as a diff before it is saved anyway."
+        },
+        "omp.warnOnShellFileChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Flag shell commands that look like they change files, since those changes skip the diff review."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.js",
+    "package": "npm run build && npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "test:vscode": "npm run build && node test/integration/run.mjs"
+  },
+  "dependencies": {
+    "cross-spawn": "^7.0.6",
+    "diff": "^8.0.2",
+    "which": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "~1.90.0",
+    "@types/which": "^3.0.4",
+    "@vscode/test-electron": "^3.1.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
