@@ -137,7 +137,9 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 
 	/** Fail every queued review, e.g. when the turn is cancelled or omp exits. */
 	cancelAll(reason: string): void {
-		for (const session of [...this.#queue]) {
+		const sessions = this.#queue;
+		this.#queue = []; // emptied first so #finish doesn't open the next review
+		for (const session of sessions) {
 			this.#finish(session, `cancelled: ${reason}`);
 			session.reject(new Error(reason));
 		}

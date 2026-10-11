@@ -136,6 +136,24 @@
 		return text.length > MAX_OUTPUT ? text.slice(0, MAX_OUTPUT) + `\n… (${text.length - MAX_OUTPUT} more characters)` : text;
 	}
 
+	// Re-rendering a long reply on every chunk is quadratic, so render at most once per frame.
+	let pendingRender = null;
+	let frame = 0;
+
+	function renderSoon(target) {
+		if (pendingRender && pendingRender !== target) flushRender();
+		pendingRender = target;
+		if (!frame) frame = requestAnimationFrame(flushRender);
+	}
+
+	function flushRender() {
+		cancelAnimationFrame(frame);
+		frame = 0;
+		const target = pendingRender;
+		pendingRender = null;
+		if (target) keepScrolled(() => renderMarkdown(target.el, target.text));
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -148,7 +166,7 @@
 					assistant = { el: node, text: "" };
 				}
 				assistant.text += text;
-				keepScrolled(() => renderMarkdown(assistant.el, assistant.text));
+				renderSoon(assistant);
 				return;
 			}
 			case "agent_thought_chunk": {
@@ -241,7 +259,7 @@
 
 	// ---------- cards that wait for the user ----------
 	function respond(requestId, value, label) {
-		vscode.postMessage({ type: "respond", requestId, value });
+		vscode.postMessage({ type: "respond", requestId, value, label });
 		markResolved(requestId, label);
 	}
 
@@ -411,6 +429,7 @@
 	}
 
 	function reset() {
+		pendingRender = null;
 		log.textContent = "";
 		breakFlow();
 		planEl = null;

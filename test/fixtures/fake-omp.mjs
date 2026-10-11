@@ -2,6 +2,7 @@
 // Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
 // The prompt text is a JSON list of steps, run in order:
 //   {"write": {"path", "content"}}  ask the editor to write a file
+//   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
 //   {"say": "<text>"}               stream a message chunk
 //   {"hang": true}                  wait until session/cancel
@@ -39,6 +40,9 @@ async function runTurn(steps) {
 		if (step.write) {
 			const reply = await request("fs/write_text_file", { sessionId, ...step.write });
 			record({ event: "write", path: step.write.path, error: reply.error?.message });
+		} else if (step.writes) {
+			const replies = await Promise.all(step.writes.map(write => request("fs/write_text_file", { sessionId, ...write })));
+			replies.forEach((reply, i) => record({ event: "write", path: step.writes[i].path, error: reply.error?.message }));
 		} else if (step.elicitUrl) {
 			const reply = await request("elicitation/create", { sessionId, mode: "url", message: "Open this", url: step.elicitUrl });
 			record({ event: "elicitUrl", result: reply.result });

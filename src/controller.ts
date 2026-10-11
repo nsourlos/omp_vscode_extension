@@ -63,15 +63,17 @@ export class Controller implements vscode.Disposable {
 		this.#lastNotice = undefined;
 		this.chat.post({ type: "user", text });
 		this.chat.post({ type: "status", state: "busy" });
+		let agent: OmpAgent | undefined;
 		try {
-			const agent = await this.#ensureAgent();
+			agent = await this.#ensureAgent();
 			const result = await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
 		} catch (error) {
-			this.#notice("error", errorText(error));
+			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {
 			this.#busy = false;
-			this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
+			// A turn cut short by New Session must not report into the fresh chat.
+			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
 	}
 
@@ -196,13 +198,11 @@ export class Controller implements vscode.Disposable {
 				if (!pending) return;
 				this.#pending.delete(message.requestId);
 				pending.resolve(message.value);
+				this.chat.post({ type: "resolved", requestId: message.requestId, label: message.label });
 				break;
 			}
 			case "openReview":
 				void this.reviews.open(message.reviewId);
-				break;
-			case "openFile":
-				if (typeof message.path === "string") void vscode.window.showTextDocument(vscode.Uri.file(message.path));
 				break;
 			case "setConfig":
 				void this.#setConfig(message.configId, message.value);

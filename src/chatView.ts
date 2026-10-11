@@ -4,6 +4,7 @@
  * to the Explorer. Messages are replayed whenever the tab is (re)created.
  */
 import * as vscode from "vscode";
+import { mergeChunk } from "./chatHistory";
 
 export class ChatView implements vscode.WebviewViewProvider {
 	static readonly viewId = "omp.chat";
@@ -72,7 +73,9 @@ export class ChatView implements vscode.WebviewViewProvider {
 	}
 
 	post(message: unknown): void {
-		this.#history.push(message);
+		const merged = mergeChunk(this.#history.at(-1), message);
+		if (merged) this.#history[this.#history.length - 1] = merged;
+		else this.#history.push(message);
 		for (const webview of this.#ready) void webview.postMessage(message);
 	}
 

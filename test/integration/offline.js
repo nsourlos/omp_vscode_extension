@@ -72,6 +72,19 @@ exports.run = async function run() {
 			assert.deepEqual(fakeLog().at(-1).result, { action: "decline" });
 		},
 
+		async "Stop closes every queued review"() {
+			const names = ["q1.txt", "q2.txt", "q3.txt"];
+			for (const name of names) fs.writeFileSync(file(name), "a\n");
+			const seen = reviews.length;
+			const turn = api.controller.send(steps({ writes: names.map(name => ({ path: file(name), content: "b\n" })) }));
+			await waitFor(() => reviews.slice(seen).filter(info => info.state !== "done").length === 3, "three queued reviews");
+			await waitFor(() => reviewTabs().length === 1, "the first diff tab");
+			api.controller.cancel();
+			await turn;
+			await sleep(1500); // let any tab that is (wrongly) still opening appear
+			assert.equal(reviewTabs().length, 0);
+		},
+
 		async "New Session during startup starts a fresh session"() {
 			const config = vscode.workspace.getConfiguration("omp");
 			const args = config.get("extraArgs");

@@ -13,12 +13,14 @@ export const PREFER_EDIT_TOOL_PROMPT = [
 
 /** Commands that probably modify files, and so would skip the diff review. */
 const FILE_CHANGING_PATTERNS: { pattern: RegExp; label: string }[] = [
-	{ pattern: /\bsed\b[^|;&]*\s-[a-zA-Z]*i/, label: "sed -i" },
+	{ pattern: /\bsed\b[^|;&]*\s(-[a-zA-Z]*i|--in-place)/, label: "sed -i" },
 	{ pattern: /\bperl\b[^|;&]*\s-[a-zA-Z]*i/, label: "perl -i" },
 	{ pattern: /(^|[^0-9&<>-])>>?\s*(?!&|\/dev\/null)[^\s&|;]/, label: "output redirection (>)" },
 	{ pattern: /\btee\b/, label: "tee" },
 	{ pattern: /<<-?\s*['"]?\w+/, label: "heredoc" },
-	{ pattern: /(^|[\s;&|(])(rm|mv|cp|touch|truncate|rmdir|mkdir|ln|chmod|chown|dd|install|unzip|tar\s+-?x)\b/, label: "file command" },
+	{ pattern: /(^|[\s;&|(])(rm|mv|cp|touch|truncate|rmdir|mkdir|ln|chmod|chown|dd|unzip)\b/, label: "file command" },
+	{ pattern: /(^|[;&|(]\s*)install\s/, label: "file command" },
+	{ pattern: /\btar\s+(-?[a-zA-Z]*x|[^|;&]*--extract)/, label: "tar extract" },
 	{ pattern: /\bgit\s+(checkout|restore|reset|apply|am|stash|clean|mv|rm|merge|rebase|cherry-pick|revert|pull)\b/, label: "git command that changes files" },
 	{ pattern: /\bpatch\b/, label: "patch" },
 	{ pattern: /\b(python3?|node|ruby|bun|deno)\b[^|;&]*\s-(c|e)\b/, label: "inline script" },

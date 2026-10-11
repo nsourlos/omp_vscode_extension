@@ -33,10 +33,10 @@ test("handles new files, deletions and missing trailing newlines", () => {
 });
 
 test("flags shell commands that change files", () => {
-	for (const cmd of ["sed -i 's/a/b/' x.py", "echo hi > out.txt", "cat <<EOF > f", "rm -rf build", "git checkout -- x", "python3 -c 'open(\"f\",\"w\")'", "ls | tee log"]) {
+	for (const cmd of ["sed -i 's/a/b/' x.py", "echo hi > out.txt", "cat <<EOF > f", "rm -rf build", "git checkout -- x", "python3 -c 'open(\"f\",\"w\")'", "ls | tee log", "tar xzf a.tgz", "tar -xzf a.tgz", "sed --in-place 's/a/b/' x.py", "install -m 644 a /usr/local/bin/a"]) {
 		assert.ok(fileChangeWarning(cmd), cmd);
 	}
-	for (const cmd of ["ls -la", "npm test 2>&1", "grep -rn foo src", "git status", "cargo build > /dev/null", "pytest -x"]) {
+	for (const cmd of ["ls -la", "npm test 2>&1", "grep -rn foo src", "git status", "cargo build > /dev/null", "pytest -x", "npm install", "pip install -r requirements.txt", "bun install", "tar czf out.tgz src", "tar tzf x.tgz"]) {
 		assert.equal(fileChangeWarning(cmd), undefined, cmd);
 	}
 });
