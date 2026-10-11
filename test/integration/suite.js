@@ -18,7 +18,7 @@ exports.run = async function run() {
 	await vscode.commands.executeCommand("omp.openChat");
 	await sleep(1000);
 	assert.ok(
-		allTabs().some(tab => tab.input instanceof vscode.TabInputWebview && tab.label === "OMP"),
+		allTabs().some(tab => tab.input instanceof vscode.TabInputWebview && tab.label === "OMP 1"),
 		"clicking OMP opens the chat as an editor tab",
 	);
 	log("chat tab opened");
@@ -37,7 +37,7 @@ exports.run = async function run() {
 		for (let i = 1; i < info.hunkCount; i++) await vscode.commands.executeCommand("omp.review.rejectHunk", info.id, i);
 	});
 
-	await api.controller.send(
+	await api.sessions.active.controller.send(
 		"In demo.py make exactly two changes in ONE edit call: change greet to print Hello instead of Hi, " +
 			"and add a one-line docstring to add(). Then stop.",
 	);

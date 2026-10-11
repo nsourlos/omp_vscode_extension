@@ -36,14 +36,22 @@ exports.run = async function run() {
 
 	const reviews = [];
 	api.reviews.onDidChangeReview(info => reviews.push(info));
-	const nextOpenReview = after =>
-		waitFor(() => reviews.slice(after).find(info => info.state === "open"), "a review to open");
+	const nextOpenReview = (after, owner) =>
+		waitFor(
+			() => reviews.slice(after).find(info => info.state === "open" && (!owner || info.owner === owner)),
+			"a review to open",
+		);
+	const controller = api.sessions.open().controller;
+	const newSession = async () => {
+		await vscode.commands.executeCommand("omp.newSession");
+		return api.sessions.active;
+	};
 
 	const tests = {
 		async "an accepted write is saved"() {
 			fs.writeFileSync(file("a.txt"), "one\n");
 			const seen = reviews.length;
-			const turn = api.controller.send(steps({ write: { path: file("a.txt"), content: "one\ntwo\n" } }));
+			const turn = controller.send(steps({ write: { path: file("a.txt"), content: "one\ntwo\n" } }));
 			const review = await nextOpenReview(seen);
 			await vscode.commands.executeCommand("omp.review.acceptHunk", review.id, 0);
 			await turn;
@@ -55,7 +63,7 @@ exports.run = async function run() {
 		async "a file changed during its review is not overwritten"() {
 			fs.writeFileSync(file("b.txt"), "x\n");
 			const seen = reviews.length;
-			const turn = api.controller.send(steps({ write: { path: file("b.txt"), content: "x\ny\n" } }));
+			const turn = controller.send(steps({ write: { path: file("b.txt"), content: "x\ny\n" } }));
 			const review = await nextOpenReview(seen);
 			const document = await vscode.workspace.openTextDocument(file("b.txt"));
 			const edit = new vscode.WorkspaceEdit();
@@ -68,7 +76,7 @@ exports.run = async function run() {
 		},
 
 		async "a request to open a URL is declined"() {
-			await api.controller.send(steps({ elicitUrl: "https://example.com" }));
+			await controller.send(steps({ elicitUrl: "https://example.com" }));
 			assert.deepEqual(fakeLog().at(-1).result, { action: "decline" });
 		},
 
@@ -76,26 +84,90 @@ exports.run = async function run() {
 			const names = ["q1.txt", "q2.txt", "q3.txt"];
 			for (const name of names) fs.writeFileSync(file(name), "a\n");
 			const seen = reviews.length;
-			const turn = api.controller.send(steps({ writes: names.map(name => ({ path: file(name), content: "b\n" })) }));
+			const turn = controller.send(steps({ writes: names.map(name => ({ path: file(name), content: "b\n" })) }));
 			await waitFor(() => reviews.slice(seen).filter(info => info.state !== "done").length === 3, "three queued reviews");
 			await waitFor(() => reviewTabs().length === 1, "the first diff tab");
-			api.controller.cancel();
+			controller.cancel();
 			await turn;
 			await sleep(1500); // let any tab that is (wrongly) still opening appear
 			assert.equal(reviewTabs().length, 0);
 		},
 
-		async "New Session during startup starts a fresh session"() {
+		async "New Session opens another tab with its own omp"() {
+			const before = fakeLog().length;
+			const second = await newSession();
+			assert.notEqual(second.controller, controller);
+			assert.deepEqual(api.sessions.all.map(session => session.panel.label), ["OMP 1", "OMP 2"]);
+			await waitFor(() => fakeLog().slice(before).some(entry => entry.event === "session/new"), "the second omp to start");
+			const tabs = allTabs().filter(tab => tab.input instanceof vscode.TabInputWebview);
+			assert.deepEqual(tabs.map(tab => tab.label).sort(), ["OMP 1", "OMP 2"]);
+		},
+
+		async "two sessions review and save in parallel"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("p1.txt"), "1\n");
+			fs.writeFileSync(file("p2.txt"), "2\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("p1.txt"), content: "1\none\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("p2.txt"), content: "2\ntwo\n" } }));
+			const reviewOne = await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().length === 2, "both diff tabs, open at the same time");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewTwo.id, 0);
+			await turnTwo;
+			assert.equal(fs.readFileSync(file("p2.txt"), "utf8"), "2\ntwo\n");
+			assert.equal(fs.readFileSync(file("p1.txt"), "utf8"), "1\n", "session 1's change is still waiting");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewOne.id, 0);
+			await turnOne;
+			assert.equal(fs.readFileSync(file("p1.txt"), "utf8"), "1\none\n");
+			const writers = fakeLog().filter(entry => entry.event === "write" && entry.path.match(/p[12]\.txt$/));
+			assert.equal(new Set(writers.map(entry => entry.sessionId)).size, 2, "each write came from its own omp");
+		},
+
+		async "Stop in one session leaves the other's review alone"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("s1.txt"), "a\n");
+			fs.writeFileSync(file("s2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("s1.txt"), content: "b\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("s2.txt"), content: "b\n" } }));
+			await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().length === 2, "both diff tabs");
+			one.cancel();
+			await turnOne;
+			await waitFor(() => reviewTabs().length === 1, "session 1's diff tab to close");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewTwo.id, 0);
+			await turnTwo;
+			assert.equal(fs.readFileSync(file("s1.txt"), "utf8"), "a\n");
+			assert.equal(fs.readFileSync(file("s2.txt"), "utf8"), "b\n");
+		},
+
+		async "closing a session's tab ends it and leaves the others running"() {
+			const second = api.sessions.all[1];
+			fs.writeFileSync(file("c.txt"), "a\n");
+			const seen = reviews.length;
+			void second.controller.send(steps({ write: { path: file("c.txt"), content: "b\n" } }));
+			await nextOpenReview(seen, second.controller.id);
+			second.panel.dispose();
+			await waitFor(() => reviewTabs().length === 0, "the closed session's diff tab to close");
+			assert.deepEqual(api.sessions.all.map(session => session.panel.label), ["OMP 1"]);
+			assert.equal(fs.readFileSync(file("c.txt"), "utf8"), "a\n");
+			await controller.send(steps({ elicitUrl: "https://example.com" }));
+			assert.equal(fakeLog().at(-1).event, "elicitUrl", "session 1 still answers");
+		},
+
+		async "closing a tab while omp starts stops that omp"() {
 			const config = vscode.workspace.getConfiguration("omp");
 			const args = config.get("extraArgs");
 			await config.update("extraArgs", [...args, "--init-delay", "1000"], vscode.ConfigurationTarget.Workspace);
 			try {
 				const before = fakeLog().length;
-				const first = api.controller.newSession();
+				const session = await newSession();
 				await sleep(200);
-				await api.controller.newSession();
-				await first;
-				assert.equal(fakeLog().slice(before).filter(entry => entry.event === "session/new").length, 1);
+				session.panel.dispose();
+				await sleep(1500);
+				assert.equal(fakeLog().slice(before).filter(entry => entry.event === "session/new").length, 0);
 			} finally {
 				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
 			}

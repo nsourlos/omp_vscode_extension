@@ -428,21 +428,9 @@
 		stopButton.hidden = state !== "busy";
 	}
 
-	function reset() {
-		pendingRender = null;
-		log.textContent = "";
-		breakFlow();
-		planEl = null;
-		tools.clear();
-		requests.clear();
-		reviews.clear();
-		usageEl.textContent = "";
-	}
-
 	window.addEventListener("message", event => {
 		const msg = event.data;
 		switch (msg.type) {
-			case "reset": return reset();
 			case "user":
 				breakFlow();
 				planEl = null;

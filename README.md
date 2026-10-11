@@ -16,9 +16,10 @@ src/
   omp/agent.ts            starts `omp acp`, session, prompts (no VS Code code)
   omp/policy.ts           prompt text, shell-command warnings, messages back to omp
   review/hunks.ts         split a change into hunks, rebuild from accepted hunks
-  review/reviewManager.ts diff editor, Accept/Reject buttons, review queue
-  chatView.ts + media/    chat panel
-  controller.ts           connects all of the above
+  review/reviewManager.ts diff editor, Accept/Reject buttons, a review queue per session
+  chatPanel.ts + media/   one session's chat tab
+  sessions.ts             open sessions, sidebar launcher
+  controller.ts           runs one session: connects omp, its chat tab and its reviews
 ```
 
 ## Install
@@ -31,7 +32,9 @@ npm run package                                   # builds omp-vscode-0.1.0.vsix
 code --install-extension omp-vscode-0.1.0.vsix --force
 ```
 
-Reload VS Code. Click the **OMP** icon in the left activity bar: the chat opens as a tab next to your files, and the sidebar switches back to the Explorer. The buttons in the chat tab's title bar start a new session, move the chat into its own window, or show the log. **OMP: Open Chat** in the Command Palette does the same as the icon. After changing the code, run the last two commands again.
+Reload VS Code. Click the **OMP** icon in the left activity bar: the chat opens as a tab next to your files, and the sidebar switches back to the Explorer. The buttons in the chat tab's title bar start a new session, move the chat into its own window, or show the log.
+
+**Parallel sessions:** **New Session** opens another chat tab (**OMP 2**, **OMP 3**, …) with its own omp, running independently of the others. Each session has its own Stop button, cards and review queue, so one session's review never waits behind another's. When a session needs an answer while its tab is hidden, the tab title gets a **●**. Closing a tab ends that session: its omp stops and its open reviews are cancelled. If two sessions change the same file, whichever review finishes second is not saved, and that omp is told to read the file again. **OMP: Open Chat** in the Command Palette does the same as the icon. After changing the code, run the last two commands again.
 
 To work on the extension itself, open this folder and press **F5** to start a test window with the current code.
 
@@ -61,7 +64,7 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 - Changes made by shell commands (scripts, `sed -i`, …) skip the diff review. You only see the command approval.
 - "Always allow" on a shell command allows **all** shell commands for the rest of the session (that's how omp groups it).
 - Shell commands run inside omp, not in a VS Code terminal.
-- One chat session per window. **New Session** in the chat tab's title bar restarts omp.
+- All sessions work in the first folder of the workspace.
 
 ## License
 

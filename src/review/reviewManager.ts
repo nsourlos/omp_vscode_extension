@@ -1,7 +1,8 @@
 /**
  * Hunk-by-hunk review of a proposed file change in VS Code's diff editor.
  * Left side: the file as it is now. Right side: omp's proposal, with Accept/Reject
- * CodeLens buttons above every hunk. Reviews are queued and shown one at a time.
+ * CodeLens buttons above every hunk. Each chat session has its own queue, shown one at a time,
+ * so one session's reviews never wait behind another's.
  */
 import * as path from "node:path";
 import * as vscode from "vscode";
@@ -18,6 +19,8 @@ export interface ReviewOutcome {
 
 export interface ReviewInfo {
 	id: string;
+	/** The chat session that proposed the change. */
+	owner: string;
 	displayPath: string;
 	hunkCount: number;
 	state: "queued" | "open" | "done";
@@ -26,6 +29,7 @@ export interface ReviewInfo {
 
 interface ReviewSession {
 	id: string;
+	owner: string;
 	fileUri: vscode.Uri;
 	displayPath: string;
 	original: string;
@@ -41,7 +45,7 @@ interface ReviewSession {
 let nextReviewId = 1;
 
 export class ReviewManager implements vscode.TextDocumentContentProvider, vscode.CodeLensProvider, vscode.Disposable {
-	#queue: ReviewSession[] = [];
+	#queues = new Map<string, ReviewSession[]>();
 	#byId = new Map<string, ReviewSession>();
 	#contentChanged = new vscode.EventEmitter<vscode.Uri>();
 	#lensesChanged = new vscode.EventEmitter<void>();
@@ -93,14 +97,15 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		);
 	}
 
-	/** Queue a review; resolves when the user has decided every hunk. */
-	review(fileUri: vscode.Uri, displayPath: string, original: string, proposed: string): Promise<ReviewOutcome> {
+	/** Queue a review in the owner's queue; resolves when the user has decided every hunk. */
+	review(owner: string, fileUri: vscode.Uri, displayPath: string, original: string, proposed: string): Promise<ReviewOutcome> {
 		const id = String(nextReviewId++);
 		const name = path.basename(fileUri.fsPath);
 		const diff = diffFile(original, proposed);
 		return new Promise<ReviewOutcome>((resolve, reject) => {
 			const session: ReviewSession = {
 				id,
+				owner,
 				fileUri,
 				displayPath,
 				original,
@@ -112,17 +117,19 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 				resolve,
 				reject,
 			};
-			this.#queue.push(session);
+			const queue = this.#queues.get(owner) ?? [];
+			this.#queues.set(owner, queue);
+			queue.push(session);
 			this.#byId.set(id, session);
-			this.#emit(session, this.#queue.length === 1 ? "open" : "queued");
+			this.#emit(session, queue.length === 1 ? "open" : "queued");
 			this.#updateStatusBar();
-			if (this.#queue.length === 1) void this.open(id);
+			if (queue.length === 1) void this.open(id);
 		});
 	}
 
-	/** Show a review (default: the one at the front of the queue). */
+	/** Show a review (default: the first one waiting in any session). */
 	async open(id?: string): Promise<void> {
-		const session = id ? this.#byId.get(id) : this.#queue[0];
+		const session = id ? this.#byId.get(id) : this.#pending()[0];
 		if (!session) {
 			void vscode.window.showInformationMessage("No omp changes are waiting for review.");
 			return;
@@ -135,10 +142,10 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		this.#decorate();
 	}
 
-	/** Fail every queued review, e.g. when the turn is cancelled or omp exits. */
-	cancelAll(reason: string): void {
-		const sessions = this.#queue;
-		this.#queue = []; // emptied first so #finish doesn't open the next review
+	/** Fail every review queued by `owner`, e.g. when its turn is cancelled or its omp exits. */
+	cancelAll(owner: string, reason: string): void {
+		const sessions = this.#queues.get(owner) ?? [];
+		this.#queues.delete(owner); // removed first so #finish doesn't open the next review
 		for (const session of sessions) {
 			this.#finish(session, `cancelled: ${reason}`);
 			session.reject(new Error(reason));
@@ -177,7 +184,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	}
 
 	dispose(): void {
-		this.cancelAll("extension shutting down");
+		for (const owner of [...this.#queues.keys()]) this.cancelAll(owner, "extension shutting down");
 		for (const disposable of this.#disposables) disposable.dispose();
 		this.#statusBar.dispose();
 		this.#acceptedDecoration.dispose();
@@ -189,16 +196,26 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		return this.#byId.get(uri.path.split("/")[1]);
 	}
 
-	/** The review in the focused editor, else the front of the queue. */
+	/** Every waiting review, front of each session's queue first. */
+	#pending(): ReviewSession[] {
+		const queues = [...this.#queues.values()];
+		return [...queues.map(queue => queue[0]), ...queues.flatMap(queue => queue.slice(1))];
+	}
+
+	#isPending(session: ReviewSession): boolean {
+		return this.#queues.get(session.owner)?.includes(session) ?? false;
+	}
+
+	/** The review in the focused editor, else the first one waiting. */
 	#activeSession(): ReviewSession | undefined {
 		const uri = vscode.window.activeTextEditor?.document.uri;
 		const session = uri ? this.#sessionForUri(uri) : undefined;
-		return session && this.#queue.includes(session) ? session : this.#queue[0];
+		return session && this.#isPending(session) ? session : this.#pending()[0];
 	}
 
 	#decide(id: string, index: number, decision: Decision): void {
 		const session = this.#byId.get(id);
-		if (!session || !this.#queue.includes(session)) return;
+		if (!session || !this.#isPending(session)) return;
 		session.decisions[index] = decision;
 		this.#lensesChanged.fire();
 		this.#decorate();
@@ -238,7 +255,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	}
 
 	async #complete(session: ReviewSession): Promise<void> {
-		if (!this.#queue.includes(session)) return;
+		if (!this.#isPending(session)) return;
 		const accepted = session.decisions.map(d => d === "accepted");
 		const acceptedCount = accepted.filter(Boolean).length;
 		this.#finish(session, `${acceptedCount}/${accepted.length} accepted`);
@@ -246,14 +263,16 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	}
 
 	#finish(session: ReviewSession, summary: string): void {
-		this.#queue = this.#queue.filter(s => s !== session);
+		const queue = this.#queues.get(session.owner)?.filter(s => s !== session) ?? [];
+		if (queue.length > 0) this.#queues.set(session.owner, queue);
+		else this.#queues.delete(session.owner);
 		const tabs = vscode.window.tabGroups.all
 			.flatMap(group => group.tabs)
 			.filter(tab => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === session.proposedUri.toString());
 		if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
 		this.#emit(session, "done", summary);
 		this.#updateStatusBar();
-		const next = this.#queue[0];
+		const next = queue[0];
 		if (next) {
 			this.#emit(next, "open");
 			void this.open(next.id);
@@ -278,6 +297,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	#emit(session: ReviewSession, state: ReviewInfo["state"], summary?: string): void {
 		this.#reviewsChanged.fire({
 			id: session.id,
+			owner: session.owner,
 			displayPath: session.displayPath,
 			hunkCount: session.diff.hunks.length,
 			state,
@@ -286,7 +306,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	}
 
 	#updateStatusBar(): void {
-		const count = this.#queue.length;
+		const count = this.#pending().length;
 		if (count === 0) {
 			this.#statusBar.hide();
 			return;

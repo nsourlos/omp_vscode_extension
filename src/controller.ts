@@ -15,7 +15,7 @@ import type {
 	SessionUpdate,
 	WriteTextFileParams,
 } from "./acp/types";
-import type { ChatView } from "./chatView";
+import type { ChatPanel } from "./chatPanel";
 import { OmpAgent, resolveOmpCommand } from "./omp/agent";
 import {
 	DIFF_REVIEWED_TOOLS,
@@ -34,8 +34,11 @@ interface PendingRequest {
 }
 
 let nextRequestId = 1;
+let nextControllerId = 1;
 
+/** Runs one chat session: its own omp process, cards and review queue. */
 export class Controller implements vscode.Disposable {
+	readonly id = String(nextControllerId++);
 	#agent: OmpAgent | undefined;
 	#starting: Promise<OmpAgent> | undefined;
 	#pending = new Map<string, PendingRequest>();
@@ -44,13 +47,15 @@ export class Controller implements vscode.Disposable {
 	#disposables: vscode.Disposable[] = [];
 
 	constructor(
-		private readonly chat: ChatView,
+		private readonly chat: ChatPanel,
 		private readonly reviews: ReviewManager,
-		private readonly output: vscode.OutputChannel,
+		private readonly log: (line: string) => void,
 	) {
 		this.#disposables.push(
 			chat.onMessage(message => this.#onChatMessage(message)),
-			reviews.onDidChangeReview(info => chat.post({ type: "review", info })),
+			reviews.onDidChangeReview(info => {
+				if (info.owner === this.id) chat.post({ type: "review", info });
+			}),
 		);
 	}
 
@@ -72,7 +77,7 @@ export class Controller implements vscode.Disposable {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {
 			this.#busy = false;
-			// A turn cut short by New Session must not report into the fresh chat.
+			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
 	}
@@ -82,9 +87,8 @@ export class Controller implements vscode.Disposable {
 		this.#cancelPending("Stopped by user");
 	}
 
-	async newSession(): Promise<void> {
-		this.#stopAgent("New session started");
-		this.chat.reset();
+	/** Start omp ahead of the first message, so the chat shows Ready and the model settings. */
+	async start(): Promise<void> {
 		try {
 			await this.#ensureAgent();
 		} catch (error) {
@@ -100,7 +104,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	dispose(): void {
-		this.#stopAgent("Extension shutting down");
+		this.#stopAgent("Chat closed");
 		for (const disposable of this.#disposables) disposable.dispose();
 	}
 
@@ -135,13 +139,13 @@ export class Controller implements vscode.Disposable {
 				elicit: params => this.#elicit(params),
 				onSessionUpdate: update => this.#onSessionUpdate(update),
 				onExit: message => this.#onAgentExit(agent, message),
-				log: line => this.output.appendLine(line),
+				log: this.log,
 			},
 		});
 		this.#agent = agent;
 		try {
 			const session = await agent.start();
-			this.output.appendLine(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
+			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
 			this.chat.post({ type: "config", options: agent.configOptions });
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
@@ -172,7 +176,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	#cancelPending(reason: string): void {
-		this.reviews.cancelAll(reason);
+		this.reviews.cancelAll(this.id, reason);
 		for (const [requestId, pending] of this.#pending) {
 			pending.resolve(pending.cancelValue);
 			this.chat.post({ type: "resolved", requestId, label: "Cancelled" });
@@ -189,9 +193,6 @@ export class Controller implements vscode.Disposable {
 				break;
 			case "cancel":
 				this.cancel();
-				break;
-			case "newSession":
-				void this.newSession();
 				break;
 			case "respond": {
 				const pending = this.#pending.get(message.requestId);
@@ -213,7 +214,7 @@ export class Controller implements vscode.Disposable {
 	/** Show a card in the chat and wait for the user's answer. */
 	#ask<T>(card: Record<string, unknown>, cancelValue: T): Promise<T> {
 		const requestId = String(nextRequestId++);
-		this.chat.reveal();
+		this.chat.requestAttention();
 		return new Promise<T>(resolve => {
 			this.#pending.set(requestId, { resolve, cancelValue });
 			this.chat.post({ ...card, requestId });
@@ -261,7 +262,7 @@ export class Controller implements vscode.Disposable {
 			return;
 		}
 
-		const outcome = await this.reviews.review(uri, displayPath, original, params.content);
+		const outcome = await this.reviews.review(this.id, uri, displayPath, original, params.content);
 		if ((await this.#currentText(uri)) !== current) {
 			this.#notice("warning", `${displayPath} changed during the review, so omp's change was not saved.`);
 			throw new RpcError(-32000, staleFileMessage(displayPath));
@@ -306,7 +307,7 @@ export class Controller implements vscode.Disposable {
 	async #elicit(params: ElicitationParams): Promise<ElicitationResult> {
 		if (params.mode === "url") {
 			// Not advertised in clientCapabilities; opening an agent-chosen URL unasked is unsafe.
-			this.output.appendLine(`declined a request to open ${params.url}`);
+			this.log(`declined a request to open ${params.url}`);
 			return { action: "decline" };
 		}
 		const properties = params.requestedSchema?.properties ?? {};
@@ -316,7 +317,7 @@ export class Controller implements vscode.Disposable {
 		if (approval && isApproveDeny) {
 			const config = vscode.workspace.getConfiguration("omp");
 			if (DIFF_REVIEWED_TOOLS.has(approval.toolName) && config.get<boolean>("autoApproveEditPrompts", true)) {
-				this.output.appendLine(`auto-approved ${approval.toolName} (the diff review comes next): ${approval.details}`);
+				this.log(`auto-approved ${approval.toolName} (the diff review comes next): ${approval.details}`);
 				return { action: "accept", content: { value: "Approve" } };
 			}
 			const warn = config.get<boolean>("warnOnShellFileChanges", true) && approval.toolName === "bash";
