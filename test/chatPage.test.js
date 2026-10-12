@@ -174,31 +174,57 @@ test("queued messages show above the input, can be removed, and come back into t
 	assert.equal(input.value, "and the docs\n\na draft", "put back ahead of what was being typed");
 });
 
-test("a chime plays two tones, on audio switched on by the first key press", () => {
-	const tones = [];
-	let device;
+/** A chat page with a stand-in audio device whose permission to play, and clock, the test controls. */
+function openChatWithAudio() {
+	const audio = { devices: [], tones: [], last: null, now: 0 };
 	class FakeAudioContext {
 		state = "suspended";
 		currentTime = 0;
 		destination = {};
 		constructor() {
-			device = this;
+			audio.devices.push(this);
 		}
 		resume() {
-			this.state = "running";
+			return new Promise(resolve => (this.allow = () => resolve((this.state = "running"))));
+		}
+		suspend() {
+			this.state = "suspended";
 			return Promise.resolve();
 		}
 		createOscillator() {
-			const tone = { frequency: {}, connect: node => node, start: () => tones.push(tone.frequency.value), stop() {} };
+			const tone = { frequency: {}, connect: node => node, start: () => audio.tones.push(tone.frequency.value), stop() {} };
+			audio.last = tone;
 			return tone;
 		}
 		createGain() {
 			return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: node => node };
 		}
 	}
-	const chat = openChat(window => (window.AudioContext = FakeAudioContext));
+	const chat = openChat(window => {
+		window.AudioContext = FakeAudioContext;
+		window.Date.now = () => audio.now;
+	});
+	return { chat, audio };
+}
+
+test("audio starts only for a chime, plays two tones, then pauses", async () => {
+	const { chat, audio } = openChatWithAudio();
 	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
-	assert.equal(device.state, "running", "the first key press switches audio on");
+	assert.equal(audio.devices.length, 0, "typing alone starts no audio");
+
 	chat.deliver({ type: "chime" });
-	assert.deepEqual(tones, [880, 1318.5]);
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, [880, 1318.5]);
+	audio.last.onended();
+	assert.equal(audio.devices[0].state, "suspended", "audio pauses once the tones end");
+});
+
+test("a chime that may only play after a later key press is dropped, not played late", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" });
+	audio.now = 5000; // the user comes back and presses a key
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, []);
 });

@@ -200,21 +200,24 @@
 	}
 
 	// ---------- finish chime ----------
-	// Browsers only let a page play sound after the user interacts with it, so the audio
-	// is switched on at the first key press or click and kept for later chimes.
+	// Audio runs only for a chime and pauses after it. A page nobody has typed in or clicked yet
+	// (e.g. one just moved to a new window) is not allowed to play sound until they do; such a
+	// chime is dropped, because playing it on the next key press would come too late to mean anything.
+	const CHIME_DEADLINE_MS = 1000;
 	let audio = null;
 
-	function unlockAudio() {
+	function chime() {
 		if (!window.AudioContext) return; // e.g. the test page
 		audio = audio || new AudioContext();
-		if (audio.state === "suspended") void audio.resume();
+		const asked = Date.now();
+		void audio.resume().then(() => {
+			if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones();
+		});
 	}
 
-	function chime() {
-		unlockAudio();
-		if (!audio) return;
+	function playTones() {
 		const now = audio.currentTime;
-		[880, 1318.5].forEach((frequency, i) => {
+		const tones = [880, 1318.5].map((frequency, i) => {
 			const start = now + i * 0.12;
 			const tone = audio.createOscillator();
 			const volume = audio.createGain();
@@ -225,11 +228,10 @@
 			tone.connect(volume).connect(audio.destination);
 			tone.start(start);
 			tone.stop(start + 0.55);
+			return tone;
 		});
+		tones.at(-1).onended = () => void audio.suspend();
 	}
-
-	document.addEventListener("keydown", unlockAudio);
-	document.addEventListener("pointerdown", unlockAudio);
 
 	// ---------- agent output ----------
 	function onUpdate(update) {
