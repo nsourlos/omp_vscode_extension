@@ -459,8 +459,9 @@ exports.run = async function run() {
 				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
 				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
 
+				const hung = fakeLog().length;
 				const turn = controller.send(steps({ hang: true }));
-				await sleep(200);
+				await waitFor(() => fakeLog().slice(hung).some(e => e.event === "hang"), "omp to be mid-turn");
 				controller.cancel();
 				await turn;
 				assert.equal(chimes(), 1, "no chime after Stop");
@@ -520,8 +521,9 @@ exports.run = async function run() {
 			await turn;
 
 			const kept = steps({ elicitUrl: "https://kept.test" });
+			const hung = fakeLog().length;
 			turn = controller.send(steps({ hang: true }));
-			await sleep(200);
+			await waitFor(() => fakeLog().slice(hung).some(e => e.event === "hang"), "omp to be mid-turn");
 			await controller.send(kept);
 			controller.cancel();
 			await turn;

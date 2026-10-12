@@ -72,6 +72,7 @@ async function runTurn(steps) {
 		} else if (step.update) {
 			send({ method: "session/update", params: { sessionId, update: step.update } });
 		} else if (step.hang) {
+			record({ event: "hang" });
 			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
 			if (cancelled) return "cancelled";
 		} else if (step.exit !== undefined) {
