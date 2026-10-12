@@ -46,8 +46,12 @@ export function codeOfToolInput(rawInput: unknown): string | undefined {
 	const input = rawInput as { code?: unknown; cells?: unknown };
 	if (typeof input.code === "string") return input.code;
 	if (!Array.isArray(input.cells)) return undefined;
-	const codes = input.cells.map(cell => cell?.code).filter((code): code is string => typeof code === "string");
-	return codes.length > 0 ? codes.join("\n\n") : undefined;
+	const codes: string[] = [];
+	for (const cell of input.cells) {
+		if (typeof cell?.code === "string") codes.push(cell.code);
+	}
+	if (codes.length === 0) return undefined;
+	return codes.join("\n\n");
 }
 
 /** The distinct web addresses written out in full in a piece of code, in order. */
