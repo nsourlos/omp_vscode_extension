@@ -100,6 +100,11 @@ test("a browser approval names the page and shows the code behind a toggle", () 
 
 	chat.deliver({ type: "approval", requestId: "11", toolName: "browser", details: "", unclear: true });
 	assert.match(chat.log.querySelectorAll(".card")[2].querySelector(".field-description").textContent, /unclear which page/);
+
+	chat.deliver({ type: "approval", requestId: "12", toolName: "browser", details: "", code, urls: ["https://a.test"], someUrlsHidden: true });
+	const mixed = chat.log.querySelectorAll(".card")[3];
+	assert.equal(mixed.querySelector(".location").textContent, "🌐 https://a.test");
+	assert.match(mixed.querySelector(".field-description").textContent, /built from variables/, "the hidden address is flagged, not silently dropped");
 });
 
 test("a streamed reply renders once per frame, with nothing lost", async () => {

@@ -398,6 +398,7 @@ exports.run = async function run() {
 			};
 			const only = await card(0);
 			assert.deepEqual(only.urls, ["https://example.com/one"], "the one running step that uses the browser");
+			assert.equal(only.someUrlsHidden, false);
 			assert.match(only.code, /tab\.goto/);
 			const otherTool = await card(1);
 			assert.equal(otherTool.code, undefined, "another tool's bare prompt borrows no code");

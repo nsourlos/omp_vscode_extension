@@ -409,6 +409,7 @@ export class Controller implements vscode.Disposable {
 				}
 			}
 			const code = candidates.length === 1 ? candidates[0] : undefined;
+			const found = code ? urlsIn(code) : undefined;
 			const choice = await this.#ask<string | undefined>(
 				{
 					type: "approval",
@@ -416,7 +417,8 @@ export class Controller implements vscode.Disposable {
 					details: approval.details,
 					warning: warn ? fileChangeWarning(approval.details) : undefined,
 					code,
-					urls: code ? urlsIn(code) : undefined,
+					urls: found?.urls,
+					someUrlsHidden: found?.someHidden,
 					unclear: candidates.length > 1,
 				},
 				undefined,

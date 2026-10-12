@@ -54,18 +54,24 @@ export function codeOfToolInput(rawInput: unknown): string | undefined {
 	return codes.join("\n\n");
 }
 
-/** The distinct web addresses written out in full in a piece of code, in order. */
-export function urlsIn(text: string): string[] {
+/**
+ * The distinct web addresses written out in full in a piece of code, in order, and whether any
+ * other address is built from a variable (its real value is not in the code, so it is left out).
+ */
+export function urlsIn(text: string): { urls: string[]; someHidden: boolean } {
 	const urls: string[] = [];
-	for (const match of text.matchAll(/https?:\/\/[^\s"'`<>()[\]{}]+/g)) {
-		// An address built from a variable is left out: the real address is not in the code.
+	let someHidden = false;
+	for (const match of text.matchAll(/https?:\/\/[^\s"'`<>()[\]{}]*/g)) {
 		const after = text.slice(match.index + match[0].length);
-		if (after.startsWith("{")) continue; // `https://${host}`, f"https://{host}", "https://{}".format(host)
-		if (match[0].includes("%s") || match[0].endsWith("%")) continue; // "https://%s" % host, "%(name)s"
-		if (/^["'`]\s*\+/.test(after)) continue; // "https://example.com/" + path
-		urls.push(match[0].replace(/[.,;:]+$/, ""));
+		let built = false;
+		if (match[0].endsWith("//")) built = true; // "https://" + host
+		if (after.startsWith("{")) built = true; // `https://${host}`, f"https://{host}", "https://{}".format(host)
+		if (match[0].includes("%s") || match[0].endsWith("%")) built = true; // "https://%s" % host, "%(name)s"
+		if (/^["'`]\s*\+/.test(after)) built = true; // "https://example.com/" + path
+		if (built) someHidden = true;
+		else urls.push(match[0].replace(/[.,;:]+$/, ""));
 	}
-	return [...new Set(urls)];
+	return { urls: [...new Set(urls)], someHidden };
 }
 
 /** Tools whose output always passes through our diff review before it is saved. */

@@ -416,11 +416,14 @@
 		const node = card(msg.requestId, browser ? "Allow omp to use the browser?" : `Allow tool: ${msg.toolName}?`);
 		if (msg.details) node.appendChild(el("pre", "tool-command", msg.details));
 		for (const url of msg.urls || []) node.appendChild(el("div", "location", "🌐 " + url));
-		if (browser && !msg.urls?.length) {
-			let note = "omp did not say which page.";
-			if (msg.code) note = "No web address in the code below.";
+		if (browser) {
+			let note = null;
+			if (msg.someUrlsHidden) note = "Some web addresses are built from variables and are not shown here: check the code below.";
+			else if (msg.urls?.length) note = null;
+			else if (msg.code) note = "No web address in the code below.";
 			else if (msg.unclear) note = "Several code steps that use the browser are running, so it is unclear which page this is for.";
-			node.appendChild(el("div", "field-description", note));
+			else note = "omp did not say which page.";
+			if (note) node.appendChild(el("div", "field-description", note));
 		}
 		if (msg.code) {
 			const code = node.appendChild(el("details", "tool-output"));

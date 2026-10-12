@@ -61,17 +61,24 @@ test("finds the code of an eval call and the web addresses in it", () => {
 	assert.equal(codeOfToolInput(undefined), undefined);
 
 	const code = `await tab.goto("https://example.com/docs?q=1");\n// see https://example.com/docs?q=1, then http://localhost:3000/a.`;
-	assert.deepEqual(urlsIn(code), ["https://example.com/docs?q=1", "http://localhost:3000/a"]);
-	assert.deepEqual(urlsIn("no links here"), []);
-	assert.deepEqual(urlsIn("tab.goto(`https://${host}/a`); tab.goto(`https://example.com/${path}`)"), [], "JS addresses built from variables");
-	assert.deepEqual(urlsIn('page.goto(f"https://example.com/{path}")'), [], "a Python f-string address");
-	assert.deepEqual(urlsIn('page.goto("https://%s/a" % host); page.goto("https://x.test/%(p)s" % v)'), [], "printf-style placeholders");
-	assert.deepEqual(urlsIn('tab.goto("https://example.com/" + path); tab.goto(\'https://example.com/b\'+x)'), [], "joined with +");
-	assert.deepEqual(urlsIn('tab.goto("https://example.com/{}".format(x))'), [], "str.format");
+	const hidden = { urls: [], someHidden: true };
+	assert.deepEqual(urlsIn(code), { urls: ["https://example.com/docs?q=1", "http://localhost:3000/a"], someHidden: false });
+	assert.deepEqual(urlsIn("no links here"), { urls: [], someHidden: false });
+	assert.deepEqual(urlsIn("tab.goto(`https://${host}/a`); tab.goto(`https://example.com/${path}`)"), hidden, "JS addresses built from variables");
+	assert.deepEqual(urlsIn('page.goto(f"https://example.com/{path}")'), hidden, "a Python f-string address");
+	assert.deepEqual(urlsIn('page.goto("https://%s/a" % host); page.goto("https://x.test/%(p)s" % v)'), hidden, "printf-style placeholders");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/" + path); tab.goto(\'https://example.com/b\'+x)'), hidden, "joined with +");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/{}".format(x))'), hidden, "str.format");
+	assert.deepEqual(urlsIn('tab.goto("https://" + host); page.goto("http://{}".format(h))'), hidden, "only the scheme written out");
 	assert.deepEqual(
 		urlsIn('tab.goto("https://example.com/pay?amount=$5"); tab.goto("https://example.com/a%20b")'),
-		["https://example.com/pay?amount=$5", "https://example.com/a%20b"],
+		{ urls: ["https://example.com/pay?amount=$5", "https://example.com/a%20b"], someHidden: false },
 		"a written-out address with $ or an escaped space is kept",
+	);
+	assert.deepEqual(
+		urlsIn('tab.goto("https://a.test"); tab.goto(`https://${host}`)'),
+		{ urls: ["https://a.test"], someHidden: true },
+		"a written-out address next to a hidden one says that one is hidden",
 	);
 });
 
