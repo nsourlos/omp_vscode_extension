@@ -54,8 +54,11 @@ export function codeOfToolInput(rawInput: unknown): string | undefined {
 export function urlsIn(text: string): string[] {
 	const urls: string[] = [];
 	for (const match of text.matchAll(/https?:\/\/[^\s"'`<>()[\]{}]+/g)) {
-		// Built from a variable (`https://${host}`, f"https://{host}"): the real address is not in the code.
-		if (match[0].includes("$") || text[match.index + match[0].length] === "{") continue;
+		// An address built from a variable is left out: the real address is not in the code.
+		const after = text.slice(match.index + match[0].length);
+		if (after.startsWith("{")) continue; // `https://${host}`, f"https://{host}", "https://{}".format(host)
+		if (match[0].includes("%s") || match[0].endsWith("%")) continue; // "https://%s" % host, "%(name)s"
+		if (/^["'`]\s*\+/.test(after)) continue; // "https://example.com/" + path
 		urls.push(match[0].replace(/[.,;:]+$/, ""));
 	}
 	return [...new Set(urls)];

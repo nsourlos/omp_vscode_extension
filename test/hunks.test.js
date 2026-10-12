@@ -65,6 +65,14 @@ test("finds the code of an eval call and the web addresses in it", () => {
 	assert.deepEqual(urlsIn("no links here"), []);
 	assert.deepEqual(urlsIn("tab.goto(`https://${host}/a`); tab.goto(`https://example.com/${path}`)"), [], "JS addresses built from variables");
 	assert.deepEqual(urlsIn('page.goto(f"https://example.com/{path}")'), [], "a Python f-string address");
+	assert.deepEqual(urlsIn('page.goto("https://%s/a" % host); page.goto("https://x.test/%(p)s" % v)'), [], "printf-style placeholders");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/" + path); tab.goto(\'https://example.com/b\'+x)'), [], "joined with +");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/{}".format(x))'), [], "str.format");
+	assert.deepEqual(
+		urlsIn('tab.goto("https://example.com/pay?amount=$5"); tab.goto("https://example.com/a%20b")'),
+		["https://example.com/pay?amount=$5", "https://example.com/a%20b"],
+		"a written-out address with $ or an escaped space is kept",
+	);
 });
 
 test("tells the agent exactly what was rejected", () => {
