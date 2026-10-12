@@ -133,13 +133,22 @@ exports.run = async function run() {
 			const stopOnOpen = api.reviews.onDidChangeReview(info => {
 				if (info.state === "open" && info.displayPath === "f.txt") controller.cancel();
 			});
+			const opening = [];
+			const open = api.reviews.open;
+			api.reviews.open = (...args) => {
+				const shown = open.apply(api.reviews, args);
+				opening.push(shown);
+				return shown;
+			};
 			try {
 				await controller.send(steps({ write: { path: file("f.txt"), content: "b\n" } }));
 			} finally {
 				stopOnOpen.dispose();
+				delete api.reviews.open;
 			}
-			await sleep(1500); // let the diff finish opening
-			assert.equal(reviewTabs().length, 0);
+			assert.equal(opening.length, 1, "the review's diff was asked to open");
+			await Promise.all(opening);
+			await waitFor(() => reviewTabs().length === 0, "the diff that finished opening after its review ended to close");
 		},
 
 		async "New Session opens another tab with its own omp"() {
@@ -416,6 +425,99 @@ exports.run = async function run() {
 			assert.equal(fs.readFileSync(file("t1.txt"), "utf8"), "b\n");
 		},
 
+		async "a finished or forgotten review's diff never finishes another session's review"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("o1.txt"), "a\n");
+			fs.writeFileSync(file("o2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("o1.txt"), content: "b\n" } }));
+			const ended = await nextOpenReview(seen, one.id);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", ended.id, 0);
+			await turnOne;
+			const turnTwo = two.send(steps({ write: { path: file("o2.txt"), content: "b\n" } }));
+			const live = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().some(tab => tab.input.modified.path.startsWith(`/${live.id}/`)), "session 2's diff");
+			const finished = () => reviews.slice(seen).filter(info => info.state === "done").map(info => info.id);
+			const reviewUri = (id, side, name) => vscode.Uri.from({ scheme: "omp-review", path: `/${id}/${side}/${name}` });
+
+			// A review is forgotten a minute after it ends, but Reopen Closed Editor can still bring its diff back.
+			api.sessions.all[0].panel.reveal();
+			await waitFor(() => !vscode.window.activeTextEditor, "the chat tab to take focus");
+			await vscode.commands.executeCommand("omp.review.rejectAll", reviewUri("0", "proposed", "gone.txt"));
+			assert.deepEqual(finished(), [ended.id], "a forgotten diff's button decides nothing");
+
+			await vscode.commands.executeCommand("vscode.diff", reviewUri(ended.id, "original", "o1.txt"), reviewUri(ended.id, "proposed", "o1.txt"), "ended");
+			await waitFor(() => vscode.window.activeTextEditor?.document.uri.path.startsWith(`/${ended.id}/`), "the finished diff to take focus");
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			assert.deepEqual(finished(), [ended.id], "Accept All on a finished diff decides nothing");
+
+			await vscode.window.tabGroups.close(reviewTabs().filter(tab => tab.input.modified.path.startsWith(`/${ended.id}/`)));
+			await vscode.commands.executeCommand("omp.review.acceptHunk", live.id, 0);
+			await turnTwo;
+			assert.equal(fs.readFileSync(file("o2.txt"), "utf8"), "b\n");
+		},
+
+		async "with one session's diff open and another session's closed, Accept All from the chat decides nothing"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("h1.txt"), "a\n");
+			fs.writeFileSync(file("h2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("h1.txt"), content: "b\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("h2.txt"), content: "b\n" } }));
+			const reviewOne = await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().length === 2, "both diff tabs");
+			await vscode.window.tabGroups.close(reviewTabs().filter(tab => tab.input.modified.path.startsWith(`/${reviewTwo.id}/`)));
+
+			api.sessions.all[1].panel.reveal();
+			await waitFor(() => !vscode.window.activeTextEditor, "session 2's chat to take focus");
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			const finished = reviews.slice(seen).filter(info => info.state === "done");
+			assert.deepEqual(finished, [], "session 1's open diff is not taken for session 2's closed one");
+
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewOne.id, 0);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewTwo.id, 0);
+			await Promise.all([turnOne, turnTwo]);
+		},
+
+		async "Accept All from the chat counts the diffs that are open, not the front of each queue"() {
+			fs.writeFileSync(file("d1.txt"), "a\n");
+			fs.writeFileSync(file("d2.txt"), "a\n");
+			const seen = reviews.length;
+			const turn = controller.send(steps({ writes: ["d1.txt", "d2.txt"].map(name => ({ path: file(name), content: "b\n" })) }));
+			await waitFor(() => reviews.slice(seen).length === 2, "one open and one queued review");
+			const [front, queued] = reviews.slice(seen);
+			const tabOf = info => reviewTabs().find(tab => tab.input.modified.path.startsWith(`/${info.id}/`));
+			await waitFor(() => tabOf(front), "the front review's diff");
+			const finished = () => reviews.slice(seen).filter(info => info.state === "done").map(info => info.id);
+			const focusChat = async () => {
+				api.sessions.all[0].panel.reveal();
+				await waitFor(() => !vscode.window.activeTextEditor, "the chat tab to take focus");
+			};
+
+			await vscode.window.tabGroups.close(tabOf(front));
+			await focusChat();
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			assert.deepEqual(finished(), [], "with no diff open, nothing is decided");
+
+			await api.reviews.open(front.id);
+			await api.reviews.open(queued.id); // what the chat's "Open diff" button does
+			await focusChat();
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			assert.deepEqual(finished(), [], "with both diffs open, nothing is decided");
+
+			await vscode.window.tabGroups.close(tabOf(front));
+			await focusChat();
+			await vscode.commands.executeCommand("omp.review.rejectAll");
+			assert.deepEqual(finished(), [queued.id], "the one diff still open is the one decided");
+
+			await waitFor(() => tabOf(front), "the front review's diff to reopen");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", front.id, 0);
+			await turn;
+			assert.equal(fs.readFileSync(file(front.displayPath), "utf8"), "b\n");
+			assert.equal(fs.readFileSync(file(queued.displayPath), "utf8"), "a\n");
+		},
+
 		async "closing a session's tab ends it and leaves the others running"() {
 			const second = api.sessions.all[1];
 			fs.writeFileSync(file("c.txt"), "a\n");
@@ -449,19 +551,23 @@ exports.run = async function run() {
 		async "moving a chat into its own window keeps the session working"() {
 			const [first] = api.sessions.all;
 			let reloads = 0;
-			first.panel.onMessage(message => message?.type === "ready" && reloads++);
-			await vscode.commands.executeCommand("omp.openInWindow");
-			await sleep(2000);
-			assert.equal(reloads, 1, "the chat page reloaded once, which replays its history");
-			assert.ok(api.sessions.all.includes(first), "the session survived the move");
+			const countReloads = first.panel.onMessage(message => message?.type === "ready" && reloads++);
+			try {
+				await vscode.commands.executeCommand("omp.openInWindow");
+				await waitFor(() => reloads >= 1, "the chat page to reload in its new window");
+				assert.ok(api.sessions.all.includes(first), "the session survived the move");
 
-			fs.writeFileSync(file("mv.txt"), "a\n");
-			const seen = reviews.length;
-			const turn = first.controller.send(steps({ write: { path: file("mv.txt"), content: "b\n" } }));
-			const info = await nextOpenReview(seen);
-			await vscode.commands.executeCommand("omp.review.acceptHunk", info.id, 0);
-			await turn;
-			assert.equal(fs.readFileSync(file("mv.txt"), "utf8"), "b\n");
+				fs.writeFileSync(file("mv.txt"), "a\n");
+				const seen = reviews.length;
+				const turn = first.controller.send(steps({ write: { path: file("mv.txt"), content: "b\n" } }));
+				const info = await nextOpenReview(seen);
+				await vscode.commands.executeCommand("omp.review.acceptHunk", info.id, 0);
+				await turn;
+				assert.equal(fs.readFileSync(file("mv.txt"), "utf8"), "b\n");
+				assert.equal(reloads, 1, "the chat page reloaded once, which replays its history");
+			} finally {
+				countReloads.dispose();
+			}
 		},
 	};
 

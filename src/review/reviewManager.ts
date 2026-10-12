@@ -209,19 +209,21 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	}
 
 	/**
-	 * The review in the focused editor, else the only one with its diff open (the front of each
-	 * session's queue). With several open and none focused, guessing could finish another
-	 * session's review, so the user is asked to pick one.
+	 * The review whose diff was clicked or has focus, else the only one with its diff open while a
+	 * single session has reviews waiting. A diff of a finished review decides nothing, and any other
+	 * guess could finish another session's review, so the user is asked to pick one.
 	 */
 	#activeSession(target?: unknown): ReviewSession | undefined {
-		const clicked = target instanceof vscode.Uri ? this.#sessionForUri(target) : undefined;
-		if (clicked) return this.#isPending(clicked) ? clicked : undefined;
-		const uri = vscode.window.activeTextEditor?.document.uri;
-		const session = uri ? this.#sessionForUri(uri) : undefined;
-		if (session && this.#isPending(session)) return session;
-		const open = [...this.#queues.values()].map(queue => queue[0]);
-		if (open.length === 1) return open[0];
-		if (open.length > 1) void vscode.window.showInformationMessage("Several omp reviews are open. Click into the diff you want to finish first.");
+		const uri = target instanceof vscode.Uri ? target : vscode.window.activeTextEditor?.document.uri;
+		if (uri?.scheme === REVIEW_SCHEME) {
+			const session = this.#sessionForUri(uri);
+			return session && this.#isPending(session) ? session : undefined;
+		}
+		const pending = this.#pending();
+		const open = pending.filter(session => this.#tabsOf(session).length > 0);
+		if (open.length === 1 && this.#queues.size === 1) return open[0];
+		if (open.length > 0) void vscode.window.showInformationMessage("Several omp reviews are waiting. Click into the diff you want to finish first.");
+		else if (pending.length > 0) void vscode.window.showInformationMessage("No omp review is open. Open one from the chat or the status bar first.");
 		return undefined;
 	}
 
@@ -290,10 +292,14 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		setTimeout(() => this.#byId.delete(session.id), 60_000);
 	}
 
-	#closeTabs(session: ReviewSession): void {
-		const tabs = vscode.window.tabGroups.all
+	#tabsOf(session: ReviewSession): vscode.Tab[] {
+		return vscode.window.tabGroups.all
 			.flatMap(group => group.tabs)
 			.filter(tab => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === session.proposedUri.toString());
+	}
+
+	#closeTabs(session: ReviewSession): void {
+		const tabs = this.#tabsOf(session);
 		if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
 	}
 
