@@ -63,6 +63,8 @@ test("finds the code of an eval call and the web addresses in it", () => {
 	const code = `await tab.goto("https://example.com/docs?q=1");\n// see https://example.com/docs?q=1, then http://localhost:3000/a.`;
 	assert.deepEqual(urlsIn(code), ["https://example.com/docs?q=1", "http://localhost:3000/a"]);
 	assert.deepEqual(urlsIn("no links here"), []);
+	assert.deepEqual(urlsIn("tab.goto(`https://${host}/a`); tab.goto(`https://example.com/${path}`)"), [], "JS addresses built from variables");
+	assert.deepEqual(urlsIn('page.goto(f"https://example.com/{path}")'), [], "a Python f-string address");
 });
 
 test("tells the agent exactly what was rejected", () => {

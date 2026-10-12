@@ -50,9 +50,14 @@ export function codeOfToolInput(rawInput: unknown): string | undefined {
 	return codes.length > 0 ? codes.join("\n\n") : undefined;
 }
 
-/** The distinct web addresses written in a piece of code, in order. */
+/** The distinct web addresses written out in full in a piece of code, in order. */
 export function urlsIn(text: string): string[] {
-	const urls = (text.match(/https?:\/\/[^\s"'`<>()[\]{}]+/g) ?? []).map(url => url.replace(/[.,;:]+$/, ""));
+	const urls: string[] = [];
+	for (const match of text.matchAll(/https?:\/\/[^\s"'`<>()[\]{}]+/g)) {
+		// Built from a variable (`https://${host}`, f"https://{host}"): the real address is not in the code.
+		if (match[0].includes("$") || text[match.index + match[0].length] === "{") continue;
+		urls.push(match[0].replace(/[.,;:]+$/, ""));
+	}
 	return [...new Set(urls)];
 }
 
