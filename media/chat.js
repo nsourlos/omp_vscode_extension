@@ -179,6 +179,7 @@
 	}
 
 	function setDoing(text) {
+		if (text === doing) return; // called on every streamed chunk
 		doing = text;
 		showActivity();
 	}

@@ -173,6 +173,17 @@ test("Stop shows while omp starts for a sent message, but not while it starts on
 	assert.equal(stop.hidden, true);
 });
 
+test("streamed chunks leave the activity line alone while its label stays the same", async () => {
+	const chat = openChat();
+	chat.deliver({ type: "status", state: "busy" }, chunk("a"));
+	const changes = [];
+	new chat.window.MutationObserver(records => changes.push(...records)).observe(chat.activity, { childList: true, characterData: true, subtree: true });
+	chat.deliver(chunk("b"), chunk("c"), chunk("d"));
+	await Promise.resolve();
+	assert.equal(changes.length, 0);
+	chat.deliver({ type: "status", state: "idle" });
+});
+
 test("a card or review left open by an earlier turn does not stick to the next one", () => {
 	const chat = openChat();
 	const review = { type: "review", info: { id: "r9", state: "open", displayPath: "a.ts", hunkCount: 1 } };
