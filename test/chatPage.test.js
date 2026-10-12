@@ -84,6 +84,20 @@ test("approval cards send Approve or Deny with a label", () => {
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "Deny", label: "Denied" });
 });
 
+test("a browser approval names the page and shows the code behind a toggle", () => {
+	const chat = openChat();
+	const code = 'await tab.goto("https://example.com/a")';
+	chat.deliver({ type: "approval", requestId: "9", toolName: "browser", details: "", code, urls: ["https://example.com/a"] });
+	const card = chat.log.querySelector(".card");
+	assert.equal(card.querySelector(".card-heading").textContent, "Allow omp to use the browser?");
+	assert.equal(card.querySelector(".location").textContent, "🌐 https://example.com/a");
+	assert.equal(card.querySelector("details pre").textContent, code);
+	assert.equal(card.querySelector("details").open, false, "the code starts folded");
+
+	chat.deliver({ type: "approval", requestId: "10", toolName: "browser", details: "" });
+	assert.equal(chat.log.querySelectorAll(".card")[1].querySelector(".field-description").textContent, "omp did not say which page.");
+});
+
 test("a streamed reply renders once per frame, with nothing lost", async () => {
 	const chat = openChat();
 	const words = Array.from({ length: 500 }, (_, i) => `w${i} `);

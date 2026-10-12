@@ -40,6 +40,22 @@ export function parseApprovalMessage(message: string): { toolName: string; detai
 	return { toolName: match[1], details: match[2].trim() };
 }
 
+/** The code an eval tool call runs (one `code` string, or `cells` each with code), or undefined. */
+export function codeOfToolInput(rawInput: unknown): string | undefined {
+	if (typeof rawInput !== "object" || rawInput === null) return undefined;
+	const input = rawInput as { code?: unknown; cells?: unknown };
+	if (typeof input.code === "string") return input.code;
+	if (!Array.isArray(input.cells)) return undefined;
+	const codes = input.cells.map(cell => cell?.code).filter((code): code is string => typeof code === "string");
+	return codes.length > 0 ? codes.join("\n\n") : undefined;
+}
+
+/** The distinct web addresses written in a piece of code, in order. */
+export function urlsIn(text: string): string[] {
+	const urls = (text.match(/https?:\/\/[^\s"'`<>()[\]{}]+/g) ?? []).map(url => url.replace(/[.,;:]+$/, ""));
+	return [...new Set(urls)];
+}
+
 /** Tools whose output always passes through our diff review before it is saved. */
 export const DIFF_REVIEWED_TOOLS = new Set(["edit", "write"]);
 

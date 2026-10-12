@@ -20,10 +20,12 @@ import { OmpAgent, resolveOmpCommand } from "./omp/agent";
 import {
 	DIFF_REVIEWED_TOOLS,
 	PREFER_EDIT_TOOL_PROMPT,
+	codeOfToolInput,
 	fileChangeWarning,
 	parseApprovalMessage,
 	rejectionMessage,
 	staleFileMessage,
+	urlsIn,
 } from "./omp/policy";
 import { applyDecisions } from "./review/hunks";
 import type { ReviewManager } from "./review/reviewManager";
@@ -43,6 +45,8 @@ export class Controller implements vscode.Disposable {
 	#starting: Promise<OmpAgent> | undefined;
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
+	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
+	#runningCode = new Map<string, string>();
 	#lastNotice: string | undefined;
 	#disposables: vscode.Disposable[] = [];
 
@@ -66,6 +70,7 @@ export class Controller implements vscode.Disposable {
 		}
 		this.#busy = true;
 		this.#lastNotice = undefined;
+		this.#runningCode.clear();
 		this.chat.post({ type: "user", text });
 		this.chat.post({ type: "status", state: "busy" });
 		let agent: OmpAgent | undefined;
@@ -242,6 +247,11 @@ export class Controller implements vscode.Disposable {
 			this.chat.post({ type: "config", options: update.configOptions });
 			return;
 		}
+		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+			const code = codeOfToolInput(update.rawInput);
+			if (update.status === "completed" || update.status === "failed") this.#runningCode.delete(update.toolCallId);
+			else if (code) this.#runningCode.set(update.toolCallId, code);
+		}
 		this.chat.post({ type: "update", update });
 	}
 
@@ -325,12 +335,15 @@ export class Controller implements vscode.Disposable {
 				return { action: "accept", content: { value: "Approve" } };
 			}
 			const warn = config.get<boolean>("warnOnShellFileChanges", true) && approval.toolName === "bash";
+			const code = approval.details ? undefined : [...this.#runningCode.values()].at(-1);
 			const choice = await this.#ask<string | undefined>(
 				{
 					type: "approval",
 					toolName: approval.toolName,
 					details: approval.details,
 					warning: warn ? fileChangeWarning(approval.details) : undefined,
+					code,
+					urls: code ? urlsIn(code) : undefined,
 				},
 				undefined,
 			);

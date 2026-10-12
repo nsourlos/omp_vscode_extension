@@ -7,6 +7,7 @@
 //   {"permission": "<command>"}     ask permission to run a shell command
 //   {"approve": "<tool>\n<details>"} send omp's "Allow tool" approval prompt
 //   {"say": "<text>"}               stream a message chunk
+//   {"update": {...}}               send this session/update as is (e.g. a tool_call)
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
@@ -68,6 +69,8 @@ async function runTurn(steps) {
 			record({ event: "approve", result: reply.result });
 		} else if (step.say) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
+		} else if (step.update) {
+			send({ method: "session/update", params: { sessionId, update: step.update } });
 		} else if (step.hang) {
 			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
 			if (cancelled) return "cancelled";

@@ -397,8 +397,18 @@
 	}
 
 	function onApproval(msg) {
-		const node = card(msg.requestId, `Allow tool: ${msg.toolName}?`);
+		const browser = msg.toolName === "browser";
+		const node = card(msg.requestId, browser ? "Allow omp to use the browser?" : `Allow tool: ${msg.toolName}?`);
 		if (msg.details) node.appendChild(el("pre", "tool-command", msg.details));
+		for (const url of msg.urls || []) node.appendChild(el("div", "location", "🌐 " + url));
+		if (browser && !msg.urls?.length) {
+			node.appendChild(el("div", "field-description", msg.code ? "No web address in the code below." : "omp did not say which page."));
+		}
+		if (msg.code) {
+			const code = node.appendChild(el("details", "tool-output"));
+			code.appendChild(el("summary", "", "Code it will run"));
+			code.appendChild(el("pre", "", truncate(msg.code)));
+		}
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));
 		buttons.appendChild(el("button", "", "Approve")).addEventListener("click", () => respond(msg.requestId, "Approve", "Approved"));

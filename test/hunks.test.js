@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { applyDecisions, diffFile, fileChangeWarning, parseApprovalMessage, rejectionMessage } = require("../dist/core.js");
+const {
+	applyDecisions,
+	codeOfToolInput,
+	diffFile,
+	fileChangeWarning,
+	parseApprovalMessage,
+	rejectionMessage,
+	urlsIn,
+} = require("../dist/core.js");
 
 const original = 'def greet():\n    print("Hi")\n\n\ndef add(a, b):\n    return a + b\n';
 const proposed = 'def greet():\n    print("Hello")\n\n\ndef add(a, b):\n    """Sum."""\n    return a + b\n';
@@ -44,6 +52,17 @@ test("flags shell commands that change files", () => {
 test("parses omp approval prompts", () => {
 	assert.deepEqual(parseApprovalMessage("Allow tool: edit\nFile: demo.py"), { toolName: "edit", details: "File: demo.py" });
 	assert.equal(parseApprovalMessage("Pick a color"), undefined);
+});
+
+test("finds the code of an eval call and the web addresses in it", () => {
+	assert.equal(codeOfToolInput({ code: "x = 1" }), "x = 1");
+	assert.equal(codeOfToolInput({ cells: [{ code: "a()" }, { title: "no code" }, { code: "b()" }] }), "a()\n\nb()");
+	assert.equal(codeOfToolInput({ command: "ls" }), undefined);
+	assert.equal(codeOfToolInput(undefined), undefined);
+
+	const code = `await tab.goto("https://example.com/docs?q=1");\n// see https://example.com/docs?q=1, then http://localhost:3000/a.`;
+	assert.deepEqual(urlsIn(code), ["https://example.com/docs?q=1", "http://localhost:3000/a"]);
+	assert.deepEqual(urlsIn("no links here"), []);
 });
 
 test("tells the agent exactly what was rejected", () => {

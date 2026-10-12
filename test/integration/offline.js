@@ -354,6 +354,28 @@ exports.run = async function run() {
 			assert.deepEqual(permission.result, { outcome: { outcome: "selected", optionId: "allow_once" } });
 		},
 
+		async "a bare browser approval shows the page from the code omp is running"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const evalCall = status => ({
+				sessionUpdate: status ? "tool_call_update" : "tool_call",
+				toolCallId: "eval-1",
+				kind: "other",
+				status: status ?? "in_progress",
+				rawInput: { language: "js", code: 'const tab = await browser.open();\nawait tab.goto("https://example.com/page");' },
+			});
+			const turn = controller.send(steps({ update: evalCall() }, { approve: "browser" }, { update: evalCall("completed") }, { approve: "browser" }));
+			const first = await waitFor(() => posts.slice(seen).find(m => m.type === "approval"), "the browser card");
+			assert.deepEqual(first.urls, ["https://example.com/page"]);
+			assert.match(first.code, /tab\.goto/);
+			respond(panel, first, "Approve", "Approved");
+			const second = await waitFor(() => posts.slice(seen).filter(m => m.type === "approval")[1], "the second browser card");
+			assert.equal(second.code, undefined, "a finished call's code is not shown");
+			respond(panel, second, "Deny", "Denied");
+			await turn;
+		},
+
 		async "a hidden session that needs an answer marks its tab and doesn't cover another session"() {
 			const [first, second] = api.sessions.all;
 			first.panel.reveal();
