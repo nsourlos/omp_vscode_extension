@@ -97,6 +97,9 @@ test("a browser approval names the page and shows the code behind a toggle", () 
 
 	chat.deliver({ type: "approval", requestId: "10", toolName: "browser", details: "" });
 	assert.equal(chat.log.querySelectorAll(".card")[1].querySelector(".field-description").textContent, "omp did not say which page.");
+
+	chat.deliver({ type: "approval", requestId: "11", toolName: "browser", details: "", unclear: true });
+	assert.match(chat.log.querySelectorAll(".card")[2].querySelector(".field-description").textContent, /unclear which page/);
 });
 
 test("a streamed reply renders once per frame, with nothing lost", async () => {

@@ -403,7 +403,10 @@
 		if (msg.details) node.appendChild(el("pre", "tool-command", msg.details));
 		for (const url of msg.urls || []) node.appendChild(el("div", "location", "🌐 " + url));
 		if (browser && !msg.urls?.length) {
-			node.appendChild(el("div", "field-description", msg.code ? "No web address in the code below." : "omp did not say which page."));
+			let note = "omp did not say which page.";
+			if (msg.code) note = "No web address in the code below.";
+			else if (msg.unclear) note = "Several code steps that use the browser are running, so it is unclear which page this is for.";
+			node.appendChild(el("div", "field-description", note));
 		}
 		if (msg.code) {
 			const code = node.appendChild(el("details", "tool-output"));

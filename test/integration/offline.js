@@ -367,25 +367,46 @@ exports.run = async function run() {
 			assert.deepEqual(permission.result, { outcome: { outcome: "selected", optionId: "allow_once" } });
 		},
 
-		async "a bare browser approval shows the page from the code omp is running"() {
+		async "a browser approval shows the page only when one running code step can be the one asking"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);
 			const seen = posts.length;
-			const evalCall = status => ({
+			const evalCall = (id, page, status) => ({
 				sessionUpdate: status ? "tool_call_update" : "tool_call",
-				toolCallId: "eval-1",
+				toolCallId: id,
 				kind: "other",
 				status: status ?? "in_progress",
-				rawInput: { language: "js", code: 'const tab = await browser.open();\nawait tab.goto("https://example.com/page");' },
+				rawInput: { language: "js", code: `const tab = await browser.open();\nawait tab.goto("https://example.com/${page}");` },
 			});
-			const turn = controller.send(steps({ update: evalCall() }, { approve: "browser" }, { update: evalCall("completed") }, { approve: "browser" }));
-			const first = await waitFor(() => posts.slice(seen).find(m => m.type === "approval"), "the browser card");
-			assert.deepEqual(first.urls, ["https://example.com/page"]);
-			assert.match(first.code, /tab\.goto/);
-			respond(panel, first, "Approve", "Approved");
-			const second = await waitFor(() => posts.slice(seen).filter(m => m.type === "approval")[1], "the second browser card");
-			assert.equal(second.code, undefined, "a finished call's code is not shown");
-			respond(panel, second, "Deny", "Denied");
+			const turn = controller.send(
+				steps(
+					{ update: evalCall("e1", "one") },
+					{ update: { ...evalCall("e2", "plain"), rawInput: { code: "1 + 1" } } },
+					{ approve: "browser" },
+					{ approve: "mcp__x" },
+					{ update: evalCall("e3", "three") },
+					{ approve: "browser" },
+					{ update: evalCall("e1", "one", "completed") },
+					{ update: evalCall("e3", "three", "completed") },
+					{ approve: "browser" },
+				),
+			);
+			const card = async n => {
+				const found = await waitFor(() => posts.slice(seen).filter(m => m.type === "approval")[n], `approval card ${n + 1}`);
+				respond(panel, found, "Deny", "Denied");
+				return found;
+			};
+			const only = await card(0);
+			assert.deepEqual(only.urls, ["https://example.com/one"], "the one running step that uses the browser");
+			assert.match(only.code, /tab\.goto/);
+			const otherTool = await card(1);
+			assert.equal(otherTool.code, undefined, "another tool's bare prompt borrows no code");
+			const two = await card(2);
+			assert.equal(two.code, undefined, "with two browser steps running, neither is guessed");
+			assert.equal(two.unclear, true);
+			const none = await card(3);
+			assert.equal(none.code, undefined, "a finished step's code is not shown");
+			assert.equal(none.unclear, false);
 			await turn;
 		},
 

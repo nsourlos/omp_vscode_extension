@@ -380,7 +380,11 @@ export class Controller implements vscode.Disposable {
 				return { action: "accept", content: { value: "Approve" } };
 			}
 			const warn = config.get<boolean>("warnOnShellFileChanges", true) && approval.toolName === "bash";
-			const code = approval.details ? undefined : [...this.#runningCode.values()].at(-1);
+			// omp's browser prompt names no page, so show the code that asked, but only when
+			// exactly one running code step uses the browser: a guess could show the wrong page.
+			const candidates =
+				approval.toolName === "browser" ? [...this.#runningCode.values()].filter(code => /\bbrowser\b/.test(code)) : [];
+			const code = candidates.length === 1 ? candidates[0] : undefined;
 			const choice = await this.#ask<string | undefined>(
 				{
 					type: "approval",
@@ -389,6 +393,7 @@ export class Controller implements vscode.Disposable {
 					warning: warn ? fileChangeWarning(approval.details) : undefined,
 					code,
 					urls: code ? urlsIn(code) : undefined,
+					unclear: candidates.length > 1,
 				},
 				undefined,
 			);
