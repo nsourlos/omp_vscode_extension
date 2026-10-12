@@ -88,9 +88,10 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 			vscode.commands.registerCommand("omp.review.rejectHunk", (id: string, index: number) =>
 				this.#decide(id, index, "rejected"),
 			),
-			vscode.commands.registerCommand("omp.review.acceptAll", () => this.#decideAll("accepted")),
-			vscode.commands.registerCommand("omp.review.rejectAll", () => this.#decideAll("rejected")),
-			vscode.commands.registerCommand("omp.review.submit", () => this.#submitActive()),
+			// Title-bar buttons pass the address of their own diff; the Command Palette passes nothing.
+			vscode.commands.registerCommand("omp.review.acceptAll", (target?: unknown) => this.#decideAll("accepted", target)),
+			vscode.commands.registerCommand("omp.review.rejectAll", (target?: unknown) => this.#decideAll("rejected", target)),
+			vscode.commands.registerCommand("omp.review.submit", (target?: unknown) => this.#submitActive(target)),
 			vscode.commands.registerCommand("omp.review.open", (id?: string) => this.open(id)),
 			vscode.commands.registerCommand("omp.review.acceptAtCursor", () => this.#decideAtCursor("accepted")),
 			vscode.commands.registerCommand("omp.review.rejectAtCursor", () => this.#decideAtCursor("rejected")),
@@ -212,7 +213,9 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 	 * session's queue). With several open and none focused, guessing could finish another
 	 * session's review, so the user is asked to pick one.
 	 */
-	#activeSession(): ReviewSession | undefined {
+	#activeSession(target?: unknown): ReviewSession | undefined {
+		const clicked = target instanceof vscode.Uri ? this.#sessionForUri(target) : undefined;
+		if (clicked) return this.#isPending(clicked) ? clicked : undefined;
 		const uri = vscode.window.activeTextEditor?.document.uri;
 		const session = uri ? this.#sessionForUri(uri) : undefined;
 		if (session && this.#isPending(session)) return session;
@@ -249,15 +252,15 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		this.#decide(session.id, hunk.index, decision);
 	}
 
-	#decideAll(decision: Decision): void {
-		const session = this.#activeSession();
+	#decideAll(decision: Decision, target?: unknown): void {
+		const session = this.#activeSession(target);
 		if (!session) return;
 		session.decisions = session.decisions.map(() => decision);
 		void this.#complete(session);
 	}
 
-	#submitActive(): void {
-		const session = this.#activeSession();
+	#submitActive(target?: unknown): void {
+		const session = this.#activeSession(target);
 		if (!session) return;
 		session.decisions = session.decisions.map(d => (d === "pending" ? "accepted" : d));
 		void this.#complete(session);

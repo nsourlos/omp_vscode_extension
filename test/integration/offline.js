@@ -390,6 +390,32 @@ exports.run = async function run() {
 			assert.equal(posts.filter(m => m.type === "status").at(-1).state, "idle");
 		},
 
+		async "a diff's title-bar button acts on that diff, even when another one has focus"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("t1.txt"), "a\n");
+			fs.writeFileSync(file("t2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("t1.txt"), content: "b\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("t2.txt"), content: "b\n" } }));
+			const reviewOne = await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			await waitFor(() => reviewTabs().length === 2, "both diff tabs");
+			await api.reviews.open(reviewOne.id);
+			await waitFor(() => vscode.window.activeTextEditor?.document.uri.path.startsWith(`/${reviewOne.id}/`), "session 1's diff to take focus");
+
+			// VS Code calls a title-bar button's command with the address of that editor's file.
+			const buttonTarget = reviewTabs().find(tab => tab.input.modified.path.startsWith(`/${reviewTwo.id}/`)).input.modified;
+			await vscode.commands.executeCommand("omp.review.rejectAll", buttonTarget);
+			await turnTwo;
+			const finished = reviews.slice(seen).filter(info => info.state === "done").map(info => info.id);
+			assert.deepEqual(finished, [reviewTwo.id], "the button finished its own diff, not the focused one");
+			assert.equal(fs.readFileSync(file("t2.txt"), "utf8"), "a\n");
+
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			await turnOne;
+			assert.equal(fs.readFileSync(file("t1.txt"), "utf8"), "b\n");
+		},
+
 		async "closing a session's tab ends it and leaves the others running"() {
 			const second = api.sessions.all[1];
 			fs.writeFileSync(file("c.txt"), "a\n");
