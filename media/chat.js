@@ -188,6 +188,8 @@
 		busySince = Date.now();
 		doing = "Working…";
 		runningTools.clear();
+		waitingCards.clear();
+		waitingReviews.clear();
 		activityEl.hidden = false;
 		activityTimer = setInterval(showActivity, 1000);
 		showActivity();

@@ -155,6 +155,15 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.equal(shown(), null);
 });
 
+test("a card or review left open by an earlier turn does not stick to the next one", () => {
+	const chat = openChat();
+	const review = { type: "review", info: { id: "r9", state: "open", displayPath: "a.ts", hunkCount: 1 } };
+	chat.deliver({ type: "status", state: "busy" }, permission, review, { type: "status", state: "idle" });
+	chat.deliver({ type: "status", state: "busy" });
+	assert.match(chat.activity.textContent, /^Working…/);
+	chat.deliver({ type: "status", state: "idle" });
+});
+
 test("queued messages show above the input, can be removed, and come back into the input", () => {
 	const chat = openChat();
 	const queue = chat.window.document.getElementById("queue");
