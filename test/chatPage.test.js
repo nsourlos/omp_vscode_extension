@@ -269,6 +269,22 @@ test("a dropped chime does not silence the next one when both get audio at once"
 	assert.equal(audio.devices[0].state, "running", "the late first chime did not pause the second one's audio");
 });
 
+test("an earlier chime ending does not pause a newer one still playing", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" });
+	audio.devices[0].allow();
+	await Promise.resolve();
+	const firstChimeEnd = audio.last;
+	chat.deliver({ type: "chime" });
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.equal(audio.tones.length, 4, "both chimes played");
+	firstChimeEnd.onended();
+	assert.equal(audio.devices[0].state, "running", "the second chime keeps its audio");
+	audio.last.onended();
+	assert.equal(audio.devices[0].state, "suspended", "the newest chime's end pauses audio");
+});
+
 test("a chime whose audio cannot start is reported, not thrown", async () => {
 	const { chat } = openChatWithAudio();
 	const warnings = [];

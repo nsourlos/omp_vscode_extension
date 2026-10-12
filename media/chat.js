@@ -218,14 +218,14 @@
 			() => {
 				// A dropped chime's resume can complete together with a newer chime's: leave the audio to that one.
 				if (id !== chimeCount) return;
-				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones();
+				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones(id);
 				else void audio.suspend();
 			},
 			error => console.warn("OMP: could not play the finish chime", error),
 		);
 	}
 
-	function playTones() {
+	function playTones(id) {
 		const now = audio.currentTime;
 		const tones = [880, 1318.5].map((frequency, i) => {
 			const start = now + i * 0.12;
@@ -240,7 +240,9 @@
 			tone.stop(start + 0.55);
 			return tone;
 		});
-		tones.at(-1).onended = () => void audio.suspend();
+		tones.at(-1).onended = () => {
+			if (id === chimeCount) void audio.suspend(); // a newer chime may still be playing
+		};
 	}
 
 	// ---------- agent output ----------
