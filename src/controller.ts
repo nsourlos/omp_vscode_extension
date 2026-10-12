@@ -35,7 +35,13 @@ interface PendingRequest {
 	cancelValue: unknown;
 }
 
+interface QueuedMessage {
+	id: string;
+	text: string;
+}
+
 let nextRequestId = 1;
+let nextQueuedId = 1;
 let nextControllerId = 1;
 
 /** Runs one chat session: its own omp process, cards and review queue. */
@@ -47,6 +53,7 @@ export class Controller implements vscode.Disposable {
 	#busy = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
+	#queue: QueuedMessage[] = [];
 	#lastNotice: string | undefined;
 	#disposables: vscode.Disposable[] = [];
 
@@ -63,9 +70,16 @@ export class Controller implements vscode.Disposable {
 		);
 	}
 
+	/**
+	 * Run one turn. A message sent while a turn runs waits in a queue, because omp's ACP mode
+	 * cancels the running turn when a second prompt arrives; queued messages go together as
+	 * the next turn, and the chime waits for that one.
+	 */
 	async send(text: string): Promise<void> {
 		if (this.#busy) {
-			this.#notice("warning", "omp is still working. Press Stop first.");
+			const id = String(nextQueuedId++);
+			this.#queue.push({ id, text });
+			this.chat.post({ type: "queued", id, text });
 			return;
 		}
 		this.#busy = true;
@@ -74,26 +88,53 @@ export class Controller implements vscode.Disposable {
 		this.chat.post({ type: "user", text });
 		this.chat.post({ type: "status", state: "busy" });
 		let agent: OmpAgent | undefined;
+		let finished = false;
 		try {
 			agent = await this.#ensureAgent();
 			const result = await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
-			if (result.stopReason !== "cancelled" && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
-				this.chat.notify({ type: "chime" });
-			}
+			finished = result.stopReason !== "cancelled";
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {
 			this.#busy = false;
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
-			this.chat.markFinished();
+		}
+		if (finished && this.#queue.length > 0) {
+			const queued = this.#takeQueue();
+			return this.send(queued.map(message => message.text).join("\n\n"));
+		}
+		this.#returnQueueToInput();
+		this.chat.markFinished();
+		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
+			this.chat.notify({ type: "chime" });
 		}
 	}
 
+	/** Stop the turn; queued messages go back into the input box rather than being sent. */
 	cancel(): void {
+		this.#returnQueueToInput();
 		this.#agent?.cancel();
 		this.#cancelPending("Stopped by user");
+	}
+
+	#takeQueue(): QueuedMessage[] {
+		const queued = this.#queue;
+		this.#queue = [];
+		if (queued.length > 0) this.chat.post({ type: "dequeued", ids: queued.map(message => message.id) });
+		return queued;
+	}
+
+	#returnQueueToInput(): void {
+		const queued = this.#takeQueue();
+		if (queued.length > 0) this.chat.notify({ type: "restoreInput", text: queued.map(message => message.text).join("\n\n") });
+	}
+
+	#unqueue(id: string): void {
+		const before = this.#queue.length;
+		this.#queue = this.#queue.filter(message => message.id !== id);
+		if (this.#queue.length < before) this.chat.post({ type: "dequeued", ids: [id] });
 	}
 
 	/** Start omp ahead of the first message, so the chat shows Ready and the model settings. */
@@ -113,6 +154,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.#queue = [];
 		this.#stopAgent("Chat closed");
 		for (const disposable of this.#disposables) disposable.dispose();
 	}
@@ -202,6 +244,9 @@ export class Controller implements vscode.Disposable {
 				break;
 			case "cancel":
 				this.cancel();
+				break;
+			case "unqueue":
+				this.#unqueue(message.id);
 				break;
 			case "respond": {
 				const pending = this.#pending.get(message.requestId);

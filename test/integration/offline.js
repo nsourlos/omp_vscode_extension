@@ -59,6 +59,19 @@ exports.run = async function run() {
 		}
 		return panel.recorded;
 	};
+	/** Every one-off message (chimes, text put back in the input) sent to this chat tab, from the first call on. */
+	const notificationsOf = panel => {
+		if (!panel.notified) {
+			const sent = [];
+			const notify = panel.notify.bind(panel);
+			panel.notify = message => {
+				sent.push(message);
+				notify(message);
+			};
+			panel.notified = sent;
+		}
+		return panel.notified;
+	};
 	const respond = (panel, card, value, label) => panel.receive({ type: "respond", requestId: card.requestId, value, label });
 	const tabLabel = panel =>
 		allTabs().find(tab => tab.input instanceof vscode.TabInputWebview && tab.label.endsWith(panel.label))?.label;
@@ -416,31 +429,84 @@ exports.run = async function run() {
 
 		async "a finished reply chimes once, unless stopped or switched off, and the chime is never replayed"() {
 			const panel = api.sessions.all[0].panel;
-			const chimes = [];
-			const notify = panel.notify;
-			panel.notify = message => {
-				chimes.push(message);
-				notify.call(panel, message);
-			};
+			const notified = notificationsOf(panel);
+			const seen = notified.length;
+			const chimes = () => notified.slice(seen).filter(m => m.type === "chime").length;
 			const config = vscode.workspace.getConfiguration("omp");
 			try {
 				await controller.send(steps({ say: "done" }));
-				assert.deepEqual(chimes, [{ type: "chime" }]);
+				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
 				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
 
 				const turn = controller.send(steps({ hang: true }));
 				await sleep(200);
 				controller.cancel();
 				await turn;
-				assert.equal(chimes.length, 1, "no chime after Stop");
+				assert.equal(chimes(), 1, "no chime after Stop");
 
 				await config.update("soundOnFinish", false, vscode.ConfigurationTarget.Workspace);
 				await controller.send(steps({ say: "done" }));
-				assert.equal(chimes.length, 1, "no chime with the setting off");
+				assert.equal(chimes(), 1, "no chime with the setting off");
 			} finally {
-				delete panel.notify;
 				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
 			}
+		},
+
+		async "messages sent while omp works wait, then go together as the next turn"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+			const first = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the first turn's card");
+			const one = steps({ elicitUrl: "https://one.test" });
+			const two = steps({ elicitUrl: "https://two.test" });
+			await controller.send(one);
+			await controller.send(two);
+			const queued = posts.slice(seen).filter(m => m.type === "queued");
+			assert.deepEqual(queued.map(m => m.text), [one, two]);
+			assert.ok(!posts.slice(seen).some(m => m.type === "notice"), "no 'still working' warning");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "nothing queued reached omp yet");
+
+			respond(panel, card, "allow_once", "Allow once");
+			await first;
+			const urls = fakeLog().slice(logged).filter(e => e.event === "elicitUrl").map(e => e.url);
+			assert.deepEqual(urls, ["https://one.test", "https://two.test"], "both ran, in order, after the first turn");
+			const users = posts.slice(seen).filter(m => m.type === "user").map(m => m.text);
+			assert.deepEqual(users.slice(1), [`${one}\n\n${two}`], "as one message");
+			const dequeued = posts.slice(seen).find(m => m.type === "dequeued");
+			assert.deepEqual(dequeued.ids, queued.map(m => m.id));
+			assert.equal(notified.slice(seenNotified).filter(m => m.type === "chime").length, 1, "one chime, after the queued turn");
+		},
+
+		async "Stop puts queued messages back in the input, and a removed one is never sent"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+
+			let turn = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			await controller.send(steps({ elicitUrl: "https://removed.test" }));
+			const removed = posts.slice(seen).find(m => m.type === "queued");
+			panel.receive({ type: "unqueue", id: removed.id });
+			assert.ok(posts.slice(seen).some(m => m.type === "dequeued" && m.ids.includes(removed.id)));
+			respond(panel, card, "allow_once", "Allow once");
+			await turn;
+
+			const kept = steps({ elicitUrl: "https://kept.test" });
+			turn = controller.send(steps({ hang: true }));
+			await sleep(200);
+			await controller.send(kept);
+			controller.cancel();
+			await turn;
+			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "restoreInput"), [{ type: "restoreInput", text: kept }]);
+			await sleep(300);
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "neither queued message reached omp");
 		},
 
 		async "after omp crashes, the next message starts a fresh omp"() {

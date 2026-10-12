@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
-// The prompt text is a JSON list of steps, run in order:
+// The prompt text is a JSON list of steps (or several, separated by a blank line), run in order:
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
@@ -48,7 +48,7 @@ async function runTurn(steps) {
 			replies.forEach((reply, i) => record({ event: "write", path: step.writes[i].path, error: reply.error?.message }));
 		} else if (step.elicitUrl) {
 			const reply = await request("elicitation/create", { sessionId, mode: "url", message: "Open this", url: step.elicitUrl });
-			record({ event: "elicitUrl", result: reply.result });
+			record({ event: "elicitUrl", url: step.elicitUrl, result: reply.result });
 		} else if (step.permission) {
 			const reply = await request("session/request_permission", {
 				sessionId,
@@ -96,7 +96,8 @@ async function handle(message) {
 			record({ event: "session/new", cwd: message.params.cwd });
 			return send({ id: message.id, result: { sessionId } });
 		case "session/prompt": {
-			const steps = JSON.parse(message.params.prompt[0].text);
+			// Queued messages arrive joined by a blank line: one JSON list each.
+			const steps = message.params.prompt[0].text.split("\n\n").flatMap(text => JSON.parse(text));
 			const stopReason = await runTurn(steps);
 			return send({ id: message.id, result: { stopReason } });
 		}

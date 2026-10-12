@@ -9,6 +9,7 @@
 	const usageEl = document.getElementById("usage");
 	const settingsEl = document.getElementById("settings");
 	const activityEl = document.getElementById("activity");
+	const queueEl = document.getElementById("queue");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -521,6 +522,26 @@
 		}
 	}
 
+	// Messages sent while omp works wait here until the turn ends.
+	function onQueued(msg) {
+		const item = queueEl.appendChild(el("div", "queued"));
+		item.dataset.id = msg.id;
+		item.appendChild(el("span", "queued-label", "Queued"));
+		item.appendChild(el("span", "queued-text", msg.text));
+		const remove = item.appendChild(el("button", "secondary", "✕"));
+		remove.title = "Remove from the queue";
+		remove.addEventListener("click", () => vscode.postMessage({ type: "unqueue", id: msg.id }));
+	}
+
+	function onDequeued(ids) {
+		for (const item of [...queueEl.children]) if (ids.includes(item.dataset.id)) item.remove();
+	}
+
+	function restoreInput(text) {
+		input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+		input.focus();
+	}
+
 	function setStatus(state) {
 		const labels = { starting: "Starting omp…", busy: "Working…", idle: "Ready", stopped: "Stopped" };
 		statusEl.textContent = labels[state] || state;
@@ -547,6 +568,9 @@
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
 			case "chime": return chime();
+			case "queued": return onQueued(msg);
+			case "dequeued": return onDequeued(msg.ids);
+			case "restoreInput": return restoreInput(msg.text);
 			case "notice":
 				breakFlow();
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));

@@ -10,6 +10,7 @@ const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "
 /** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
 const BODY = `<div id="log"></div>
 <div id="activity" hidden></div>
+<div id="queue"></div>
 <footer>
   <div id="settings"></div>
   <textarea id="input"></textarea>
@@ -149,6 +150,25 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.match(chat.activity.textContent, / · 0s$/, "with the seconds since the turn began");
 	chat.deliver({ type: "status", state: "idle" });
 	assert.equal(shown(), null);
+});
+
+test("queued messages show above the input, can be removed, and come back into the input", () => {
+	const chat = openChat();
+	const queue = chat.window.document.getElementById("queue");
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "queued", id: "1", text: "also fix the tests" }, { type: "queued", id: "2", text: "and the docs" });
+	assert.deepEqual([...queue.querySelectorAll(".queued-text")].map(item => item.textContent), ["also fix the tests", "and the docs"]);
+	assert.equal(chat.log.textContent, "", "not in the conversation until sent");
+
+	queue.querySelector("button").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "unqueue", id: "1" });
+	chat.deliver({ type: "dequeued", ids: ["1"] });
+	assert.deepEqual([...queue.querySelectorAll(".queued-text")].map(item => item.textContent), ["and the docs"]);
+
+	input.value = "a draft";
+	chat.deliver({ type: "dequeued", ids: ["2"] }, { type: "restoreInput", text: "and the docs" });
+	assert.equal(queue.children.length, 0);
+	assert.equal(input.value, "and the docs\n\na draft", "put back ahead of what was being typed");
 });
 
 test("a chime plays two tones, on audio switched on by the first key press", () => {
