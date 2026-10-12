@@ -212,9 +212,13 @@
 		if (!window.AudioContext) return; // e.g. the test page
 		audio = audio || new AudioContext();
 		const asked = Date.now();
-		void audio.resume().then(() => {
-			if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones();
-		});
+		audio.resume().then(
+			() => {
+				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones();
+				else void audio.suspend();
+			},
+			error => console.warn("OMP: could not play the finish chime", error),
+		);
 	}
 
 	function playTones() {

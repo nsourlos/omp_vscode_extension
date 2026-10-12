@@ -249,4 +249,15 @@ test("a chime that may only play after a later key press is dropped, not played 
 	audio.devices[0].allow();
 	await Promise.resolve();
 	assert.deepEqual(audio.tones, []);
+	assert.equal(audio.devices[0].state, "suspended", "and audio is paused again");
+});
+
+test("a chime whose audio cannot start is reported, not thrown", async () => {
+	const { chat } = openChatWithAudio();
+	const warnings = [];
+	chat.window.AudioContext.prototype.resume = () => Promise.reject(new Error("no audio device"));
+	chat.window.console.warn = (...args) => warnings.push(args.join(" "));
+	chat.deliver({ type: "chime" });
+	await new Promise(resolve => setImmediate(resolve));
+	assert.match(warnings[0], /could not play the finish chime/);
 });
