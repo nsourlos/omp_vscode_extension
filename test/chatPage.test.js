@@ -125,7 +125,9 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 });
 
 test("the activity line says what omp is doing during a turn, and hides when it ends", () => {
-	const chat = openChat();
+	const start = Date.UTC(2026, 0, 1);
+	let now = start;
+	const chat = openChat(window => (window.Date.now = () => now));
 	const shown = () => (chat.activity.hidden ? null : chat.activity.textContent.replace(/ · \d+s$/, ""));
 	const tool = (sessionUpdate, status) => ({
 		type: "update",
@@ -148,9 +150,9 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.equal(shown(), "Working…");
 	chat.deliver(review("open"));
 	assert.equal(shown(), "Waiting for your review");
+	now = start + 12_400;
 	chat.deliver(review("done"), chunk("All done"));
-	assert.equal(shown(), "Writing…");
-	assert.match(chat.activity.textContent, / · 0s$/, "with the seconds since the turn began");
+	assert.equal(chat.activity.textContent, "Writing… · 12s", "with the seconds since the turn began");
 	chat.deliver({ type: "status", state: "idle" });
 	assert.equal(shown(), null);
 });
