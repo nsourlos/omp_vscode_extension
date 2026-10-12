@@ -46,6 +46,22 @@ exports.run = async function run() {
 		await vscode.commands.executeCommand("omp.newSession");
 		return api.sessions.active;
 	};
+	/** Every message the extension sends to this chat tab, from the first call on. */
+	const postsOf = panel => {
+		if (!panel.recorded) {
+			const posts = [];
+			const post = panel.post.bind(panel);
+			panel.post = message => {
+				posts.push(message);
+				post(message);
+			};
+			panel.recorded = posts;
+		}
+		return panel.recorded;
+	};
+	const respond = (panel, card, value, label) => panel.receive({ type: "respond", requestId: card.requestId, value, label });
+	const tabLabel = panel =>
+		allTabs().find(tab => tab.input instanceof vscode.TabInputWebview && tab.label.endsWith(panel.label))?.label;
 
 	const tests = {
 		async "an accepted write is saved"() {
@@ -157,6 +173,35 @@ exports.run = async function run() {
 			assert.equal(fs.readFileSync(file("s2.txt"), "utf8"), "b\n");
 		},
 
+		async "accept one change and reject another while a second session edits another file"() {
+			const [one, two] = api.sessions.all.map(session => session.controller);
+			fs.writeFileSync(file("u1.txt"), "1\n2\n3\n");
+			fs.writeFileSync(file("u2.txt"), "a\n");
+			const seen = reviews.length;
+			const turnOne = one.send(steps({ write: { path: file("u1.txt"), content: "one\n2\nthree\n" } }));
+			const turnTwo = two.send(steps({ write: { path: file("u2.txt"), content: "a\nb\n" } }));
+			const reviewOne = await nextOpenReview(seen, one.id);
+			const reviewTwo = await nextOpenReview(seen, two.id);
+			assert.equal(reviewOne.hunkCount, 2);
+
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewOne.id, 0);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", reviewTwo.id, 0);
+			await turnTwo;
+			assert.equal(fs.readFileSync(file("u2.txt"), "utf8"), "a\nb\n");
+			assert.equal(fs.readFileSync(file("u1.txt"), "utf8"), "1\n2\n3\n", "session 1 is still deciding");
+
+			await vscode.commands.executeCommand("omp.review.rejectHunk", reviewOne.id, 1);
+			await turnOne;
+			assert.equal(fs.readFileSync(file("u1.txt"), "utf8"), "one\n2\n3\n");
+			const writes = fakeLog().filter(entry => entry.event === "write");
+			const toOne = writes.find(entry => entry.path === file("u1.txt"));
+			const toTwo = writes.find(entry => entry.path === file("u2.txt"));
+			assert.match(toOne.error, /accepted 1 of 2/);
+			assert.match(toOne.error, /\+three/, "session 1's omp is told which change was rejected");
+			assert.equal(toTwo.error, undefined, "session 2's omp is told its write succeeded");
+			assert.notEqual(toOne.sessionId, toTwo.sessionId);
+		},
+
 		async "Accept All, Reject All and Submit never finish another session's review"() {
 			const [one, two] = api.sessions.all.map(session => session.controller);
 			fs.writeFileSync(file("w1.txt"), "a\n");
@@ -192,6 +237,140 @@ exports.run = async function run() {
 			assert.equal(fs.readFileSync(file("w1.txt"), "utf8"), "b\n");
 		},
 
+		async "Accept All, Reject All and Submit on a file with three changes"() {
+			const original = "1\n2\n3\n4\n5\n";
+			const proposed = "one\n2\nthree\n4\nfive\n";
+			// A fresh file per round: rewriting one VS Code already has open races its reload and
+			// can turn the next save into an "file is newer on disk" conflict that waits for a click.
+			let round = 0;
+			const review = async decide => {
+				const name = `m${++round}.txt`;
+				fs.writeFileSync(file(name), original);
+				const seen = reviews.length;
+				const turn = controller.send(steps({ write: { path: file(name), content: proposed } }));
+				const info = await nextOpenReview(seen);
+				await waitFor(() => vscode.window.activeTextEditor?.document.uri.path.startsWith(`/${info.id}/`), "the diff to take focus");
+				await decide(info);
+				await turn;
+				return { text: fs.readFileSync(file(name), "utf8"), error: fakeLog().at(-1).error };
+			};
+
+			const all = await review(() => vscode.commands.executeCommand("omp.review.acceptAll"));
+			assert.deepEqual(all, { text: proposed, error: undefined });
+
+			const none = await review(() => vscode.commands.executeCommand("omp.review.rejectAll"));
+			assert.equal(none.text, original);
+			assert.match(none.error, /rejected this change/);
+
+			const submitted = await review(async info => {
+				await vscode.commands.executeCommand("omp.review.rejectHunk", info.id, 1);
+				await vscode.commands.executeCommand("omp.review.submit");
+			});
+			assert.equal(submitted.text, "one\n2\n3\n4\nfive\n", "Submit accepts the undecided changes, not the rejected one");
+			assert.match(submitted.error, /accepted 2 of 3/);
+		},
+
+		async "Alt+Y and Alt+N accept or reject the change under the cursor"() {
+			const bindings = extension.packageJSON.contributes.keybindings;
+			assert.deepEqual(
+				bindings.map(binding => [binding.key, binding.command]),
+				[["alt+y", "omp.review.acceptAtCursor"], ["alt+n", "omp.review.rejectAtCursor"]],
+			);
+			assert.ok(bindings.every(binding => binding.when.includes("resourceScheme == omp-review")));
+
+			fs.writeFileSync(file("k.txt"), "1\n2\n3\n");
+			const seen = reviews.length;
+			const turn = controller.send(steps({ write: { path: file("k.txt"), content: "one\n2\nthree\n" } }));
+			const info = await nextOpenReview(seen);
+			const editor = await waitFor(() => {
+				const active = vscode.window.activeTextEditor;
+				return active?.document.uri.path.startsWith(`/${info.id}/`) && active;
+			}, "the diff to take focus");
+			editor.selection = new vscode.Selection(2, 0, 2, 0);
+			await vscode.commands.executeCommand("omp.review.rejectAtCursor");
+			editor.selection = new vscode.Selection(0, 1, 0, 1);
+			await vscode.commands.executeCommand("omp.review.acceptAtCursor");
+			await turn;
+			assert.equal(fs.readFileSync(file("k.txt"), "utf8"), "one\n2\n3\n");
+		},
+
+		async "cards in two sessions at once stay with their own session"() {
+			const [first, second] = api.sessions.all;
+			const postsOne = postsOf(first.panel);
+			const postsTwo = postsOf(second.panel);
+			const seenOne = postsOne.length;
+			const seenTwo = postsTwo.length;
+			const logged = fakeLog().length;
+			const turnOne = first.controller.send(steps({ permission: "ls -la" }));
+			const turnTwo = second.controller.send(steps({ approve: "bash\nrm -rf build" }));
+			const cardOne = await waitFor(() => postsOne.slice(seenOne).find(m => m.type === "permission"), "session 1's card");
+			const cardTwo = await waitFor(() => postsTwo.slice(seenTwo).find(m => m.type === "approval"), "session 2's card");
+			assert.ok(!postsOne.slice(seenOne).some(m => m.type === "approval"), "session 2's card is not in session 1");
+			assert.ok(!postsTwo.slice(seenTwo).some(m => m.type === "permission"), "session 1's card is not in session 2");
+			assert.match(cardTwo.warning, /file command/);
+
+			respond(first.panel, cardTwo, "Approve", "Approved");
+			await sleep(300);
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "approve"), "an answer from the wrong tab is ignored");
+
+			respond(second.panel, cardTwo, "Deny", "Denied");
+			await turnTwo;
+			const approve = fakeLog().slice(logged).find(e => e.event === "approve");
+			assert.deepEqual(approve.result, { action: "accept", content: { value: "Deny" } });
+			assert.ok(postsTwo.some(m => m.type === "resolved" && m.requestId === cardTwo.requestId && m.label === "Denied"));
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "permission"), "session 1 is still waiting");
+
+			respond(first.panel, cardOne, "allow_once", "Allow once");
+			await turnOne;
+			const permission = fakeLog().slice(logged).find(e => e.event === "permission");
+			assert.deepEqual(permission.result, { outcome: { outcome: "selected", optionId: "allow_once" } });
+		},
+
+		async "a hidden session that needs an answer marks its tab and doesn't cover another session"() {
+			const [first, second] = api.sessions.all;
+			first.panel.reveal();
+			await waitFor(() => first.panel.visible && !second.panel.visible, "session 1 in front of session 2");
+			const postsTwo = postsOf(second.panel);
+			const seenTwo = postsTwo.length;
+			const turnTwo = second.controller.send(steps({ permission: "ls" }));
+			await waitFor(() => tabLabel(second.panel) === "● OMP 2", "session 2's tab to be marked");
+			assert.ok(first.panel.visible, "session 1 stays in front");
+			second.panel.reveal();
+			await waitFor(() => tabLabel(second.panel) === "OMP 2", "the mark to clear once the tab is seen");
+			respond(second.panel, postsTwo.slice(seenTwo).find(m => m.type === "permission"), "allow_once", "Allow once");
+			await turnTwo;
+
+			const document = await vscode.workspace.openTextDocument(file("a.txt"));
+			await vscode.window.showTextDocument(document, first.panel.viewColumn);
+			await waitFor(() => !first.panel.visible && !second.panel.visible, "a file in front of both chats");
+			const postsOne = postsOf(first.panel);
+			const seenOne = postsOne.length;
+			const turnOne = first.controller.send(steps({ permission: "ls" }));
+			await waitFor(() => first.panel.visible, "session 1 to come forward, since it covers only a file");
+			await waitFor(() => tabLabel(first.panel) === "OMP 1", "no mark on a tab that is in front");
+			respond(first.panel, postsOne.slice(seenOne).find(m => m.type === "permission"), "allow_once", "Allow once");
+			await turnOne;
+		},
+
+		async "after omp crashes, the next message starts a fresh omp"() {
+			const posts = postsOf(api.sessions.all[0].panel);
+			await controller.send(steps({ elicitUrl: "https://example.com" }));
+			const crashed = fakeLog().at(-1).sessionId;
+			const seen = posts.length;
+			const logged = fakeLog().length;
+
+			await controller.send(steps({ exit: 1 }));
+			const errors = posts.slice(seen).filter(m => m.type === "notice" && m.level === "error");
+			assert.equal(errors.length, 1, "the crash is reported once");
+			assert.match(errors[0].text, /omp exited \(code 1\)/);
+			assert.equal(posts.slice(seen).filter(m => m.type === "status").at(-1).state, "stopped");
+
+			await controller.send(steps({ elicitUrl: "https://example.com" }));
+			assert.notEqual(fakeLog().at(-1).sessionId, crashed, "a new omp answered");
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "session/new"));
+			assert.equal(posts.filter(m => m.type === "status").at(-1).state, "idle");
+		},
+
 		async "closing a session's tab ends it and leaves the others running"() {
 			const second = api.sessions.all[1];
 			fs.writeFileSync(file("c.txt"), "a\n");
@@ -221,10 +400,35 @@ exports.run = async function run() {
 				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
 			}
 		},
+
+		async "moving a chat into its own window keeps the session working"() {
+			const [first] = api.sessions.all;
+			let reloads = 0;
+			first.panel.onMessage(message => message?.type === "ready" && reloads++);
+			await vscode.commands.executeCommand("omp.openInWindow");
+			await sleep(2000);
+			assert.equal(reloads, 1, "the chat page reloaded once, which replays its history");
+			assert.ok(api.sessions.all.includes(first), "the session survived the move");
+
+			fs.writeFileSync(file("mv.txt"), "a\n");
+			const seen = reviews.length;
+			const turn = first.controller.send(steps({ write: { path: file("mv.txt"), content: "b\n" } }));
+			const info = await nextOpenReview(seen);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", info.id, 0);
+			await turn;
+			assert.equal(fs.readFileSync(file("mv.txt"), "utf8"), "b\n");
+		},
 	};
 
 	for (const [name, test] of Object.entries(tests)) {
-		await test();
+		try {
+			let timer;
+			const timeout = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error("test took over 30s")), 30_000)));
+			await Promise.race([test(), timeout]).finally(() => clearTimeout(timer));
+		} catch (error) {
+			console.log(`[offline] FAILED: ${name}\nrecent reviews: ${JSON.stringify(reviews.slice(-4))}\nfake omp log tail: ${JSON.stringify(fakeLog().slice(-4))}`);
+			throw error;
+		}
 		console.log(`[offline] ok: ${name}`);
 	}
 };

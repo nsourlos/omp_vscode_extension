@@ -4,6 +4,8 @@
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
+//   {"permission": "<command>"}     ask permission to run a shell command
+//   {"approve": "<tool>\n<details>"} send omp's "Allow tool" approval prompt
 //   {"say": "<text>"}               stream a message chunk
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
@@ -46,6 +48,24 @@ async function runTurn(steps) {
 		} else if (step.elicitUrl) {
 			const reply = await request("elicitation/create", { sessionId, mode: "url", message: "Open this", url: step.elicitUrl });
 			record({ event: "elicitUrl", result: reply.result });
+		} else if (step.permission) {
+			const reply = await request("session/request_permission", {
+				sessionId,
+				toolCall: { toolCallId: `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission } },
+				options: [
+					{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+					{ optionId: "reject_once", name: "Reject", kind: "reject_once" },
+				],
+			});
+			record({ event: "permission", result: reply.result });
+		} else if (step.approve) {
+			const reply = await request("elicitation/create", {
+				sessionId,
+				mode: "form",
+				message: `Allow tool: ${step.approve}`,
+				requestedSchema: { type: "object", properties: { value: { type: "string", enum: ["Approve", "Deny"] } } },
+			});
+			record({ event: "approve", result: reply.result });
 		} else if (step.say) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
 		} else if (step.hang) {

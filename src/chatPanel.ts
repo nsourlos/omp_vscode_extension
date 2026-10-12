@@ -30,14 +30,7 @@ export class ChatPanel implements vscode.Disposable {
 		});
 		this.#panel.iconPath = vscode.Uri.joinPath(media, "omp.svg");
 		this.#panel.webview.html = chatHtml(this.#panel.webview, media);
-		this.#panel.webview.onDidReceiveMessage(message => {
-			if (message?.type === "ready") {
-				this.#ready = true;
-				for (const item of this.#history) void this.#panel.webview.postMessage(item);
-				return;
-			}
-			this.#messages.fire(message);
-		});
+		this.#panel.webview.onDidReceiveMessage(message => this.receive(message));
 		this.#panel.onDidChangeViewState(() => {
 			if (this.#panel.visible) this.#panel.title = label;
 			if (this.#panel.active) this.#activated.fire();
@@ -53,6 +46,15 @@ export class ChatPanel implements vscode.Disposable {
 
 	get viewColumn(): vscode.ViewColumn | undefined {
 		return this.#panel.viewColumn;
+	}
+
+	/** Handle a message from the chat page. Public so integration tests can stand in for the page. */
+	receive(message: any): void {
+		if (message?.type === "ready") {
+			this.#ready = true;
+			for (const item of this.#history) void this.#panel.webview.postMessage(item);
+		}
+		this.#messages.fire(message);
 	}
 
 	post(message: unknown): void {
