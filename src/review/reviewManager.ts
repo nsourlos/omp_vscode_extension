@@ -139,6 +139,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		await vscode.commands.executeCommand("vscode.diff", session.originalUri, session.proposedUri, title, {
 			preview: false,
 		});
+		if (!this.#isPending(session)) this.#closeTabs(session); // it finished while the diff was opening
 		this.#decorate();
 	}
 
@@ -273,10 +274,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		const queue = this.#queues.get(session.owner)?.filter(s => s !== session) ?? [];
 		if (queue.length > 0) this.#queues.set(session.owner, queue);
 		else this.#queues.delete(session.owner);
-		const tabs = vscode.window.tabGroups.all
-			.flatMap(group => group.tabs)
-			.filter(tab => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === session.proposedUri.toString());
-		if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
+		this.#closeTabs(session);
 		this.#emit(session, "done", summary);
 		this.#updateStatusBar();
 		const next = queue[0];
@@ -286,6 +284,13 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		}
 		// Keep the virtual documents resolvable briefly for tabs that are still closing.
 		setTimeout(() => this.#byId.delete(session.id), 60_000);
+	}
+
+	#closeTabs(session: ReviewSession): void {
+		const tabs = vscode.window.tabGroups.all
+			.flatMap(group => group.tabs)
+			.filter(tab => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.toString() === session.proposedUri.toString());
+		if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
 	}
 
 	#decorate(): void {

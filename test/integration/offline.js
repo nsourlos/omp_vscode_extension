@@ -93,6 +93,20 @@ exports.run = async function run() {
 			assert.equal(reviewTabs().length, 0);
 		},
 
+		async "a review that ends before its diff opens leaves no tab behind"() {
+			fs.writeFileSync(file("f.txt"), "a\n");
+			const stopOnOpen = api.reviews.onDidChangeReview(info => {
+				if (info.state === "open" && info.displayPath === "f.txt") controller.cancel();
+			});
+			try {
+				await controller.send(steps({ write: { path: file("f.txt"), content: "b\n" } }));
+			} finally {
+				stopOnOpen.dispose();
+			}
+			await sleep(1500); // let the diff finish opening
+			assert.equal(reviewTabs().length, 0);
+		},
+
 		async "New Session opens another tab with its own omp"() {
 			const before = fakeLog().length;
 			const second = await newSession();
