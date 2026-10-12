@@ -109,6 +109,25 @@ exports.run = async function run() {
 			assert.equal(reviewTabs().length, 0);
 		},
 
+		async "with one diff open and another queued, Accept All from the chat finishes the open one"() {
+			fs.writeFileSync(file("x1.txt"), "a\n");
+			fs.writeFileSync(file("x2.txt"), "a\n");
+			const seen = reviews.length;
+			const turn = controller.send(steps({ writes: ["x1.txt", "x2.txt"].map(name => ({ path: file(name), content: "b\n" })) }));
+			await waitFor(() => reviews.slice(seen).length === 2, "one open and one queued review");
+			const [open, queued] = reviews.slice(seen);
+			await waitFor(() => reviewTabs().length === 1, "the open review's diff");
+			api.sessions.all[0].panel.reveal();
+			await waitFor(() => !vscode.window.activeTextEditor, "the chat tab to take focus");
+			await vscode.commands.executeCommand("omp.review.acceptAll");
+			await waitFor(() => reviews.some(info => info.id === open.id && info.state === "done"), "the open review to finish");
+			await waitFor(() => reviews.some(info => info.id === queued.id && info.state === "open"), "the queued review to open next");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", queued.id, 0);
+			await turn;
+			assert.equal(fs.readFileSync(file("x1.txt"), "utf8"), "b\n");
+			assert.equal(fs.readFileSync(file("x2.txt"), "utf8"), "b\n");
+		},
+
 		async "a review that ends before its diff opens leaves no tab behind"() {
 			fs.writeFileSync(file("f.txt"), "a\n");
 			const stopOnOpen = api.reviews.onDidChangeReview(info => {
