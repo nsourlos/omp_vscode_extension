@@ -207,13 +207,17 @@
 	// chime is dropped, because playing it on the next key press would come too late to mean anything.
 	const CHIME_DEADLINE_MS = 1000;
 	let audio = null;
+	let chimeCount = 0;
 
 	function chime() {
 		if (!window.AudioContext) return; // e.g. the test page
 		audio = audio || new AudioContext();
 		const asked = Date.now();
+		const id = ++chimeCount;
 		audio.resume().then(
 			() => {
+				// A dropped chime's resume can complete together with a newer chime's: leave the audio to that one.
+				if (id !== chimeCount) return;
 				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones();
 				else void audio.suspend();
 			},

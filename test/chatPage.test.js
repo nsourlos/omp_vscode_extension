@@ -206,8 +206,14 @@ function openChatWithAudio() {
 		constructor() {
 			audio.devices.push(this);
 		}
+		waiting = [];
+		/** Like Chrome: once audio may start, every resume() still waiting resolves together. */
+		allow() {
+			this.state = "running";
+			for (const resolve of this.waiting.splice(0)) resolve();
+		}
 		resume() {
-			return new Promise(resolve => (this.allow = () => resolve((this.state = "running"))));
+			return new Promise(resolve => this.waiting.push(resolve));
 		}
 		suspend() {
 			this.state = "suspended";
@@ -250,6 +256,17 @@ test("a chime that may only play after a later key press is dropped, not played 
 	await Promise.resolve();
 	assert.deepEqual(audio.tones, []);
 	assert.equal(audio.devices[0].state, "suspended", "and audio is paused again");
+});
+
+test("a dropped chime does not silence the next one when both get audio at once", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" }); // before the user has touched the page: it waits
+	audio.now = 5000;
+	chat.deliver({ type: "chime" }); // after the user typed a message
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, [880, 1318.5]);
+	assert.equal(audio.devices[0].state, "running", "the late first chime did not pause the second one's audio");
 });
 
 test("a chime whose audio cannot start is reported, not thrown", async () => {
