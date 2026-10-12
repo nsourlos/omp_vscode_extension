@@ -380,6 +380,18 @@ exports.run = async function run() {
 			await turnOne;
 		},
 
+		async "a session that finishes while its tab is hidden marks the tab until it is seen"() {
+			const [first, second] = api.sessions.all;
+			first.panel.reveal();
+			await waitFor(() => first.panel.visible && !second.panel.visible, "session 1 in front of session 2");
+			await second.controller.send(steps({ say: "done" }));
+			await waitFor(() => tabLabel(second.panel) === "● OMP 2", "session 2's tab to be marked");
+			await first.controller.send(steps({ say: "done" }));
+			assert.equal(tabLabel(first.panel), "OMP 1", "the tab in front is not marked");
+			second.panel.reveal();
+			await waitFor(() => tabLabel(second.panel) === "OMP 2", "the mark to clear once the tab is seen");
+		},
+
 		async "after omp crashes, the next message starts a fresh omp"() {
 			const posts = postsOf(api.sessions.all[0].panel);
 			await controller.send(steps({ elicitUrl: "https://example.com" }));

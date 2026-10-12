@@ -79,6 +79,7 @@ export class Controller implements vscode.Disposable {
 			this.#busy = false;
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
+			this.chat.markFinished();
 		}
 	}
 
