@@ -157,6 +157,17 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.equal(shown(), null);
 });
 
+test("Stop shows while omp starts for a sent message, but not while it starts on its own", () => {
+	const chat = openChat();
+	const stop = chat.window.document.getElementById("stop");
+	chat.deliver({ type: "status", state: "starting" });
+	assert.equal(stop.hidden, true, "nothing to stop yet");
+	chat.deliver({ type: "status", state: "idle" }, { type: "status", state: "busy" }, { type: "status", state: "starting" });
+	assert.equal(stop.hidden, false, "the message waits for omp to start");
+	chat.deliver({ type: "status", state: "idle" });
+	assert.equal(stop.hidden, true);
+});
+
 test("a card or review left open by an earlier turn does not stick to the next one", () => {
 	const chat = openChat();
 	const review = { type: "review", info: { id: "r9", state: "open", displayPath: "a.ts", hunkCount: 1 } };

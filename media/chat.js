@@ -553,7 +553,8 @@
 		const labels = { starting: "Starting omp…", busy: "Working…", idle: "Ready", stopped: "Stopped" };
 		statusEl.textContent = labels[state] || state;
 		statusEl.dataset.state = state;
-		stopButton.hidden = state !== "busy";
+		// A message can be what starts omp, and Stop must still work while it starts.
+		stopButton.hidden = !(state === "busy" || (state === "starting" && busySince));
 		if (state === "busy") startActivity();
 		else if (state !== "starting") stopActivity();
 	}
