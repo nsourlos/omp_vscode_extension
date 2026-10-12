@@ -503,6 +503,34 @@ exports.run = async function run() {
 			assert.equal(notified.slice(seenNotified).filter(m => m.type === "chime").length, 1, "one chime, after the queued turn");
 		},
 
+		async "a message sent right after Stop runs next instead of going back to the input"() {
+			const panel = api.sessions.all[0].panel;
+			const notified = notificationsOf(panel);
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+			const turn = controller.send(steps({ hang: true }));
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "hang"), "omp to be mid-turn");
+			controller.cancel();
+			await controller.send(steps({ elicitUrl: "https://resent.test" })); // the stopped turn is still finishing
+			await turn;
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "elicitUrl" && e.url === "https://resent.test"), "the re-sent message reached omp");
+			assert.ok(!notified.slice(seenNotified).some(m => m.type === "restoreInput"), "nothing was pushed back into the input");
+		},
+
+		async "a turn that ends normally after Stop does not chime"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const turn = controller.send(steps({ permission: "ls" }, { say: "finished anyway" }));
+			await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			controller.cancel(); // the fake omp then ends its turn with end_turn, like a Stop that lost the race
+			await turn;
+			assert.equal(posts.slice(seen).find(m => m.type === "turnEnd").stopReason, "end_turn");
+			assert.ok(!notified.slice(seenNotified).some(m => m.type === "chime"), "no chime after Stop");
+		},
+
 		async "Stop puts queued messages back in the input, and a removed one is never sent"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);

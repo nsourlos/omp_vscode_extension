@@ -96,7 +96,7 @@ export class Controller implements vscode.Disposable {
 			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
 			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
-			finished = result.stopReason !== "cancelled";
+			finished = result.stopReason !== "cancelled" && !this.#stopRequested;
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {
@@ -104,7 +104,8 @@ export class Controller implements vscode.Disposable {
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
-		if (finished && this.#queue.length > 0) {
+		// Stop empties the queue, so anything queued after a Stop was typed to replace the stopped turn.
+		if ((finished || this.#stopRequested) && this.#queue.length > 0) {
 			const queued = this.#takeQueue();
 			return this.send(queued.map(message => message.text).join("\n\n"));
 		}
