@@ -8,6 +8,7 @@
 	const statusEl = document.getElementById("status");
 	const usageEl = document.getElementById("usage");
 	const settingsEl = document.getElementById("settings");
+	const activityEl = document.getElementById("activity");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -23,6 +24,14 @@
 	const tools = new Map();
 	const requests = new Map();
 	const reviews = new Map();
+
+	// What omp is doing right now, shown above the input while a turn runs.
+	let busySince = 0;
+	let activityTimer = 0;
+	let doing = "Working…";
+	const runningTools = new Map(); // toolCallId -> title
+	const waitingCards = new Set();
+	const waitingReviews = new Set();
 
 	// ---------- helpers ----------
 	function el(tag, className, text) {
@@ -154,6 +163,41 @@
 		if (target) keepScrolled(() => renderMarkdown(target.el, target.text));
 	}
 
+	// ---------- activity line ----------
+	function activityText() {
+		if (waitingCards.size) return "Waiting for your answer";
+		if (waitingReviews.size) return "Waiting for your review";
+		if (runningTools.size) return "Running: " + [...runningTools.values()].at(-1);
+		return doing;
+	}
+
+	function showActivity() {
+		if (!busySince) return;
+		const seconds = Math.floor((Date.now() - busySince) / 1000);
+		activityEl.textContent = `${activityText()} · ${seconds}s`;
+	}
+
+	function setDoing(text) {
+		doing = text;
+		showActivity();
+	}
+
+	function startActivity() {
+		if (busySince) return;
+		busySince = Date.now();
+		doing = "Working…";
+		runningTools.clear();
+		activityEl.hidden = false;
+		activityTimer = setInterval(showActivity, 1000);
+		showActivity();
+	}
+
+	function stopActivity() {
+		busySince = 0;
+		clearInterval(activityTimer);
+		activityEl.hidden = true;
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -161,6 +205,7 @@
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
 				thought = null;
+				setDoing("Writing…");
 				if (!assistant) {
 					const node = append(el("div", "msg assistant"));
 					assistant = { el: node, text: "" };
@@ -172,6 +217,7 @@
 			case "agent_thought_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
+				setDoing("Thinking…");
 				if (!thought) {
 					assistant = null;
 					const details = append(el("details", "thought"));
@@ -226,6 +272,12 @@
 				tool.status.textContent = STATUS_ICONS[update.status] || "";
 				tool.card.dataset.status = update.status;
 			}
+			if (tool.card.dataset.status === "completed" || tool.card.dataset.status === "failed") {
+				if (runningTools.delete(update.toolCallId) && !runningTools.size) doing = "Working…";
+			} else {
+				runningTools.set(update.toolCallId, tool.title.textContent || "a tool");
+			}
+			showActivity();
 			const command = update.rawInput?.command;
 			if (typeof command === "string") {
 				tool.command.textContent = "$ " + command;
@@ -264,6 +316,7 @@
 	}
 
 	function markResolved(requestId, label) {
+		if (waitingCards.delete(requestId)) showActivity();
 		const card = requests.get(requestId);
 		if (!card) return;
 		card.classList.add("resolved");
@@ -277,6 +330,8 @@
 		const node = append(el("div", "card"));
 		node.appendChild(el("div", "card-heading", heading));
 		requests.set(requestId, node);
+		waitingCards.add(requestId);
+		showActivity();
 		return node;
 	}
 
@@ -390,6 +445,9 @@
 			reviews.set(info.id, node);
 		}
 		node.textContent = "";
+		if (info.state === "done") waitingReviews.delete(info.id);
+		else waitingReviews.add(info.id);
+		showActivity();
 		const count = `${info.hunkCount} change${info.hunkCount === 1 ? "" : "s"}`;
 		if (info.state === "done") {
 			node.classList.add("resolved");
@@ -426,6 +484,8 @@
 		statusEl.textContent = labels[state] || state;
 		statusEl.dataset.state = state;
 		stopButton.hidden = state !== "busy";
+		if (state === "busy") startActivity();
+		else if (state !== "starting") stopActivity();
 	}
 
 	window.addEventListener("message", event => {

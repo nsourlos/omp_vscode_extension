@@ -16,6 +16,33 @@ body {
 	padding: 8px 12px;
 }
 
+#activity {
+	padding: 4px 12px;
+	font-size: 0.9em;
+	opacity: 0.85;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+#activity[hidden] {
+	display: none;
+}
+
+#activity::before {
+	content: "●";
+	display: inline-block;
+	margin-right: 6px;
+	color: var(--vscode-charts-orange);
+	animation: omp-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes omp-pulse {
+	50% {
+		opacity: 0.25;
+	}
+}
+
 footer {
 	border-top: 1px solid var(--vscode-panel-border);
 	padding: 8px 12px;

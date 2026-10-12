@@ -9,15 +9,22 @@ const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "
 
 /** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
 const BODY = `<div id="log"></div>
+<div id="activity" hidden></div>
 <footer>
   <div id="settings"></div>
   <textarea id="input"></textarea>
   <div class="row"><span id="status"></span><span id="usage"></span><button id="stop" hidden></button><button id="send"></button></div>
 </footer>`;
 
+const windows = [];
+test.after(() => {
+	for (const window of windows) window.close(); // stops the activity line's timer
+});
+
 function openChat() {
 	const dom = new JSDOM(`<!DOCTYPE html><body>${BODY}</body>`, { runScripts: "outside-only", pretendToBeVisual: true });
 	const { window } = dom;
+	windows.push(window);
 	const posted = [];
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
 	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
@@ -26,6 +33,7 @@ function openChat() {
 	return {
 		posted,
 		log: window.document.getElementById("log"),
+		activity: window.document.getElementById("activity"),
 		deliver: (...messages) => {
 			for (const data of messages) window.dispatchEvent(new window.MessageEvent("message", { data }));
 		},
@@ -94,4 +102,35 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.equal(replies[0].textContent, "Hello there", "the first reply rendered as soon as the second began");
 	await chat.nextFrame();
 	assert.deepEqual([...replies].map(reply => reply.textContent), ["Hello there", "Done"]);
+});
+
+test("the activity line says what omp is doing during a turn, and hides when it ends", () => {
+	const chat = openChat();
+	const shown = () => (chat.activity.hidden ? null : chat.activity.textContent.replace(/ · \d+s$/, ""));
+	const tool = (sessionUpdate, status) => ({
+		type: "update",
+		update: { sessionUpdate, toolCallId: "t1", title: "Read src/a.ts", kind: "read", status },
+	});
+	const review = state => ({ type: "review", info: { id: "r1", state, displayPath: "a.ts", hunkCount: 1, summary: "accepted" } });
+
+	assert.equal(shown(), null, "hidden before the first turn");
+	chat.deliver({ type: "status", state: "busy" });
+	assert.equal(shown(), "Working…");
+	chat.deliver({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } } });
+	assert.equal(shown(), "Thinking…");
+	chat.deliver(tool("tool_call", "pending"));
+	assert.equal(shown(), "Running: Read src/a.ts");
+	chat.deliver(permission);
+	assert.equal(shown(), "Waiting for your answer");
+	chat.deliver({ type: "resolved", requestId: "7", label: "Allow once" });
+	assert.equal(shown(), "Running: Read src/a.ts");
+	chat.deliver(tool("tool_call_update", "completed"));
+	assert.equal(shown(), "Working…");
+	chat.deliver(review("open"));
+	assert.equal(shown(), "Waiting for your review");
+	chat.deliver(review("done"), chunk("All done"));
+	assert.equal(shown(), "Writing…");
+	assert.match(chat.activity.textContent, / · 0s$/, "with the seconds since the turn began");
+	chat.deliver({ type: "status", state: "idle" });
+	assert.equal(shown(), null);
 });
