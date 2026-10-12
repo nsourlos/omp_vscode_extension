@@ -503,6 +503,28 @@ exports.run = async function run() {
 			assert.equal(notified.slice(seenNotified).filter(m => m.type === "chime").length, 1, "one chime, after the queued turn");
 		},
 
+		async "a queued slash command runs as its own turn, between the plain messages around it"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const logged = fakeLog().length;
+			const first = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the first turn's card");
+			const one = steps({ elicitUrl: "https://one.test" });
+			const two = steps({ elicitUrl: "https://two.test" });
+			const three = steps({ elicitUrl: "https://three.test" });
+			for (const text of [one, "/compact", two, three]) await controller.send(text);
+			respond(panel, card, "allow_once", "Allow once");
+			await first;
+			const users = posts.slice(seen).filter(m => m.type === "user").map(m => m.text);
+			assert.deepEqual(users.slice(1), [one, "/compact", `${two}\n\n${three}`]);
+			const order = fakeLog()
+				.slice(logged)
+				.filter(e => e.event === "elicitUrl" || e.event === "command")
+				.map(e => e.url ?? e.text);
+			assert.deepEqual(order, ["https://one.test", "/compact", "https://two.test", "https://three.test"]);
+		},
+
 		async "a message sent right after Stop runs next instead of going back to the input"() {
 			const panel = api.sessions.all[0].panel;
 			const notified = notificationsOf(panel);

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
-// The prompt text is a JSON list of steps (or several, separated by a blank line), run in order:
+// A prompt starting with "/" is logged as a slash command and ends the turn. Otherwise the prompt
+// text is a JSON list of steps (or several, separated by a blank line), run in order:
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
@@ -97,8 +98,13 @@ async function handle(message) {
 			record({ event: "session/new", cwd: message.params.cwd });
 			return send({ id: message.id, result: { sessionId } });
 		case "session/prompt": {
+			const text = message.params.prompt[0].text;
+			if (text.startsWith("/")) {
+				record({ event: "command", text });
+				return send({ id: message.id, result: { stopReason: "end_turn" } });
+			}
 			// Queued messages arrive joined by a blank line: one JSON list each.
-			const steps = message.params.prompt[0].text.split("\n\n").flatMap(text => JSON.parse(text));
+			const steps = text.split("\n\n").flatMap(part => JSON.parse(part));
 			const stopReason = await runTurn(steps);
 			return send({ id: message.id, result: { stopReason } });
 		}

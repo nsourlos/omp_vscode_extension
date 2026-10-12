@@ -106,8 +106,8 @@ export class Controller implements vscode.Disposable {
 		}
 		// Stop empties the queue, so anything queued after a Stop was typed to replace the stopped turn.
 		if ((finished || this.#stopRequested) && this.#queue.length > 0) {
-			const queued = this.#takeQueue();
-			return this.send(queued.map(message => message.text).join("\n\n"));
+			const next = this.#takeNextTurn();
+			return this.send(next.map(message => message.text).join("\n\n"));
 		}
 		this.#returnQueueToInput();
 		this.chat.markFinished();
@@ -122,6 +122,21 @@ export class Controller implements vscode.Disposable {
 		this.#returnQueueToInput();
 		this.#agent?.cancel();
 		this.#cancelPending("Stopped by user");
+	}
+
+	/**
+	 * The queued messages for the next turn: a slash command on its own, since omp reads one only
+	 * at the start of a prompt, otherwise the plain messages up to the next slash command.
+	 */
+	#takeNextTurn(): QueuedMessage[] {
+		const isCommand = (message: QueuedMessage) => message.text.startsWith("/");
+		let count = 1;
+		if (!isCommand(this.#queue[0])) {
+			while (count < this.#queue.length && !isCommand(this.#queue[count])) count++;
+		}
+		const next = this.#queue.splice(0, count);
+		this.chat.post({ type: "dequeued", ids: next.map(message => message.id) });
+		return next;
 	}
 
 	#takeQueue(): QueuedMessage[] {

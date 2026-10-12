@@ -5,7 +5,7 @@ Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code
 - **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning. A request to use the browser shows the web addresses in the code omp is about to run, and the code itself.
 - **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected (and why, if you say).
 - **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
-- **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, everything queued is sent together as the next message. **Stop** puts queued messages back in the input instead.
+- **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, the queued messages are sent together as the next message; a queued slash command (like `/compact`) is sent on its own. **Stop** puts queued messages back in the input instead.
 - **Activity line:** while omp works, a line above the input says what it is doing (thinking, running a tool, waiting for your answer or review) and for how long.
 
 ## How it works
