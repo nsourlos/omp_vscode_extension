@@ -698,6 +698,27 @@ exports.run = async function run() {
 			}
 		},
 
+		async "Stop while omp is still starting sends nothing and does not chime"() {
+			const config = vscode.workspace.getConfiguration("omp");
+			const args = config.get("extraArgs");
+			await config.update("extraArgs", [...args, "--init-delay", "1000"], vscode.ConfigurationTarget.Workspace);
+			try {
+				const session = await newSession();
+				const notified = notificationsOf(session.panel);
+				const logged = fakeLog().length;
+				const turn = session.controller.send(steps({ elicitUrl: "https://late.test" }));
+				session.controller.cancel(); // omp is still in its 1s startup
+				await turn;
+				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/new"), "omp to finish starting");
+				await sleep(300);
+				assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "the stopped message never reached omp");
+				assert.ok(!notified.some(m => m.type === "chime"));
+				session.panel.dispose();
+			} finally {
+				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
 		async "moving a chat into its own window keeps the session working"() {
 			const [first] = api.sessions.all;
 			let reloads = 0;

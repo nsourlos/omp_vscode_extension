@@ -51,6 +51,7 @@ export class Controller implements vscode.Disposable {
 	#starting: Promise<OmpAgent> | undefined;
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
+	#stopRequested = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
 	#queue: QueuedMessage[] = [];
@@ -83,6 +84,7 @@ export class Controller implements vscode.Disposable {
 			return;
 		}
 		this.#busy = true;
+		this.#stopRequested = false;
 		this.#lastNotice = undefined;
 		this.#runningCode.clear();
 		this.chat.post({ type: "user", text });
@@ -91,7 +93,8 @@ export class Controller implements vscode.Disposable {
 		let finished = false;
 		try {
 			agent = await this.#ensureAgent();
-			const result = await agent.prompt(text);
+			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
+			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
 			finished = result.stopReason !== "cancelled";
 		} catch (error) {
@@ -114,6 +117,7 @@ export class Controller implements vscode.Disposable {
 
 	/** Stop the turn; queued messages go back into the input box rather than being sent. */
 	cancel(): void {
+		this.#stopRequested = true;
 		this.#returnQueueToInput();
 		this.#agent?.cancel();
 		this.#cancelPending("Stopped by user");
