@@ -21,10 +21,11 @@ test.after(() => {
 	for (const window of windows) window.close(); // stops the activity line's timer
 });
 
-function openChat() {
+function openChat(setup = () => {}) {
 	const dom = new JSDOM(`<!DOCTYPE html><body>${BODY}</body>`, { runScripts: "outside-only", pretendToBeVisual: true });
 	const { window } = dom;
 	windows.push(window);
+	setup(window);
 	const posted = [];
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
 	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
@@ -34,6 +35,7 @@ function openChat() {
 		posted,
 		log: window.document.getElementById("log"),
 		activity: window.document.getElementById("activity"),
+		window,
 		deliver: (...messages) => {
 			for (const data of messages) window.dispatchEvent(new window.MessageEvent("message", { data }));
 		},
@@ -133,4 +135,33 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.match(chat.activity.textContent, / · 0s$/, "with the seconds since the turn began");
 	chat.deliver({ type: "status", state: "idle" });
 	assert.equal(shown(), null);
+});
+
+test("a chime plays two tones, on audio switched on by the first key press", () => {
+	const tones = [];
+	let device;
+	class FakeAudioContext {
+		state = "suspended";
+		currentTime = 0;
+		destination = {};
+		constructor() {
+			device = this;
+		}
+		resume() {
+			this.state = "running";
+			return Promise.resolve();
+		}
+		createOscillator() {
+			const tone = { frequency: {}, connect: node => node, start: () => tones.push(tone.frequency.value), stop() {} };
+			return tone;
+		}
+		createGain() {
+			return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: node => node };
+		}
+	}
+	const chat = openChat(window => (window.AudioContext = FakeAudioContext));
+	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
+	assert.equal(device.state, "running", "the first key press switches audio on");
+	chat.deliver({ type: "chime" });
+	assert.deepEqual(tones, [880, 1318.5]);
 });

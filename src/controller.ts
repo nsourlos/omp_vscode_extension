@@ -73,6 +73,9 @@ export class Controller implements vscode.Disposable {
 			agent = await this.#ensureAgent();
 			const result = await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
+			if (result.stopReason !== "cancelled" && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
+				this.chat.notify({ type: "chime" });
+			}
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {

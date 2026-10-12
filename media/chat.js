@@ -198,6 +198,38 @@
 		activityEl.hidden = true;
 	}
 
+	// ---------- finish chime ----------
+	// Browsers only let a page play sound after the user interacts with it, so the audio
+	// is switched on at the first key press or click and kept for later chimes.
+	let audio = null;
+
+	function unlockAudio() {
+		if (!window.AudioContext) return; // e.g. the test page
+		audio = audio || new AudioContext();
+		if (audio.state === "suspended") void audio.resume();
+	}
+
+	function chime() {
+		unlockAudio();
+		if (!audio) return;
+		const now = audio.currentTime;
+		[880, 1318.5].forEach((frequency, i) => {
+			const start = now + i * 0.12;
+			const tone = audio.createOscillator();
+			const volume = audio.createGain();
+			tone.frequency.value = frequency;
+			volume.gain.setValueAtTime(0.0001, start);
+			volume.gain.exponentialRampToValueAtTime(0.15, start + 0.02);
+			volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
+			tone.connect(volume).connect(audio.destination);
+			tone.start(start);
+			tone.stop(start + 0.55);
+		});
+	}
+
+	document.addEventListener("keydown", unlockAudio);
+	document.addEventListener("pointerdown", unlockAudio);
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -504,6 +536,7 @@
 			case "review": return onReview(msg.info);
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
+			case "chime": return chime();
 			case "notice":
 				breakFlow();
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));

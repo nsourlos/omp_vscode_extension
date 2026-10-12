@@ -75,6 +75,11 @@ export class ChatPanel implements vscode.Disposable {
 		if (this.#ready) void this.#panel.webview.postMessage(message);
 	}
 
+	/** Post a one-off message (like a sound) that a reloaded page must not replay. */
+	notify(message: unknown): void {
+		if (this.#ready) void this.#panel.webview.postMessage(message);
+	}
+
 	reveal(preserveFocus = false): void {
 		this.#panel.reveal(undefined, preserveFocus);
 	}

@@ -392,6 +392,35 @@ exports.run = async function run() {
 			await waitFor(() => tabLabel(second.panel) === "OMP 2", "the mark to clear once the tab is seen");
 		},
 
+		async "a finished reply chimes once, unless stopped or switched off, and the chime is never replayed"() {
+			const panel = api.sessions.all[0].panel;
+			const chimes = [];
+			const notify = panel.notify;
+			panel.notify = message => {
+				chimes.push(message);
+				notify.call(panel, message);
+			};
+			const config = vscode.workspace.getConfiguration("omp");
+			try {
+				await controller.send(steps({ say: "done" }));
+				assert.deepEqual(chimes, [{ type: "chime" }]);
+				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
+
+				const turn = controller.send(steps({ hang: true }));
+				await sleep(200);
+				controller.cancel();
+				await turn;
+				assert.equal(chimes.length, 1, "no chime after Stop");
+
+				await config.update("soundOnFinish", false, vscode.ConfigurationTarget.Workspace);
+				await controller.send(steps({ say: "done" }));
+				assert.equal(chimes.length, 1, "no chime with the setting off");
+			} finally {
+				delete panel.notify;
+				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
 		async "after omp crashes, the next message starts a fresh omp"() {
 			const posts = postsOf(api.sessions.all[0].panel);
 			await controller.send(steps({ elicitUrl: "https://example.com" }));
