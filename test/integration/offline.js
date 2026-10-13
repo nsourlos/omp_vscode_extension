@@ -476,6 +476,8 @@ exports.run = async function run() {
 
 				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
 				await waitFor(() => sound()?.on === true, "the page to be told to load the sound again");
+				await controller.send(steps({ say: "done" }));
+				assert.equal(chimes(), 2, "switched back on: the next finished reply chimes again");
 			} finally {
 				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
 			}
