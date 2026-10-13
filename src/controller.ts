@@ -134,16 +134,22 @@ export class Controller implements vscode.Disposable {
 		if (!isCommand(this.#queue[0])) {
 			while (count < this.#queue.length && !isCommand(this.#queue[count])) count++;
 		}
-		const next = this.#queue.splice(0, count);
-		this.chat.post({ type: "dequeued", ids: next.map(message => message.id) });
+		const next = this.#queue.slice(0, count);
+		this.#dequeue(next);
 		return next;
 	}
 
 	#takeQueue(): QueuedMessage[] {
 		const queued = this.#queue;
-		this.#queue = [];
-		if (queued.length > 0) this.chat.post({ type: "dequeued", ids: queued.map(message => message.id) });
+		this.#dequeue(queued);
 		return queued;
+	}
+
+	/** Take these messages out of the queue and off the chat's queued list. */
+	#dequeue(messages: QueuedMessage[]): void {
+		if (messages.length === 0) return;
+		this.#queue = this.#queue.filter(message => !messages.includes(message));
+		this.chat.post({ type: "dequeued", ids: messages.map(message => message.id) });
 	}
 
 	#returnQueueToInput(): void {
@@ -152,9 +158,8 @@ export class Controller implements vscode.Disposable {
 	}
 
 	#unqueue(id: string): void {
-		const before = this.#queue.length;
-		this.#queue = this.#queue.filter(message => message.id !== id);
-		if (this.#queue.length < before) this.chat.post({ type: "dequeued", ids: [id] });
+		const message = this.#queue.find(queued => queued.id === id);
+		if (message) this.#dequeue([message]);
 	}
 
 	/** Start omp ahead of the first message, so the chat shows Ready and the model settings. */
