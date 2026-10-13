@@ -175,11 +175,11 @@
 	function showActivity() {
 		if (!busySince) return;
 		const seconds = Math.floor((Date.now() - busySince) / 1000);
-		activityEl.textContent = `${activityText()} · ${seconds}s`;
+		const text = `${activityText()} · ${seconds}s`;
+		if (activityEl.textContent !== text) activityEl.textContent = text; // called on every streamed chunk and tool update
 	}
 
 	function setDoing(text) {
-		if (text === doing) return; // called on every streamed chunk
 		doing = text;
 		showActivity();
 	}

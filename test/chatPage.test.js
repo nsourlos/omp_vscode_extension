@@ -190,6 +190,14 @@ test("streamed chunks leave the activity line alone while its label stays the sa
 	chat.deliver(chunk("b"), chunk("c"), chunk("d"));
 	await Promise.resolve();
 	assert.equal(changes.length, 0);
+
+	const running = { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "t1", title: "Run tests", status: "in_progress" } };
+	chat.deliver(running);
+	await Promise.resolve();
+	changes.length = 0;
+	chat.deliver(running, running, running); // a long tool streaming output
+	await Promise.resolve();
+	assert.equal(changes.length, 0, "repeated tool updates leave it alone too");
 	chat.deliver({ type: "status", state: "idle" });
 });
 
