@@ -441,6 +441,7 @@ exports.run = async function run() {
 			const [first, second] = api.sessions.all;
 			first.panel.reveal();
 			await waitFor(() => first.panel.visible && !second.panel.visible, "session 1 in front of session 2");
+			assert.equal(tabLabel(second.panel), "OMP 2", "unmarked before its turn");
 			await second.controller.send(steps({ say: "done" }));
 			await waitFor(() => tabLabel(second.panel) === "● OMP 2", "session 2's tab to be marked");
 			await first.controller.send(steps({ say: "done" }));
@@ -579,7 +580,6 @@ exports.run = async function run() {
 			controller.cancel();
 			await turn;
 			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "restoreInput"), [{ type: "restoreInput", text: kept }]);
-			await sleep(300);
 			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "neither queued message reached omp");
 		},
 
@@ -763,7 +763,6 @@ exports.run = async function run() {
 				session.controller.cancel(); // omp is still in its 1s startup
 				await turn;
 				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/new"), "omp to finish starting");
-				await sleep(300);
 				assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "the stopped message never reached omp");
 				assert.ok(!notified.some(m => m.type === "chime"));
 				session.panel.dispose();
