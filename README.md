@@ -2,9 +2,11 @@
 
 Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code, with:
 
-- **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning.
+- **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning. A request to use the browser shows the code omp is about to run, open and in full, with the web addresses written in it listed above (the code may open other pages too, so check it).
 - **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected (and why, if you say).
 - **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
+- **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, the queued messages are sent together as the next message; a queued slash command (like `/compact`) is sent on its own. If you press **Stop**, or the turn fails or omp crashes, the queued messages go back into the input instead of being sent. A message you send after pressing Stop runs as soon as the stopped turn ends.
+- **Activity line:** while omp works, a line above the input says what it is doing (thinking, running a tool, waiting for your answer or review) and for how long.
 
 ## How it works
 
@@ -34,7 +36,7 @@ code --install-extension omp-vscode-0.1.0.vsix --force
 
 Reload VS Code. Click the **OMP** icon in the left activity bar: the chat opens as a tab next to your files, and the sidebar switches back to the Explorer. The buttons in the chat tab's title bar start a new session, move the chat into its own window, or show the log.
 
-**Parallel sessions:** **New Session** opens another chat tab (**OMP 2**, **OMP 3**, …) with its own omp, running independently of the others. Each session has its own Stop button, cards and review queue, so one session's review never waits behind another's. When a session needs an answer while its tab is hidden, the tab title gets a **●**. Closing a tab ends that session: its omp stops and its open reviews are cancelled. If two sessions change the same file, whichever review finishes second is not saved, and that omp is told to read the file again. **OMP: Open Chat** in the Command Palette does the same as the icon. After changing the code, run the last two commands again.
+**Parallel sessions:** **New Session** opens another chat tab (**OMP 2**, **OMP 3**, …) with its own omp, running independently of the others. Each session has its own Stop button, cards and review queue, so one session's review never waits behind another's. When a session needs an answer or finishes while its tab is hidden, the tab gets an orange dot icon and a **●** in its title until you look at it. Closing a tab ends that session: its omp stops and its open reviews are cancelled. If two sessions change the same file, whichever review finishes second is not saved, and that omp is told to read the file again. **OMP: Open Chat** in the Command Palette does the same as the icon. After changing the code, run the last two commands again.
 
 To work on the extension itself, open this folder and press **F5** to start a test window with the current code.
 
@@ -49,6 +51,7 @@ While reviewing: click **Accept** / **Reject** above each change, or put the cur
 | `omp.preferEditTool` | `true` | Tell omp to change files only through its edit tool |
 | `omp.autoApproveEditPrompts` | `true` | Skip omp's yes/no prompt for edits, since the diff review follows anyway |
 | `omp.warnOnShellFileChanges` | `true` | Warn on shell commands that look like they change files |
+| `omp.soundOnFinish` | `true` | Play a short chime when omp finishes a reply |
 
 The extension also turns on `diffEditor.codeLens`, which VS Code hides by default; without it the per-change buttons don't show.
 
@@ -64,6 +67,7 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 - Changes made by shell commands (scripts, `sed -i`, …) skip the diff review. You only see the command approval.
 - "Always allow" on a shell command allows **all** shell commands for the rest of the session (that's how omp groups it).
 - Shell commands run inside omp, not in a VS Code terminal.
+- A queued message waits for the whole turn to end: omp's editor mode has no way to add a message to a turn that is already running. Use New Session to work on two things at once.
 - All sessions work in the first folder of the workspace.
 
 ## License

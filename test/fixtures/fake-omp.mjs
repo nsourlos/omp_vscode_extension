@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
-// The prompt text is a JSON list of steps, run in order:
+// A prompt starting with "/" is logged as a slash command and ends the turn. Otherwise the prompt
+// text is a JSON list of steps (or several, separated by a blank line), run in order:
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
 //   {"permission": "<command>"}     ask permission to run a shell command
 //   {"approve": "<tool>\n<details>"} send omp's "Allow tool" approval prompt
 //   {"say": "<text>"}               stream a message chunk
+//   {"update": {...}}               send this session/update as is (e.g. a tool_call)
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
@@ -47,7 +49,7 @@ async function runTurn(steps) {
 			replies.forEach((reply, i) => record({ event: "write", path: step.writes[i].path, error: reply.error?.message }));
 		} else if (step.elicitUrl) {
 			const reply = await request("elicitation/create", { sessionId, mode: "url", message: "Open this", url: step.elicitUrl });
-			record({ event: "elicitUrl", result: reply.result });
+			record({ event: "elicitUrl", url: step.elicitUrl, result: reply.result });
 		} else if (step.permission) {
 			const reply = await request("session/request_permission", {
 				sessionId,
@@ -68,7 +70,10 @@ async function runTurn(steps) {
 			record({ event: "approve", result: reply.result });
 		} else if (step.say) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
+		} else if (step.update) {
+			send({ method: "session/update", params: { sessionId, update: step.update } });
 		} else if (step.hang) {
+			record({ event: "hang" });
 			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
 			if (cancelled) return "cancelled";
 		} else if (step.exit !== undefined) {
@@ -93,7 +98,13 @@ async function handle(message) {
 			record({ event: "session/new", cwd: message.params.cwd });
 			return send({ id: message.id, result: { sessionId } });
 		case "session/prompt": {
-			const steps = JSON.parse(message.params.prompt[0].text);
+			const text = message.params.prompt[0].text;
+			if (text.startsWith("/")) {
+				record({ event: "command", text });
+				return send({ id: message.id, result: { stopReason: "end_turn" } });
+			}
+			// Queued messages arrive joined by a blank line: one JSON list each.
+			const steps = text.split("\n\n").flatMap(part => JSON.parse(part));
 			const stopReason = await runTurn(steps);
 			return send({ id: message.id, result: { stopReason } });
 		}

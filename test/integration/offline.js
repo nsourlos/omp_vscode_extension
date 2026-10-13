@@ -59,6 +59,19 @@ exports.run = async function run() {
 		}
 		return panel.recorded;
 	};
+	/** Every one-off message (chimes, text put back in the input) sent to this chat tab, from the first call on. */
+	const notificationsOf = panel => {
+		if (!panel.notified) {
+			const sent = [];
+			const notify = panel.notify.bind(panel);
+			panel.notify = message => {
+				sent.push(message);
+				notify(message);
+			};
+			panel.notified = sent;
+		}
+		return panel.notified;
+	};
 	const respond = (panel, card, value, label) => panel.receive({ type: "respond", requestId: card.requestId, value, label });
 	const tabLabel = panel =>
 		allTabs().find(tab => tab.input instanceof vscode.TabInputWebview && tab.label.endsWith(panel.label))?.label;
@@ -354,6 +367,50 @@ exports.run = async function run() {
 			assert.deepEqual(permission.result, { outcome: { outcome: "selected", optionId: "allow_once" } });
 		},
 
+		async "a browser approval shows the page only when one running code step can be the one asking"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const evalCall = (id, page, status) => ({
+				sessionUpdate: status ? "tool_call_update" : "tool_call",
+				toolCallId: id,
+				kind: "other",
+				status: status ?? "in_progress",
+				rawInput: { language: "js", code: `const tab = await browser.open();\nawait tab.goto("https://example.com/${page}");` },
+			});
+			const turn = controller.send(
+				steps(
+					{ update: evalCall("e1", "one") },
+					{ update: { ...evalCall("e2", "plain"), rawInput: { code: "1 + 1" } } },
+					{ approve: "browser" },
+					{ approve: "mcp__x" },
+					{ update: evalCall("e3", "three") },
+					{ approve: "browser" },
+					{ update: evalCall("e1", "one", "completed") },
+					{ update: evalCall("e3", "three", "completed") },
+					{ approve: "browser" },
+				),
+			);
+			const card = async n => {
+				const found = await waitFor(() => posts.slice(seen).filter(m => m.type === "approval")[n], `approval card ${n + 1}`);
+				respond(panel, found, "Deny", "Denied");
+				return found;
+			};
+			const only = await card(0);
+			assert.deepEqual(only.urls, ["https://example.com/one"], "the one running step that uses the browser");
+			assert.equal(only.someUrlsHidden, false);
+			assert.match(only.code, /tab\.goto/);
+			const otherTool = await card(1);
+			assert.equal(otherTool.code, undefined, "another tool's bare prompt borrows no code");
+			const two = await card(2);
+			assert.equal(two.code, undefined, "with two browser steps running, neither is guessed");
+			assert.equal(two.unclear, true);
+			const none = await card(3);
+			assert.equal(none.code, undefined, "a finished step's code is not shown");
+			assert.equal(none.unclear, false);
+			await turn;
+		},
+
 		async "a hidden session that needs an answer marks its tab and doesn't cover another session"() {
 			const [first, second] = api.sessions.all;
 			first.panel.reveal();
@@ -378,6 +435,152 @@ exports.run = async function run() {
 			await waitFor(() => tabLabel(first.panel) === "OMP 1", "no mark on a tab that is in front");
 			respond(first.panel, postsOne.slice(seenOne).find(m => m.type === "permission"), "allow_once", "Allow once");
 			await turnOne;
+		},
+
+		async "a session that finishes while its tab is hidden marks the tab until it is seen"() {
+			const [first, second] = api.sessions.all;
+			first.panel.reveal();
+			await waitFor(() => first.panel.visible && !second.panel.visible, "session 1 in front of session 2");
+			assert.equal(tabLabel(second.panel), "OMP 2", "unmarked before its turn");
+			await second.controller.send(steps({ say: "done" }));
+			await waitFor(() => tabLabel(second.panel) === "● OMP 2", "session 2's tab to be marked");
+			await first.controller.send(steps({ say: "done" }));
+			assert.equal(tabLabel(first.panel), "OMP 1", "the tab in front is not marked");
+			second.panel.reveal();
+			await waitFor(() => tabLabel(second.panel) === "OMP 2", "the mark to clear once the tab is seen");
+		},
+
+		async "a finished reply chimes once, unless stopped or switched off, and the chime is never replayed"() {
+			const panel = api.sessions.all[0].panel;
+			const notified = notificationsOf(panel);
+			const seen = notified.length;
+			const chimes = () => notified.slice(seen).filter(m => m.type === "chime").length;
+			const config = vscode.workspace.getConfiguration("omp");
+			try {
+				await controller.send(steps({ say: "done" }));
+				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
+				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
+
+				const hung = fakeLog().length;
+				const turn = controller.send(steps({ hang: true }));
+				await waitFor(() => fakeLog().slice(hung).some(e => e.event === "hang"), "omp to be mid-turn");
+				controller.cancel();
+				await turn;
+				assert.equal(chimes(), 1, "no chime after Stop");
+
+				await config.update("soundOnFinish", false, vscode.ConfigurationTarget.Workspace);
+				await controller.send(steps({ say: "done" }));
+				assert.equal(chimes(), 1, "no chime with the setting off");
+			} finally {
+				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
+		async "messages sent while omp works wait, then go together as the next turn"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+			const first = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the first turn's card");
+			const one = steps({ elicitUrl: "https://one.test" });
+			const two = steps({ elicitUrl: "https://two.test" });
+			await controller.send(one);
+			await controller.send(two);
+			const queued = posts.slice(seen).filter(m => m.type === "queued");
+			assert.deepEqual(queued.map(m => m.text), [one, two]);
+			assert.ok(!posts.slice(seen).some(m => m.type === "notice"), "no 'still working' warning");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "nothing queued reached omp yet");
+
+			respond(panel, card, "allow_once", "Allow once");
+			await first;
+			const urls = fakeLog().slice(logged).filter(e => e.event === "elicitUrl").map(e => e.url);
+			assert.deepEqual(urls, ["https://one.test", "https://two.test"], "both ran, in order, after the first turn");
+			const users = posts.slice(seen).filter(m => m.type === "user").map(m => m.text);
+			assert.deepEqual(users.slice(1), [`${one}\n\n${two}`], "as one message");
+			const dequeued = posts.slice(seen).find(m => m.type === "dequeued");
+			assert.deepEqual(dequeued.ids, queued.map(m => m.id));
+			assert.equal(notified.slice(seenNotified).filter(m => m.type === "chime").length, 1, "one chime, after the queued turn");
+		},
+
+		async "a queued slash command runs as its own turn, between the plain messages around it"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const logged = fakeLog().length;
+			const first = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the first turn's card");
+			const one = steps({ elicitUrl: "https://one.test" });
+			const two = steps({ elicitUrl: "https://two.test" });
+			const three = steps({ elicitUrl: "https://three.test" });
+			for (const text of [one, "/compact", two, three]) await controller.send(text);
+			respond(panel, card, "allow_once", "Allow once");
+			await first;
+			const users = posts.slice(seen).filter(m => m.type === "user").map(m => m.text);
+			assert.deepEqual(users.slice(1), [one, "/compact", `${two}\n\n${three}`]);
+			const order = fakeLog()
+				.slice(logged)
+				.filter(e => e.event === "elicitUrl" || e.event === "command")
+				.map(e => e.url ?? e.text);
+			assert.deepEqual(order, ["https://one.test", "/compact", "https://two.test", "https://three.test"]);
+		},
+
+		async "a message sent right after Stop runs next instead of going back to the input"() {
+			const panel = api.sessions.all[0].panel;
+			const notified = notificationsOf(panel);
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+			const turn = controller.send(steps({ hang: true }));
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "hang"), "omp to be mid-turn");
+			controller.cancel();
+			await controller.send(steps({ elicitUrl: "https://resent.test" })); // the stopped turn is still finishing
+			await turn;
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "elicitUrl" && e.url === "https://resent.test"), "the re-sent message reached omp");
+			assert.ok(!notified.slice(seenNotified).some(m => m.type === "restoreInput"), "nothing was pushed back into the input");
+		},
+
+		async "a turn that ends normally after Stop does not chime"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const turn = controller.send(steps({ permission: "ls" }, { say: "finished anyway" }));
+			await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			controller.cancel(); // the fake omp then ends its turn with end_turn, like a Stop that lost the race
+			await turn;
+			assert.equal(posts.slice(seen).find(m => m.type === "turnEnd").stopReason, "end_turn");
+			assert.ok(!notified.slice(seenNotified).some(m => m.type === "chime"), "no chime after Stop");
+		},
+
+		async "Stop puts queued messages back in the input, and a removed one is never sent"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			const seenNotified = notified.length;
+			const logged = fakeLog().length;
+
+			let turn = controller.send(steps({ permission: "ls" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			await controller.send(steps({ elicitUrl: "https://removed.test" }));
+			const removed = posts.slice(seen).find(m => m.type === "queued");
+			panel.receive({ type: "unqueue", id: removed.id });
+			assert.ok(posts.slice(seen).some(m => m.type === "dequeued" && m.ids.includes(removed.id)));
+			respond(panel, card, "allow_once", "Allow once");
+			await turn;
+
+			const kept = steps({ elicitUrl: "https://kept.test" });
+			const hung = fakeLog().length;
+			turn = controller.send(steps({ hang: true }));
+			await waitFor(() => fakeLog().slice(hung).some(e => e.event === "hang"), "omp to be mid-turn");
+			await controller.send(kept);
+			controller.cancel();
+			await turn;
+			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "restoreInput"), [{ type: "restoreInput", text: kept }]);
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "neither queued message reached omp");
 		},
 
 		async "after omp crashes, the next message starts a fresh omp"() {
@@ -543,6 +746,26 @@ exports.run = async function run() {
 				session.panel.dispose();
 				await sleep(1500);
 				assert.equal(fakeLog().slice(before).filter(entry => entry.event === "session/new").length, 0);
+			} finally {
+				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
+		async "Stop while omp is still starting sends nothing and does not chime"() {
+			const config = vscode.workspace.getConfiguration("omp");
+			const args = config.get("extraArgs");
+			await config.update("extraArgs", [...args, "--init-delay", "1000"], vscode.ConfigurationTarget.Workspace);
+			try {
+				const session = await newSession();
+				const notified = notificationsOf(session.panel);
+				const logged = fakeLog().length;
+				const turn = session.controller.send(steps({ elicitUrl: "https://late.test" }));
+				session.controller.cancel(); // omp is still in its 1s startup
+				await turn;
+				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/new"), "omp to finish starting");
+				assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "the stopped message never reached omp");
+				assert.ok(!notified.some(m => m.type === "chime"));
+				session.panel.dispose();
 			} finally {
 				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
 			}

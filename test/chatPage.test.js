@@ -9,15 +9,24 @@ const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "
 
 /** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
 const BODY = `<div id="log"></div>
+<div id="activity" hidden></div>
+<div id="queue"></div>
 <footer>
   <div id="settings"></div>
   <textarea id="input"></textarea>
   <div class="row"><span id="status"></span><span id="usage"></span><button id="stop" hidden></button><button id="send"></button></div>
 </footer>`;
 
-function openChat() {
+const windows = [];
+test.after(() => {
+	for (const window of windows) window.close(); // stops the activity line's timer
+});
+
+function openChat(setup = () => {}) {
 	const dom = new JSDOM(`<!DOCTYPE html><body>${BODY}</body>`, { runScripts: "outside-only", pretendToBeVisual: true });
 	const { window } = dom;
+	windows.push(window);
+	setup(window);
 	const posted = [];
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
 	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
@@ -26,6 +35,8 @@ function openChat() {
 	return {
 		posted,
 		log: window.document.getElementById("log"),
+		activity: window.document.getElementById("activity"),
+		window,
 		deliver: (...messages) => {
 			for (const data of messages) window.dispatchEvent(new window.MessageEvent("message", { data }));
 		},
@@ -74,6 +85,37 @@ test("approval cards send Approve or Deny with a label", () => {
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "Deny", label: "Denied" });
 });
 
+test("a browser approval lists the addresses in the code, never as the full list, with the full code open", () => {
+	const chat = openChat();
+	const code = 'await tab.goto("https://example.com/a")';
+	const note = card => [...card.querySelectorAll(".field-description")].at(-1).textContent;
+	chat.deliver({ type: "approval", requestId: "9", toolName: "browser", details: "", code, urls: ["https://example.com/a"] });
+	const card = chat.log.querySelector(".card");
+	assert.equal(card.querySelector(".card-heading").textContent, "Allow omp to use the browser?");
+	assert.equal(card.querySelector(".field-description").textContent, "Addresses written in the code:");
+	assert.equal(card.querySelector(".location").textContent, "🌐 https://example.com/a");
+	assert.match(note(card), /may also open pages not listed/, "a found address is never presented as the only page");
+	assert.equal(card.querySelector("details").open, true, "the code is open, so it can be checked");
+	assert.equal(card.querySelector("details pre").textContent, code);
+
+	const long = "x".repeat(7000);
+	chat.deliver({ type: "approval", requestId: "13", toolName: "browser", details: "", code: long, urls: [] });
+	const longCard = chat.log.querySelectorAll(".card")[1];
+	assert.equal(longCard.querySelector("details pre").textContent, long, "not cut short");
+	assert.match(note(longCard), /No address is written in the code/);
+
+	chat.deliver({ type: "approval", requestId: "10", toolName: "browser", details: "" });
+	assert.equal(note(chat.log.querySelectorAll(".card")[2]), "omp did not say which page.");
+
+	chat.deliver({ type: "approval", requestId: "11", toolName: "browser", details: "", unclear: true });
+	assert.match(note(chat.log.querySelectorAll(".card")[3]), /unclear which page/);
+
+	chat.deliver({ type: "approval", requestId: "12", toolName: "browser", details: "", code, urls: ["https://a.test"], someUrlsHidden: true });
+	const mixed = chat.log.querySelectorAll(".card")[4];
+	assert.equal(mixed.querySelector(".location").textContent, "🌐 https://a.test");
+	assert.match(note(mixed), /built from variables/, "the hidden address is flagged, not silently dropped");
+});
+
 test("a streamed reply renders once per frame, with nothing lost", async () => {
 	const chat = openChat();
 	const words = Array.from({ length: 500 }, (_, i) => `w${i} `);
@@ -94,4 +136,194 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.equal(replies[0].textContent, "Hello there", "the first reply rendered as soon as the second began");
 	await chat.nextFrame();
 	assert.deepEqual([...replies].map(reply => reply.textContent), ["Hello there", "Done"]);
+});
+
+test("the activity line says what omp is doing during a turn, and hides when it ends", () => {
+	const start = Date.UTC(2026, 0, 1);
+	let now = start;
+	const chat = openChat(window => (window.Date.now = () => now));
+	const shown = () => (chat.activity.hidden ? null : chat.activity.textContent.replace(/ · \d+s$/, ""));
+	const tool = (sessionUpdate, status) => ({
+		type: "update",
+		update: { sessionUpdate, toolCallId: "t1", title: "Read src/a.ts", kind: "read", status },
+	});
+	const review = state => ({ type: "review", info: { id: "r1", state, displayPath: "a.ts", hunkCount: 1, summary: "accepted" } });
+
+	assert.equal(shown(), null, "hidden before the first turn");
+	chat.deliver({ type: "status", state: "busy" });
+	assert.equal(shown(), "Working…");
+	chat.deliver({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "hmm" } } });
+	assert.equal(shown(), "Thinking…");
+	chat.deliver(tool("tool_call", "pending"));
+	assert.equal(shown(), "Running: Read src/a.ts");
+	chat.deliver(permission);
+	assert.equal(shown(), "Waiting for your answer");
+	chat.deliver({ type: "resolved", requestId: "7", label: "Allow once" });
+	assert.equal(shown(), "Running: Read src/a.ts");
+	chat.deliver(tool("tool_call_update", "completed"));
+	assert.equal(shown(), "Working…");
+	chat.deliver(review("open"));
+	assert.equal(shown(), "Waiting for your review");
+	now = start + 12_400;
+	chat.deliver(review("done"), chunk("All done"));
+	assert.equal(chat.activity.textContent, "Writing… · 12s", "with the seconds since the turn began");
+	chat.deliver({ type: "status", state: "idle" });
+	assert.equal(shown(), null);
+});
+
+test("Stop shows while omp starts for a sent message, but not while it starts on its own", () => {
+	const chat = openChat();
+	const stop = chat.window.document.getElementById("stop");
+	chat.deliver({ type: "status", state: "starting" });
+	assert.equal(stop.hidden, true, "nothing to stop yet");
+	chat.deliver({ type: "status", state: "idle" }, { type: "status", state: "busy" }, { type: "status", state: "starting" });
+	assert.equal(stop.hidden, false, "the message waits for omp to start");
+	chat.deliver({ type: "status", state: "idle" });
+	assert.equal(stop.hidden, true);
+});
+
+test("streamed chunks leave the activity line alone while its label stays the same", async () => {
+	const chat = openChat();
+	chat.deliver({ type: "status", state: "busy" }, chunk("a"));
+	const changes = [];
+	new chat.window.MutationObserver(records => changes.push(...records)).observe(chat.activity, { childList: true, characterData: true, subtree: true });
+	chat.deliver(chunk("b"), chunk("c"), chunk("d"));
+	await Promise.resolve();
+	assert.equal(changes.length, 0);
+
+	const running = { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "t1", title: "Run tests", status: "in_progress" } };
+	chat.deliver(running);
+	await Promise.resolve();
+	changes.length = 0;
+	chat.deliver(running, running, running); // a long tool streaming output
+	await Promise.resolve();
+	assert.equal(changes.length, 0, "repeated tool updates leave it alone too");
+	chat.deliver({ type: "status", state: "idle" });
+});
+
+test("a card or review left open by an earlier turn does not stick to the next one", () => {
+	const chat = openChat();
+	const review = { type: "review", info: { id: "r9", state: "open", displayPath: "a.ts", hunkCount: 1 } };
+	chat.deliver({ type: "status", state: "busy" }, permission, review, { type: "status", state: "idle" });
+	chat.deliver({ type: "status", state: "busy" });
+	assert.match(chat.activity.textContent, /^Working…/);
+	chat.deliver({ type: "status", state: "idle" });
+});
+
+test("queued messages show above the input, can be removed, and come back into the input", () => {
+	const chat = openChat();
+	const queue = chat.window.document.getElementById("queue");
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "queued", id: "1", text: "also fix the tests" }, { type: "queued", id: "2", text: "and the docs" });
+	assert.deepEqual([...queue.querySelectorAll(".queued-text")].map(item => item.textContent), ["also fix the tests", "and the docs"]);
+	assert.equal(chat.log.textContent, "", "not in the conversation until sent");
+
+	queue.querySelector("button").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "unqueue", id: "1" });
+	chat.deliver({ type: "dequeued", ids: ["1"] });
+	assert.deepEqual([...queue.querySelectorAll(".queued-text")].map(item => item.textContent), ["and the docs"]);
+
+	input.value = "a draft";
+	chat.deliver({ type: "dequeued", ids: ["2"] }, { type: "restoreInput", text: "and the docs" });
+	assert.equal(queue.children.length, 0);
+	assert.equal(input.value, "and the docs\n\na draft", "put back ahead of what was being typed");
+});
+
+/** A chat page with a stand-in audio device whose permission to play, and clock, the test controls. */
+function openChatWithAudio() {
+	const audio = { devices: [], tones: [], last: null, now: 0 };
+	class FakeAudioContext {
+		state = "suspended";
+		currentTime = 0;
+		destination = {};
+		constructor() {
+			audio.devices.push(this);
+		}
+		waiting = [];
+		/** Like Chrome: once audio may start, every resume() still waiting resolves together. */
+		allow() {
+			this.state = "running";
+			for (const resolve of this.waiting.splice(0)) resolve();
+		}
+		resume() {
+			return new Promise(resolve => this.waiting.push(resolve));
+		}
+		suspend() {
+			this.state = "suspended";
+			return Promise.resolve();
+		}
+		createOscillator() {
+			const tone = { frequency: {}, connect: node => node, start: () => audio.tones.push(tone.frequency.value), stop() {} };
+			audio.last = tone;
+			return tone;
+		}
+		createGain() {
+			return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: node => node };
+		}
+	}
+	const chat = openChat(window => {
+		window.AudioContext = FakeAudioContext;
+		window.Date.now = () => audio.now;
+	});
+	return { chat, audio };
+}
+
+test("audio starts only for a chime, plays two tones, then pauses", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
+	assert.equal(audio.devices.length, 0, "typing alone starts no audio");
+
+	chat.deliver({ type: "chime" });
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, [880, 1318.5]);
+	audio.last.onended();
+	assert.equal(audio.devices[0].state, "suspended", "audio pauses once the tones end");
+});
+
+test("a chime that may only play after a later key press is dropped, not played late", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" });
+	audio.now = 5000; // the user comes back and presses a key
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, []);
+	assert.equal(audio.devices[0].state, "suspended", "and audio is paused again");
+});
+
+test("a dropped chime does not silence the next one when both get audio at once", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" }); // before the user has touched the page: it waits
+	audio.now = 5000;
+	chat.deliver({ type: "chime" }); // after the user typed a message
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.deepEqual(audio.tones, [880, 1318.5]);
+	assert.equal(audio.devices[0].state, "running", "the late first chime did not pause the second one's audio");
+});
+
+test("an earlier chime ending does not pause a newer one still playing", async () => {
+	const { chat, audio } = openChatWithAudio();
+	chat.deliver({ type: "chime" });
+	audio.devices[0].allow();
+	await Promise.resolve();
+	const firstChimeEnd = audio.last;
+	chat.deliver({ type: "chime" });
+	audio.devices[0].allow();
+	await Promise.resolve();
+	assert.equal(audio.tones.length, 4, "both chimes played");
+	firstChimeEnd.onended();
+	assert.equal(audio.devices[0].state, "running", "the second chime keeps its audio");
+	audio.last.onended();
+	assert.equal(audio.devices[0].state, "suspended", "the newest chime's end pauses audio");
+});
+
+test("a chime whose audio cannot start is reported, not thrown", async () => {
+	const { chat } = openChatWithAudio();
+	const warnings = [];
+	chat.window.AudioContext.prototype.resume = () => Promise.reject(new Error("no audio device"));
+	chat.window.console.warn = (...args) => warnings.push(args.join(" "));
+	chat.deliver({ type: "chime" });
+	await new Promise(resolve => setImmediate(resolve));
+	assert.match(warnings[0], /could not play the finish chime/);
 });

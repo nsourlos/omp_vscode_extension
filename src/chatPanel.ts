@@ -6,7 +6,10 @@ export const CHAT_PANEL_TYPE = "omp.chatPanel";
 
 export class ChatPanel implements vscode.Disposable {
 	#panel: vscode.WebviewPanel;
+	#icon: vscode.Uri;
+	#markedIcon: vscode.Uri;
 	#ready = false;
+	#disposed = false;
 	#history: unknown[] = [];
 	#messages = new vscode.EventEmitter<any>();
 	#activated = new vscode.EventEmitter<void>();
@@ -28,15 +31,23 @@ export class ChatPanel implements vscode.Disposable {
 			retainContextWhenHidden: true,
 			localResourceRoots: [media],
 		});
-		this.#panel.iconPath = vscode.Uri.joinPath(media, "omp.svg");
+		this.#icon = vscode.Uri.joinPath(media, "omp.svg");
+		this.#markedIcon = vscode.Uri.joinPath(media, "omp-done.svg");
+		this.#panel.iconPath = this.#icon;
 		this.#panel.webview.html = chatHtml(this.#panel.webview, media);
 		this.#panel.webview.onDidReceiveMessage(message => this.receive(message));
 		this.#panel.onDidChangeViewState(() => {
-			if (this.#panel.visible) this.#panel.title = label;
+			if (this.#panel.visible) {
+				this.#panel.title = label;
+				this.#panel.iconPath = this.#icon;
+			}
 			if (this.#panel.active) this.#activated.fire();
 		});
 		// Registered before any outside listener, so cleanup that posts during dispose is dropped.
-		this.#panel.onDidDispose(() => (this.#ready = false));
+		this.#panel.onDidDispose(() => {
+			this.#ready = false;
+			this.#disposed = true;
+		});
 		this.onDidDispose = this.#panel.onDidDispose;
 	}
 
@@ -64,6 +75,11 @@ export class ChatPanel implements vscode.Disposable {
 		if (this.#ready) void this.#panel.webview.postMessage(message);
 	}
 
+	/** Post a one-off message (like a sound) that a reloaded page must not replay. */
+	notify(message: unknown): void {
+		if (this.#ready) void this.#panel.webview.postMessage(message);
+	}
+
 	reveal(preserveFocus = false): void {
 		this.#panel.reveal(undefined, preserveFocus);
 	}
@@ -71,8 +87,18 @@ export class ChatPanel implements vscode.Disposable {
 	/** The session needs an answer: mark the tab, and bring it forward unless that would hide another session. */
 	requestAttention(): void {
 		if (this.#panel.visible) return;
-		this.#panel.title = `● ${this.label}`;
+		this.#mark();
 		if (!this.coversAnotherSession()) this.reveal(true);
+	}
+
+	/** A turn ended: if the tab is hidden, mark it until it is seen. */
+	markFinished(): void {
+		if (!this.#disposed && !this.#panel.visible) this.#mark();
+	}
+
+	#mark(): void {
+		this.#panel.title = `● ${this.label}`;
+		this.#panel.iconPath = this.#markedIcon;
 	}
 
 	dispose(): void {
@@ -99,6 +125,8 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
 </head>
 <body>
 <div id="log" role="log" aria-live="polite"></div>
+<div id="activity" hidden></div>
+<div id="queue"></div>
 <footer>
   <div id="settings"></div>
   <textarea id="input" rows="3" placeholder="Ask omp… (Enter to send, Shift+Enter for a new line)"></textarea>

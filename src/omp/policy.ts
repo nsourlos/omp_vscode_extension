@@ -40,6 +40,40 @@ export function parseApprovalMessage(message: string): { toolName: string; detai
 	return { toolName: match[1], details: match[2].trim() };
 }
 
+/** The code an eval tool call runs (one `code` string, or `cells` each with code), or undefined. */
+export function codeOfToolInput(rawInput: unknown): string | undefined {
+	if (typeof rawInput !== "object" || rawInput === null) return undefined;
+	const input = rawInput as { code?: unknown; cells?: unknown };
+	if (typeof input.code === "string") return input.code;
+	if (!Array.isArray(input.cells)) return undefined;
+	const codes: string[] = [];
+	for (const cell of input.cells) {
+		if (typeof cell?.code === "string") codes.push(cell.code);
+	}
+	if (codes.length === 0) return undefined;
+	return codes.join("\n\n");
+}
+
+/**
+ * The distinct web addresses written out in full in a piece of code, in order, and whether any
+ * other address is built from a variable (its real value is not in the code, so it is left out).
+ */
+export function urlsIn(text: string): { urls: string[]; someHidden: boolean } {
+	const urls: string[] = [];
+	let someHidden = false;
+	for (const match of text.matchAll(/https?:\/\/[^\s"'`<>()[\]{}]*/g)) {
+		const after = text.slice(match.index + match[0].length);
+		let built = false;
+		if (match[0].endsWith("//")) built = true; // "https://" + host
+		if (after.startsWith("{")) built = true; // `https://${host}`, f"https://{host}", "https://{}".format(host)
+		if (match[0].includes("%s") || match[0].endsWith("%")) built = true; // "https://%s" % host, "%(name)s"
+		if (/^["'`]\s*\+/.test(after)) built = true; // "https://example.com/" + path
+		if (built) someHidden = true;
+		else urls.push(match[0].replace(/[.,;:]+$/, ""));
+	}
+	return { urls: [...new Set(urls)], someHidden };
+}
+
 /** Tools whose output always passes through our diff review before it is saved. */
 export const DIFF_REVIEWED_TOOLS = new Set(["edit", "write"]);
 

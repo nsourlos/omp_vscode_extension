@@ -20,10 +20,12 @@ import { OmpAgent, resolveOmpCommand } from "./omp/agent";
 import {
 	DIFF_REVIEWED_TOOLS,
 	PREFER_EDIT_TOOL_PROMPT,
+	codeOfToolInput,
 	fileChangeWarning,
 	parseApprovalMessage,
 	rejectionMessage,
 	staleFileMessage,
+	urlsIn,
 } from "./omp/policy";
 import { applyDecisions } from "./review/hunks";
 import type { ReviewManager } from "./review/reviewManager";
@@ -33,7 +35,13 @@ interface PendingRequest {
 	cancelValue: unknown;
 }
 
+interface QueuedMessage {
+	id: string;
+	text: string;
+}
+
 let nextRequestId = 1;
+let nextQueuedId = 1;
 let nextControllerId = 1;
 
 /** Runs one chat session: its own omp process, cards and review queue. */
@@ -43,6 +51,10 @@ export class Controller implements vscode.Disposable {
 	#starting: Promise<OmpAgent> | undefined;
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
+	#stopRequested = false;
+	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
+	#runningCode = new Map<string, string>();
+	#queue: QueuedMessage[] = [];
 	#lastNotice: string | undefined;
 	#disposables: vscode.Disposable[] = [];
 
@@ -59,20 +71,32 @@ export class Controller implements vscode.Disposable {
 		);
 	}
 
+	/**
+	 * Run one turn. A message sent while a turn runs waits in a queue, because omp's ACP mode
+	 * cancels the running turn when a second prompt arrives; queued messages go together as
+	 * the next turn, and the chime waits for that one.
+	 */
 	async send(text: string): Promise<void> {
 		if (this.#busy) {
-			this.#notice("warning", "omp is still working. Press Stop first.");
+			const id = String(nextQueuedId++);
+			this.#queue.push({ id, text });
+			this.chat.post({ type: "queued", id, text });
 			return;
 		}
 		this.#busy = true;
+		this.#stopRequested = false;
 		this.#lastNotice = undefined;
+		this.#runningCode.clear();
 		this.chat.post({ type: "user", text });
 		this.chat.post({ type: "status", state: "busy" });
 		let agent: OmpAgent | undefined;
+		let finished = false;
 		try {
 			agent = await this.#ensureAgent();
-			const result = await agent.prompt(text);
+			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
+			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
 			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
+			finished = result.stopReason !== "cancelled" && !this.#stopRequested;
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
 		} finally {
@@ -80,11 +104,62 @@ export class Controller implements vscode.Disposable {
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
+		// Stop empties the queue, so anything queued after a Stop was typed to replace the stopped turn.
+		if ((finished || this.#stopRequested) && this.#queue.length > 0) {
+			const next = this.#takeNextTurn();
+			return this.send(next.map(message => message.text).join("\n\n"));
+		}
+		this.#returnQueueToInput();
+		this.chat.markFinished();
+		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
+			this.chat.notify({ type: "chime" });
+		}
 	}
 
+	/** Stop the turn; queued messages go back into the input box rather than being sent. */
 	cancel(): void {
+		this.#stopRequested = true;
+		this.#returnQueueToInput();
 		this.#agent?.cancel();
 		this.#cancelPending("Stopped by user");
+	}
+
+	/**
+	 * The queued messages for the next turn: a slash command on its own, since omp reads one only
+	 * at the start of a prompt, otherwise the plain messages up to the next slash command.
+	 */
+	#takeNextTurn(): QueuedMessage[] {
+		const isCommand = (message: QueuedMessage) => message.text.startsWith("/");
+		let count = 1;
+		if (!isCommand(this.#queue[0])) {
+			while (count < this.#queue.length && !isCommand(this.#queue[count])) count++;
+		}
+		const next = this.#queue.slice(0, count);
+		this.#dequeue(next);
+		return next;
+	}
+
+	#takeQueue(): QueuedMessage[] {
+		const queued = this.#queue;
+		this.#dequeue(queued);
+		return queued;
+	}
+
+	/** Take these messages out of the queue and off the chat's queued list. */
+	#dequeue(messages: QueuedMessage[]): void {
+		if (messages.length === 0) return;
+		this.#queue = this.#queue.filter(message => !messages.includes(message));
+		this.chat.post({ type: "dequeued", ids: messages.map(message => message.id) });
+	}
+
+	#returnQueueToInput(): void {
+		const queued = this.#takeQueue();
+		if (queued.length > 0) this.chat.notify({ type: "restoreInput", text: queued.map(message => message.text).join("\n\n") });
+	}
+
+	#unqueue(id: string): void {
+		const message = this.#queue.find(queued => queued.id === id);
+		if (message) this.#dequeue([message]);
 	}
 
 	/** Start omp ahead of the first message, so the chat shows Ready and the model settings. */
@@ -104,6 +179,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.#queue = [];
 		this.#stopAgent("Chat closed");
 		for (const disposable of this.#disposables) disposable.dispose();
 	}
@@ -194,6 +270,9 @@ export class Controller implements vscode.Disposable {
 			case "cancel":
 				this.cancel();
 				break;
+			case "unqueue":
+				this.#unqueue(message.id);
+				break;
 			case "respond": {
 				const pending = this.#pending.get(message.requestId);
 				if (!pending) return;
@@ -237,6 +316,11 @@ export class Controller implements vscode.Disposable {
 		if (update.sessionUpdate === "config_option_update") {
 			this.chat.post({ type: "config", options: update.configOptions });
 			return;
+		}
+		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+			const code = codeOfToolInput(update.rawInput);
+			if (update.status === "completed" || update.status === "failed") this.#runningCode.delete(update.toolCallId);
+			else if (code) this.#runningCode.set(update.toolCallId, code);
 		}
 		this.chat.post({ type: "update", update });
 	}
@@ -321,12 +405,26 @@ export class Controller implements vscode.Disposable {
 				return { action: "accept", content: { value: "Approve" } };
 			}
 			const warn = config.get<boolean>("warnOnShellFileChanges", true) && approval.toolName === "bash";
+			// omp's browser prompt names no page, so show the code that asked, but only when
+			// exactly one running code step uses the browser: a guess could show the wrong page.
+			const candidates: string[] = [];
+			if (approval.toolName === "browser") {
+				for (const running of this.#runningCode.values()) {
+					if (/\bbrowser\b/.test(running)) candidates.push(running);
+				}
+			}
+			const code = candidates.length === 1 ? candidates[0] : undefined;
+			const found = code ? urlsIn(code) : undefined;
 			const choice = await this.#ask<string | undefined>(
 				{
 					type: "approval",
 					toolName: approval.toolName,
 					details: approval.details,
 					warning: warn ? fileChangeWarning(approval.details) : undefined,
+					code,
+					urls: found?.urls,
+					someUrlsHidden: found?.someHidden,
+					unclear: candidates.length > 1,
 				},
 				undefined,
 			);

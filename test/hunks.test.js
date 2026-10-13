@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { applyDecisions, diffFile, fileChangeWarning, parseApprovalMessage, rejectionMessage } = require("../dist/core.js");
+const {
+	applyDecisions,
+	codeOfToolInput,
+	diffFile,
+	fileChangeWarning,
+	parseApprovalMessage,
+	rejectionMessage,
+	urlsIn,
+} = require("../dist/core.js");
 
 const original = 'def greet():\n    print("Hi")\n\n\ndef add(a, b):\n    return a + b\n';
 const proposed = 'def greet():\n    print("Hello")\n\n\ndef add(a, b):\n    """Sum."""\n    return a + b\n';
@@ -44,6 +52,34 @@ test("flags shell commands that change files", () => {
 test("parses omp approval prompts", () => {
 	assert.deepEqual(parseApprovalMessage("Allow tool: edit\nFile: demo.py"), { toolName: "edit", details: "File: demo.py" });
 	assert.equal(parseApprovalMessage("Pick a color"), undefined);
+});
+
+test("finds the code of an eval call and the web addresses in it", () => {
+	assert.equal(codeOfToolInput({ code: "x = 1" }), "x = 1");
+	assert.equal(codeOfToolInput({ cells: [{ code: "a()" }, { title: "no code" }, { code: "b()" }] }), "a()\n\nb()");
+	assert.equal(codeOfToolInput({ command: "ls" }), undefined);
+	assert.equal(codeOfToolInput(undefined), undefined);
+
+	const code = `await tab.goto("https://example.com/docs?q=1");\n// see https://example.com/docs?q=1, then http://localhost:3000/a.`;
+	const hidden = { urls: [], someHidden: true };
+	assert.deepEqual(urlsIn(code), { urls: ["https://example.com/docs?q=1", "http://localhost:3000/a"], someHidden: false });
+	assert.deepEqual(urlsIn("no links here"), { urls: [], someHidden: false });
+	assert.deepEqual(urlsIn("tab.goto(`https://${host}/a`); tab.goto(`https://example.com/${path}`)"), hidden, "JS addresses built from variables");
+	assert.deepEqual(urlsIn('page.goto(f"https://example.com/{path}")'), hidden, "a Python f-string address");
+	assert.deepEqual(urlsIn('page.goto("https://%s/a" % host); page.goto("https://x.test/%(p)s" % v)'), hidden, "printf-style placeholders");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/" + path); tab.goto(\'https://example.com/b\'+x)'), hidden, "joined with +");
+	assert.deepEqual(urlsIn('tab.goto("https://example.com/{}".format(x))'), hidden, "str.format");
+	assert.deepEqual(urlsIn('tab.goto("https://" + host); page.goto("http://{}".format(h))'), hidden, "only the scheme written out");
+	assert.deepEqual(
+		urlsIn('tab.goto("https://example.com/pay?amount=$5"); tab.goto("https://example.com/a%20b")'),
+		{ urls: ["https://example.com/pay?amount=$5", "https://example.com/a%20b"], someHidden: false },
+		"a written-out address with $ or an escaped space is kept",
+	);
+	assert.deepEqual(
+		urlsIn('tab.goto("https://a.test"); tab.goto(`https://${host}`)'),
+		{ urls: ["https://a.test"], someHidden: true },
+		"a written-out address next to a hidden one says that one is hidden",
+	);
 });
 
 test("tells the agent exactly what was rejected", () => {

@@ -8,6 +8,8 @@
 	const statusEl = document.getElementById("status");
 	const usageEl = document.getElementById("usage");
 	const settingsEl = document.getElementById("settings");
+	const activityEl = document.getElementById("activity");
+	const queueEl = document.getElementById("queue");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -23,6 +25,14 @@
 	const tools = new Map();
 	const requests = new Map();
 	const reviews = new Map();
+
+	// What omp is doing right now, shown above the input while a turn runs.
+	let busySince = 0;
+	let activityTimer = 0;
+	let doing = "Working…";
+	const runningTools = new Map(); // toolCallId -> title
+	const waitingCards = new Set();
+	const waitingReviews = new Set();
 
 	// ---------- helpers ----------
 	function el(tag, className, text) {
@@ -154,6 +164,88 @@
 		if (target) keepScrolled(() => renderMarkdown(target.el, target.text));
 	}
 
+	// ---------- activity line ----------
+	function activityText() {
+		if (waitingCards.size) return "Waiting for your answer";
+		if (waitingReviews.size) return "Waiting for your review";
+		if (runningTools.size) return "Running: " + [...runningTools.values()].at(-1);
+		return doing;
+	}
+
+	function showActivity() {
+		if (!busySince) return;
+		const seconds = Math.floor((Date.now() - busySince) / 1000);
+		const text = `${activityText()} · ${seconds}s`;
+		if (activityEl.textContent !== text) activityEl.textContent = text; // called on every streamed chunk and tool update
+	}
+
+	function setDoing(text) {
+		doing = text;
+		showActivity();
+	}
+
+	function startActivity() {
+		if (busySince) return;
+		busySince = Date.now();
+		doing = "Working…";
+		runningTools.clear();
+		waitingCards.clear();
+		waitingReviews.clear();
+		activityEl.hidden = false;
+		activityTimer = setInterval(showActivity, 1000);
+		showActivity();
+	}
+
+	function stopActivity() {
+		busySince = 0;
+		clearInterval(activityTimer);
+		activityEl.hidden = true;
+	}
+
+	// ---------- finish chime ----------
+	// Audio runs only for a chime and pauses after it. A page nobody has typed in or clicked yet
+	// (e.g. one just moved to a new window) is not allowed to play sound until they do; such a
+	// chime is dropped, because playing it on the next key press would come too late to mean anything.
+	const CHIME_DEADLINE_MS = 1000;
+	let audio = null;
+	let chimeCount = 0;
+
+	function chime() {
+		if (!window.AudioContext) return; // e.g. the test page
+		audio = audio || new AudioContext();
+		const asked = Date.now();
+		const id = ++chimeCount;
+		audio.resume().then(
+			() => {
+				// A dropped chime's resume can complete together with a newer chime's: leave the audio to that one.
+				if (id !== chimeCount) return;
+				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones(id);
+				else void audio.suspend();
+			},
+			error => console.warn("OMP: could not play the finish chime", error),
+		);
+	}
+
+	function playTones(id) {
+		const now = audio.currentTime;
+		const tones = [880, 1318.5].map((frequency, i) => {
+			const start = now + i * 0.12;
+			const tone = audio.createOscillator();
+			const volume = audio.createGain();
+			tone.frequency.value = frequency;
+			volume.gain.setValueAtTime(0.0001, start);
+			volume.gain.exponentialRampToValueAtTime(0.15, start + 0.02);
+			volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
+			tone.connect(volume).connect(audio.destination);
+			tone.start(start);
+			tone.stop(start + 0.55);
+			return tone;
+		});
+		tones.at(-1).onended = () => {
+			if (id === chimeCount) void audio.suspend(); // a newer chime may still be playing
+		};
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -161,6 +253,7 @@
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
 				thought = null;
+				setDoing("Writing…");
 				if (!assistant) {
 					const node = append(el("div", "msg assistant"));
 					assistant = { el: node, text: "" };
@@ -172,6 +265,7 @@
 			case "agent_thought_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
+				setDoing("Thinking…");
 				if (!thought) {
 					assistant = null;
 					const details = append(el("details", "thought"));
@@ -226,6 +320,12 @@
 				tool.status.textContent = STATUS_ICONS[update.status] || "";
 				tool.card.dataset.status = update.status;
 			}
+			if (tool.card.dataset.status === "completed" || tool.card.dataset.status === "failed") {
+				if (runningTools.delete(update.toolCallId) && !runningTools.size) doing = "Working…";
+			} else {
+				runningTools.set(update.toolCallId, tool.title.textContent || "a tool");
+			}
+			showActivity();
 			const command = update.rawInput?.command;
 			if (typeof command === "string") {
 				tool.command.textContent = "$ " + command;
@@ -264,6 +364,7 @@
 	}
 
 	function markResolved(requestId, label) {
+		if (waitingCards.delete(requestId)) showActivity();
 		const card = requests.get(requestId);
 		if (!card) return;
 		card.classList.add("resolved");
@@ -277,6 +378,8 @@
 		const node = append(el("div", "card"));
 		node.appendChild(el("div", "card-heading", heading));
 		requests.set(requestId, node);
+		waitingCards.add(requestId);
+		showActivity();
 		return node;
 	}
 
@@ -310,13 +413,37 @@
 	}
 
 	function onApproval(msg) {
-		const node = card(msg.requestId, `Allow tool: ${msg.toolName}?`);
+		const browser = msg.toolName === "browser";
+		const node = card(msg.requestId, browser ? "Allow omp to use the browser?" : `Allow tool: ${msg.toolName}?`);
 		if (msg.details) node.appendChild(el("pre", "tool-command", msg.details));
+		if (msg.urls?.length) {
+			node.appendChild(el("div", "field-description", "Addresses written in the code:"));
+			for (const url of msg.urls) node.appendChild(el("div", "location", "🌐 " + url));
+		}
+		if (browser) node.appendChild(el("div", "field-description", browserNote(msg)));
+		// Shown open and in full: the listed addresses are read from the code, which can never
+		// reveal every page it opens, so the code itself is what the user approves.
+		if (msg.code) {
+			const code = node.appendChild(el("details", "tool-output approval-code"));
+			code.open = true;
+			code.appendChild(el("summary", "", "Code it will run"));
+			code.appendChild(el("pre", "", msg.code));
+		}
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));
 		buttons.appendChild(el("button", "", "Approve")).addEventListener("click", () => respond(msg.requestId, "Approve", "Approved"));
 		buttons.appendChild(el("button", "secondary", "Deny")).addEventListener("click", () => respond(msg.requestId, "Deny", "Denied"));
 		finishCard(node);
+	}
+
+	function browserNote(msg) {
+		if (msg.code) {
+			if (msg.someUrlsHidden) return "Some addresses are built from variables, so they are not listed. Check the code below for every page it may open.";
+			if (msg.urls?.length) return "The code may also open pages not listed here. Check it below.";
+			return "No address is written in the code. Check it below for the page it opens.";
+		}
+		if (msg.unclear) return "Several code steps that use the browser are running, so it is unclear which page this is for.";
+		return "omp did not say which page.";
 	}
 
 	// Generic form for omp questions (select / confirm / input / multi-question ask).
@@ -390,6 +517,9 @@
 			reviews.set(info.id, node);
 		}
 		node.textContent = "";
+		if (info.state === "done") waitingReviews.delete(info.id);
+		else waitingReviews.add(info.id);
+		showActivity();
 		const count = `${info.hunkCount} change${info.hunkCount === 1 ? "" : "s"}`;
 		if (info.state === "done") {
 			node.classList.add("resolved");
@@ -421,11 +551,34 @@
 		}
 	}
 
+	// Messages sent while omp works wait here until the turn ends.
+	function onQueued(msg) {
+		const item = queueEl.appendChild(el("div", "queued"));
+		item.dataset.id = msg.id;
+		item.appendChild(el("span", "queued-label", "Queued"));
+		item.appendChild(el("span", "queued-text", msg.text));
+		const remove = item.appendChild(el("button", "secondary", "✕"));
+		remove.title = "Remove from the queue";
+		remove.addEventListener("click", () => vscode.postMessage({ type: "unqueue", id: msg.id }));
+	}
+
+	function onDequeued(ids) {
+		for (const item of [...queueEl.children]) if (ids.includes(item.dataset.id)) item.remove();
+	}
+
+	function restoreInput(text) {
+		input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+		input.focus();
+	}
+
 	function setStatus(state) {
 		const labels = { starting: "Starting omp…", busy: "Working…", idle: "Ready", stopped: "Stopped" };
 		statusEl.textContent = labels[state] || state;
 		statusEl.dataset.state = state;
-		stopButton.hidden = state !== "busy";
+		// A message can be what starts omp, and Stop must still work while it starts.
+		stopButton.hidden = !(state === "busy" || (state === "starting" && busySince));
+		if (state === "busy") startActivity();
+		else if (state !== "starting") stopActivity();
 	}
 
 	window.addEventListener("message", event => {
@@ -444,6 +597,10 @@
 			case "review": return onReview(msg.info);
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
+			case "chime": return chime();
+			case "queued": return onQueued(msg);
+			case "dequeued": return onDequeued(msg.ids);
+			case "restoreInput": return restoreInput(msg.text);
 			case "notice":
 				breakFlow();
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));
