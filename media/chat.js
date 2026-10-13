@@ -416,26 +416,34 @@
 		const browser = msg.toolName === "browser";
 		const node = card(msg.requestId, browser ? "Allow omp to use the browser?" : `Allow tool: ${msg.toolName}?`);
 		if (msg.details) node.appendChild(el("pre", "tool-command", msg.details));
-		for (const url of msg.urls || []) node.appendChild(el("div", "location", "🌐 " + url));
-		if (browser) {
-			let note = null;
-			if (msg.someUrlsHidden) note = "Some web addresses are built from variables and are not shown here: check the code below.";
-			else if (msg.urls?.length) note = null;
-			else if (msg.code) note = "No web address in the code below.";
-			else if (msg.unclear) note = "Several code steps that use the browser are running, so it is unclear which page this is for.";
-			else note = "omp did not say which page.";
-			if (note) node.appendChild(el("div", "field-description", note));
+		if (msg.urls?.length) {
+			node.appendChild(el("div", "field-description", "Addresses written in the code:"));
+			for (const url of msg.urls) node.appendChild(el("div", "location", "🌐 " + url));
 		}
+		if (browser) node.appendChild(el("div", "field-description", browserNote(msg)));
+		// Shown open and in full: the listed addresses are read from the code, which can never
+		// reveal every page it opens, so the code itself is what the user approves.
 		if (msg.code) {
-			const code = node.appendChild(el("details", "tool-output"));
+			const code = node.appendChild(el("details", "tool-output approval-code"));
+			code.open = true;
 			code.appendChild(el("summary", "", "Code it will run"));
-			code.appendChild(el("pre", "", truncate(msg.code)));
+			code.appendChild(el("pre", "", msg.code));
 		}
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));
 		buttons.appendChild(el("button", "", "Approve")).addEventListener("click", () => respond(msg.requestId, "Approve", "Approved"));
 		buttons.appendChild(el("button", "secondary", "Deny")).addEventListener("click", () => respond(msg.requestId, "Deny", "Denied"));
 		finishCard(node);
+	}
+
+	function browserNote(msg) {
+		if (msg.code) {
+			if (msg.someUrlsHidden) return "Some addresses are built from variables, so they are not listed. Check the code below for every page it may open.";
+			if (msg.urls?.length) return "The code may also open pages not listed here. Check it below.";
+			return "No address is written in the code. Check it below for the page it opens.";
+		}
+		if (msg.unclear) return "Several code steps that use the browser are running, so it is unclear which page this is for.";
+		return "omp did not say which page.";
 	}
 
 	// Generic form for omp questions (select / confirm / input / multi-question ask).

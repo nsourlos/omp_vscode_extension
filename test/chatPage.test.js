@@ -85,26 +85,35 @@ test("approval cards send Approve or Deny with a label", () => {
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "Deny", label: "Denied" });
 });
 
-test("a browser approval names the page and shows the code behind a toggle", () => {
+test("a browser approval lists the addresses in the code, never as the full list, with the full code open", () => {
 	const chat = openChat();
 	const code = 'await tab.goto("https://example.com/a")';
+	const note = card => [...card.querySelectorAll(".field-description")].at(-1).textContent;
 	chat.deliver({ type: "approval", requestId: "9", toolName: "browser", details: "", code, urls: ["https://example.com/a"] });
 	const card = chat.log.querySelector(".card");
 	assert.equal(card.querySelector(".card-heading").textContent, "Allow omp to use the browser?");
+	assert.equal(card.querySelector(".field-description").textContent, "Addresses written in the code:");
 	assert.equal(card.querySelector(".location").textContent, "🌐 https://example.com/a");
+	assert.match(note(card), /may also open pages not listed/, "a found address is never presented as the only page");
+	assert.equal(card.querySelector("details").open, true, "the code is open, so it can be checked");
 	assert.equal(card.querySelector("details pre").textContent, code);
-	assert.equal(card.querySelector("details").open, false, "the code starts folded");
+
+	const long = "x".repeat(7000);
+	chat.deliver({ type: "approval", requestId: "13", toolName: "browser", details: "", code: long, urls: [] });
+	const longCard = chat.log.querySelectorAll(".card")[1];
+	assert.equal(longCard.querySelector("details pre").textContent, long, "not cut short");
+	assert.match(note(longCard), /No address is written in the code/);
 
 	chat.deliver({ type: "approval", requestId: "10", toolName: "browser", details: "" });
-	assert.equal(chat.log.querySelectorAll(".card")[1].querySelector(".field-description").textContent, "omp did not say which page.");
+	assert.equal(note(chat.log.querySelectorAll(".card")[2]), "omp did not say which page.");
 
 	chat.deliver({ type: "approval", requestId: "11", toolName: "browser", details: "", unclear: true });
-	assert.match(chat.log.querySelectorAll(".card")[2].querySelector(".field-description").textContent, /unclear which page/);
+	assert.match(note(chat.log.querySelectorAll(".card")[3]), /unclear which page/);
 
 	chat.deliver({ type: "approval", requestId: "12", toolName: "browser", details: "", code, urls: ["https://a.test"], someUrlsHidden: true });
-	const mixed = chat.log.querySelectorAll(".card")[3];
+	const mixed = chat.log.querySelectorAll(".card")[4];
 	assert.equal(mixed.querySelector(".location").textContent, "🌐 https://a.test");
-	assert.match(mixed.querySelector(".field-description").textContent, /built from variables/, "the hidden address is flagged, not silently dropped");
+	assert.match(note(mixed), /built from variables/, "the hidden address is flagged, not silently dropped");
 });
 
 test("a streamed reply renders once per frame, with nothing lost", async () => {
