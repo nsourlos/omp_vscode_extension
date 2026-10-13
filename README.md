@@ -51,7 +51,7 @@ While reviewing: click **Accept** / **Reject** above each change, or put the cur
 | `omp.preferEditTool` | `true` | Tell omp to change files only through its edit tool |
 | `omp.autoApproveEditPrompts` | `true` | Skip omp's yes/no prompt for edits, since the diff review follows anyway |
 | `omp.warnOnShellFileChanges` | `true` | Warn on shell commands that look like they change files |
-| `omp.soundOnFinish` | `true` | Play a short chime when omp finishes a reply |
+| `omp.soundOnFinish` | `true` | Play opencode's "task finished" sound when omp finishes a reply |
 
 The extension also turns on `diffEditor.codeLens`, which VS Code hides by default; without it the per-change buttons don't show.
 
@@ -73,3 +73,5 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 ## License
 
 MIT (see the `LICENSE` file): free for anyone to use, copy, change and share, including commercially. Keep the license notice when you redistribute it.
+
+The finish sound, `media/staplebops-01.mp3`, is the "task finished" sound from [opencode](https://github.com/sst/opencode) (`packages/ui/src/assets/audio/`), copyright (c) 2025 opencode, used under the MIT License: see its terms at https://github.com/sst/opencode/blob/dev/packages/ui/LICENSE.

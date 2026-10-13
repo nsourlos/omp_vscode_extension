@@ -8,6 +8,7 @@ const { JSDOM } = require("jsdom");
 const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "utf8");
 
 /** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
+const CHIME_SRC = "media/staplebops-01.mp3";
 const BODY = `<div id="log"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>
@@ -23,7 +24,7 @@ test.after(() => {
 });
 
 function openChat(setup = () => {}) {
-	const dom = new JSDOM(`<!DOCTYPE html><body>${BODY}</body>`, { runScripts: "outside-only", pretendToBeVisual: true });
+	const dom = new JSDOM(`<!DOCTYPE html><body data-chime="${CHIME_SRC}">${BODY}</body>`, { runScripts: "outside-only", pretendToBeVisual: true });
 	const { window } = dom;
 	windows.push(window);
 	setup(window);
@@ -229,100 +230,43 @@ test("queued messages show above the input, can be removed, and come back into t
 	assert.equal(input.value, "and the docs\n\na draft", "put back ahead of what was being typed");
 });
 
-/** A chat page with a stand-in audio device whose permission to play, and clock, the test controls. */
-function openChatWithAudio() {
-	const audio = { devices: [], tones: [], last: null, now: 0 };
-	class FakeAudioContext {
-		state = "suspended";
-		currentTime = 0;
-		destination = {};
-		constructor() {
-			audio.devices.push(this);
-		}
-		waiting = [];
-		/** Like Chrome: once audio may start, every resume() still waiting resolves together. */
-		allow() {
-			this.state = "running";
-			for (const resolve of this.waiting.splice(0)) resolve();
-		}
-		resume() {
-			return new Promise(resolve => this.waiting.push(resolve));
-		}
-		suspend() {
-			this.state = "suspended";
-			return Promise.resolve();
-		}
-		createOscillator() {
-			const tone = { frequency: {}, connect: node => node, start: () => audio.tones.push(tone.frequency.value), stop() {} };
-			audio.last = tone;
-			return tone;
-		}
-		createGain() {
-			return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: node => node };
-		}
-	}
+/** A chat page whose audio player is a stand-in: play() succeeds, or fails with `refusal`. */
+function openChatWithAudio(refusal) {
+	const plays = [];
+	const warnings = [];
 	const chat = openChat(window => {
-		window.AudioContext = FakeAudioContext;
-		window.Date.now = () => audio.now;
+		window.Audio = class {
+			constructor(src) {
+				this.src = src;
+			}
+			play() {
+				plays.push(this.src);
+				return refusal ? Promise.reject(refusal) : Promise.resolve();
+			}
+		};
+		window.console.warn = (...args) => warnings.push(args.join(" "));
 	});
-	return { chat, audio };
+	return { chat, plays, warnings };
 }
 
-test("audio starts only for a chime, plays two tones, then pauses", async () => {
-	const { chat, audio } = openChatWithAudio();
+test("a chime plays opencode's finish sound, and nothing plays before one", () => {
+	const { chat, plays } = openChatWithAudio();
 	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
-	assert.equal(audio.devices.length, 0, "typing alone starts no audio");
-
+	assert.deepEqual(plays, [], "typing alone plays nothing");
 	chat.deliver({ type: "chime" });
-	audio.devices[0].allow();
-	await Promise.resolve();
-	assert.deepEqual(audio.tones, [880, 1318.5]);
-	audio.last.onended();
-	assert.equal(audio.devices[0].state, "suspended", "audio pauses once the tones end");
+	assert.deepEqual(plays, [CHIME_SRC]);
 });
 
-test("a chime that may only play after a later key press is dropped, not played late", async () => {
-	const { chat, audio } = openChatWithAudio();
+test("a chime the browser refuses on an unused page is dropped quietly", async () => {
+	const { chat, plays, warnings } = openChatWithAudio({ name: "NotAllowedError" });
 	chat.deliver({ type: "chime" });
-	audio.now = 5000; // the user comes back and presses a key
-	audio.devices[0].allow();
-	await Promise.resolve();
-	assert.deepEqual(audio.tones, []);
-	assert.equal(audio.devices[0].state, "suspended", "and audio is paused again");
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(plays.length, 1, "tried once, never again later");
+	assert.deepEqual(warnings, []);
 });
 
-test("a dropped chime does not silence the next one when both get audio at once", async () => {
-	const { chat, audio } = openChatWithAudio();
-	chat.deliver({ type: "chime" }); // before the user has touched the page: it waits
-	audio.now = 5000;
-	chat.deliver({ type: "chime" }); // after the user typed a message
-	audio.devices[0].allow();
-	await Promise.resolve();
-	assert.deepEqual(audio.tones, [880, 1318.5]);
-	assert.equal(audio.devices[0].state, "running", "the late first chime did not pause the second one's audio");
-});
-
-test("an earlier chime ending does not pause a newer one still playing", async () => {
-	const { chat, audio } = openChatWithAudio();
-	chat.deliver({ type: "chime" });
-	audio.devices[0].allow();
-	await Promise.resolve();
-	const firstChimeEnd = audio.last;
-	chat.deliver({ type: "chime" });
-	audio.devices[0].allow();
-	await Promise.resolve();
-	assert.equal(audio.tones.length, 4, "both chimes played");
-	firstChimeEnd.onended();
-	assert.equal(audio.devices[0].state, "running", "the second chime keeps its audio");
-	audio.last.onended();
-	assert.equal(audio.devices[0].state, "suspended", "the newest chime's end pauses audio");
-});
-
-test("a chime whose audio cannot start is reported, not thrown", async () => {
-	const { chat } = openChatWithAudio();
-	const warnings = [];
-	chat.window.AudioContext.prototype.resume = () => Promise.reject(new Error("no audio device"));
-	chat.window.console.warn = (...args) => warnings.push(args.join(" "));
+test("a chime that fails for another reason is reported, not thrown", async () => {
+	const { chat, warnings } = openChatWithAudio(new Error("no audio device"));
 	chat.deliver({ type: "chime" });
 	await new Promise(resolve => setImmediate(resolve));
 	assert.match(warnings[0], /could not play the finish chime/);

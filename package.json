@@ -216,7 +216,7 @@
         "omp.soundOnFinish": {
           "type": "boolean",
           "default": true,
-          "description": "Play a short chime when omp finishes a reply."
+          "description": "Play a short sound (opencode's \"task finished\" sound) when omp finishes a reply."
         }
       }
     }

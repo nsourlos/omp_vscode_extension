@@ -203,47 +203,15 @@
 	}
 
 	// ---------- finish chime ----------
-	// Audio runs only for a chime and pauses after it. A page nobody has typed in or clicked yet
-	// (e.g. one just moved to a new window) is not allowed to play sound until they do; such a
-	// chime is dropped, because playing it on the next key press would come too late to mean anything.
-	const CHIME_DEADLINE_MS = 1000;
-	let audio = null;
-	let chimeCount = 0;
-
+	// opencode's desktop "task finished" sound. A page nobody has typed in or clicked yet (e.g. one
+	// just moved to a new window) may not play sound; the browser then refuses at once, so a chime
+	// is dropped rather than played late.
 	function chime() {
-		if (!window.AudioContext) return; // e.g. the test page
-		audio = audio || new AudioContext();
-		const asked = Date.now();
-		const id = ++chimeCount;
-		audio.resume().then(
-			() => {
-				// A dropped chime's resume can complete together with a newer chime's: leave the audio to that one.
-				if (id !== chimeCount) return;
-				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones(id);
-				else void audio.suspend();
-			},
-			error => console.warn("OMP: could not play the finish chime", error),
-		);
-	}
-
-	function playTones(id) {
-		const now = audio.currentTime;
-		const tones = [880, 1318.5].map((frequency, i) => {
-			const start = now + i * 0.12;
-			const tone = audio.createOscillator();
-			const volume = audio.createGain();
-			tone.frequency.value = frequency;
-			volume.gain.setValueAtTime(0.0001, start);
-			volume.gain.exponentialRampToValueAtTime(0.15, start + 0.02);
-			volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
-			tone.connect(volume).connect(audio.destination);
-			tone.start(start);
-			tone.stop(start + 0.55);
-			return tone;
+		const src = document.body.dataset.chime;
+		if (!src) return;
+		new Audio(src).play().catch(error => {
+			if (error.name !== "NotAllowedError") console.warn("OMP: could not play the finish chime", error);
 		});
-		tones.at(-1).onended = () => {
-			if (id === chimeCount) void audio.suspend(); // a newer chime may still be playing
-		};
 	}
 
 	// ---------- agent output ----------
