@@ -330,6 +330,19 @@ test("a sound that fails to load is reported, and loaded again for the next chim
 	assert.equal(plays.length, 1, "so the next chime plays");
 });
 
+test("a sound that fails after it has loaded is loaded again, without breaking the next chime", () => {
+	const { chat, loaded, players, plays } = openChatWithAudio();
+	const errors = [];
+	chat.window.addEventListener("error", event => errors.push(event.message));
+	players[0].dispatchEvent(new chat.window.Event("error")); // e.g. a decode error during a later play
+	chat.deliver({ type: "chime" });
+	assert.deepEqual(errors, [], "the chime did not throw");
+	assert.equal(loaded.length, 2, "it started loading the sound again");
+	players[1].finishLoading();
+	chat.deliver({ type: "chime" });
+	assert.equal(plays.length, 1, "and the next chime plays");
+});
+
 test("switching the sound off stops it, and a late error from the dropped sound is not reported", () => {
 	const { chat, players, warnings } = openChatWithAudio();
 	chat.deliver({ type: "chime" });

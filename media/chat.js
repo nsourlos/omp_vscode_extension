@@ -229,6 +229,7 @@
 			if (chimeSound !== sound) return; // already dropped
 			console.warn("OMP: could not load the finish chime", sound.error);
 			chimeSound = null; // the next chime loads it again
+			chimeLoaded = false;
 		});
 	}
 
