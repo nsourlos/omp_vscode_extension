@@ -7,8 +7,9 @@ const { JSDOM } = require("jsdom");
 
 const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "utf8");
 
-/** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
 const CHIME_SRC = "media/staplebops-01.mp3";
+
+/** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
 const BODY = `<div id="log"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>
@@ -232,36 +233,44 @@ test("queued messages show above the input, can be removed, and come back into t
 
 /** A chat page whose audio player is a stand-in: play() succeeds, or fails with `refusal`. */
 function openChatWithAudio(refusal) {
+	const loaded = [];
 	const plays = [];
 	const warnings = [];
 	const chat = openChat(window => {
 		window.Audio = class {
+			currentTime = 0;
 			constructor(src) {
 				this.src = src;
+				loaded.push(src);
 			}
 			play() {
-				plays.push(this.src);
+				plays.push({ src: this.src, from: this.currentTime });
+				this.currentTime = 0.4; // where a finished play leaves it
 				return refusal ? Promise.reject(refusal) : Promise.resolve();
 			}
 		};
 		window.console.warn = (...args) => warnings.push(args.join(" "));
 	});
-	return { chat, plays, warnings };
+	return { chat, loaded, plays, warnings };
 }
 
-test("a chime plays opencode's finish sound, and nothing plays before one", () => {
-	const { chat, plays } = openChatWithAudio();
-	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
-	assert.deepEqual(plays, [], "typing alone plays nothing");
-	chat.deliver({ type: "chime" });
-	assert.deepEqual(plays, [CHIME_SRC]);
+test("the finish sound is loaded once with the page and replayed from the start on each chime", () => {
+	const { chat, loaded, plays } = openChatWithAudio();
+	assert.deepEqual(loaded, [CHIME_SRC], "loaded before any turn ends");
+	assert.deepEqual(plays, [], "but not played");
+	chat.deliver({ type: "chime" }, { type: "chime" });
+	assert.deepEqual(plays, [{ src: CHIME_SRC, from: 0 }, { src: CHIME_SRC, from: 0 }]);
+	assert.equal(loaded.length, 1, "no new load per chime");
 });
 
-test("a chime the browser refuses on an unused page is dropped quietly", async () => {
+test("a chime the browser refuses on an unused page is dropped quietly, not played when the user later types", async () => {
 	const { chat, plays, warnings } = openChatWithAudio({ name: "NotAllowedError" });
 	chat.deliver({ type: "chime" });
 	await new Promise(resolve => setImmediate(resolve));
-	assert.equal(plays.length, 1, "tried once, never again later");
+	chat.window.document.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "a" }));
+	chat.window.document.body.dispatchEvent(new chat.window.MouseEvent("click", { bubbles: true }));
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(plays.length, 1, "tried once, never retried after the user interacted");
 	assert.deepEqual(warnings, []);
 });
 

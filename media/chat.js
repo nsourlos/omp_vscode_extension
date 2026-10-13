@@ -203,13 +203,15 @@
 	}
 
 	// ---------- finish chime ----------
-	// opencode's desktop "task finished" sound. A page nobody has typed in or clicked yet (e.g. one
-	// just moved to a new window) may not play sound; the browser then refuses at once, so a chime
-	// is dropped rather than played late.
+	// opencode's desktop "task finished" sound, loaded once with the page so a finished turn plays it
+	// straight away. A page nobody has typed in or clicked yet (e.g. one just moved to a new window)
+	// may not play sound; the browser then refuses at once, so a chime is dropped rather than played late.
+	const chimeSound = document.body.dataset.chime ? new Audio(document.body.dataset.chime) : null;
+
 	function chime() {
-		const src = document.body.dataset.chime;
-		if (!src) return;
-		new Audio(src).play().catch(error => {
+		if (!chimeSound) return;
+		chimeSound.currentTime = 0;
+		chimeSound.play().catch(error => {
 			if (error.name !== "NotAllowedError") console.warn("OMP: could not play the finish chime", error);
 		});
 	}
