@@ -207,26 +207,47 @@
 	// so a finished turn plays it straight away. A chime is dropped rather than played late: if the sound
 	// has not loaded yet, or the page is one nobody has typed in or clicked yet (e.g. one just moved to a
 	// new window), where the browser refuses at once.
+	let soundOn = false;
 	let chimeSound = null;
 	// Set once the sound has loaded, and kept: readyState is no use here, as it drops once a play ends.
 	let chimeLoaded = false;
 
 	function setSound(on) {
-		if (!on) {
-			chimeSound = null;
-			chimeLoaded = false;
-			return;
-		}
-		if (chimeSound) return;
-		const sound = (chimeSound = new Audio(document.body.dataset.chime));
+		soundOn = on;
+		if (!on) dropSound();
+		else if (!chimeSound) loadSound();
+	}
+
+	function loadSound() {
+		const src = document.body.dataset.chime;
+		if (!src) return; // e.g. a test page
+		const sound = (chimeSound = new Audio(src));
 		sound.addEventListener("canplaythrough", () => {
 			if (chimeSound === sound) chimeLoaded = true;
 		}, { once: true });
-		sound.addEventListener("error", () => console.warn("OMP: could not load the finish chime", sound.error));
+		sound.addEventListener("error", () => {
+			if (chimeSound !== sound) return; // already dropped
+			console.warn("OMP: could not load the finish chime", sound.error);
+			chimeSound = null; // the next chime loads it again
+		});
+	}
+
+	/** Stop the sound, including a load still running. */
+	function dropSound() {
+		if (chimeSound) {
+			chimeSound.pause();
+			chimeSound.removeAttribute("src");
+			chimeSound.load();
+		}
+		chimeSound = null;
+		chimeLoaded = false;
 	}
 
 	function chime() {
-		if (!chimeLoaded) return;
+		if (!chimeLoaded) {
+			if (soundOn && !chimeSound) loadSound(); // the last load failed: this chime is skipped, the next one plays
+			return;
+		}
 		chimeSound.currentTime = 0;
 		chimeSound.play().catch(error => {
 			// Refused on an unused page, or cut short (e.g. the page was hidden or reloaded mid-play): nothing went wrong.

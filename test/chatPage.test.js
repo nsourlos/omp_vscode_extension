@@ -247,18 +247,27 @@ function openChatWithAudio(refusal, { soundOn = true, loads = true } = {}) {
 			currentTime = 0;
 			readyState = HAVE_NOTHING;
 			error = null;
+			paused = true;
 			constructor(src) {
 				super();
 				this.src = src;
 				loaded.push(src);
 				players.push(this);
 			}
+			pause() {
+				this.paused = true;
+			}
+			removeAttribute(name) {
+				if (name === "src") this.src = "";
+			}
+			load() {}
 			finishLoading() {
 				this.readyState = HAVE_ENOUGH_DATA;
 				this.dispatchEvent(new window.Event("canplay"));
 				this.dispatchEvent(new window.Event("canplaythrough"));
 			}
 			play() {
+				this.paused = false;
 				plays.push({ src: this.src, from: this.currentTime });
 				// Where a finished play leaves it: at the end, and (as the spec says once playback ends) no longer HAVE_ENOUGH_DATA.
 				this.currentTime = 0.4;
@@ -308,13 +317,36 @@ test("a chime before the sound has loaded is dropped, not played once it loads",
 	assert.equal(plays.length, 1, "the next chime plays");
 });
 
-test("a sound that fails to load is reported", () => {
-	const { chat, players, plays, warnings } = openChatWithAudio(undefined, { loads: false });
+test("a sound that fails to load is reported, and loaded again for the next chime", () => {
+	const { chat, loaded, players, plays, warnings } = openChatWithAudio(undefined, { loads: false });
 	players[0].error = { code: 4, message: "unsupported format" };
 	players[0].dispatchEvent(new chat.window.Event("error"));
-	chat.deliver({ type: "chime" });
 	assert.match(warnings[0], /could not load the finish chime/);
-	assert.deepEqual(plays, []);
+	chat.deliver({ type: "chime" });
+	assert.deepEqual(plays, [], "this chime is skipped");
+	assert.equal(loaded.length, 2, "but it starts a new load");
+	players[1].finishLoading();
+	chat.deliver({ type: "chime" });
+	assert.equal(plays.length, 1, "so the next chime plays");
+});
+
+test("switching the sound off stops it, and a late error from the dropped sound is not reported", () => {
+	const { chat, players, warnings } = openChatWithAudio();
+	chat.deliver({ type: "chime" });
+	assert.equal(players[0].paused, false, "playing");
+	chat.deliver({ type: "sound", on: false });
+	assert.equal(players[0].paused, true, "stopped at once");
+	assert.equal(players[0].src, "", "and no longer loading");
+	players[0].dispatchEvent(new chat.window.Event("error"));
+	assert.deepEqual(warnings, []);
+});
+
+test("a page with no sound address loads nothing", () => {
+	const { chat, loaded, warnings } = openChatWithAudio(undefined, { soundOn: false });
+	chat.window.document.body.removeAttribute("data-chime");
+	chat.deliver({ type: "sound", on: true }, { type: "chime" });
+	assert.deepEqual(loaded, []);
+	assert.deepEqual(warnings, []);
 });
 
 test("a chime the browser refuses on an unused page is dropped quietly, not played when the user later types", async () => {
