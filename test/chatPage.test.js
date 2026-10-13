@@ -231,36 +231,90 @@ test("queued messages show above the input, can be removed, and come back into t
 	assert.equal(input.value, "and the docs\n\na draft", "put back ahead of what was being typed");
 });
 
-/** A chat page whose audio player is a stand-in: play() succeeds, or fails with `refusal`. */
-function openChatWithAudio(refusal) {
+/**
+ * A chat page whose audio player is a stand-in: play() succeeds, or fails with `refusal`.
+ * The page is told the sound is on, as the extension does on load, unless `soundOn` is false,
+ * and the sound then finishes loading at once, unless `loads` is false.
+ */
+function openChatWithAudio(refusal, { soundOn = true, loads = true } = {}) {
 	const loaded = [];
+	const players = [];
 	const plays = [];
 	const warnings = [];
 	const chat = openChat(window => {
-		window.Audio = class {
+		const { HAVE_NOTHING, HAVE_CURRENT_DATA, HAVE_ENOUGH_DATA } = window.HTMLMediaElement;
+		window.Audio = class extends window.EventTarget {
 			currentTime = 0;
+			readyState = HAVE_NOTHING;
+			error = null;
 			constructor(src) {
+				super();
 				this.src = src;
 				loaded.push(src);
+				players.push(this);
+			}
+			finishLoading() {
+				this.readyState = HAVE_ENOUGH_DATA;
+				this.dispatchEvent(new window.Event("canplay"));
+				this.dispatchEvent(new window.Event("canplaythrough"));
 			}
 			play() {
 				plays.push({ src: this.src, from: this.currentTime });
-				this.currentTime = 0.4; // where a finished play leaves it
+				// Where a finished play leaves it: at the end, and (as the spec says once playback ends) no longer HAVE_ENOUGH_DATA.
+				this.currentTime = 0.4;
+				this.readyState = HAVE_CURRENT_DATA;
 				return refusal ? Promise.reject(refusal) : Promise.resolve();
 			}
 		};
 		window.console.warn = (...args) => warnings.push(args.join(" "));
 	});
-	return { chat, loaded, plays, warnings };
+	if (soundOn) chat.deliver({ type: "sound", on: true });
+	if (soundOn && loads) players[0].finishLoading();
+	return { chat, loaded, players, plays, warnings };
 }
 
-test("the finish sound is loaded once with the page and replayed from the start on each chime", () => {
+test("the finish sound is loaded once the page hears it is on, and replayed from the start on each chime", () => {
 	const { chat, loaded, plays } = openChatWithAudio();
 	assert.deepEqual(loaded, [CHIME_SRC], "loaded before any turn ends");
 	assert.deepEqual(plays, [], "but not played");
-	chat.deliver({ type: "chime" }, { type: "chime" });
-	assert.deepEqual(plays, [{ src: CHIME_SRC, from: 0 }, { src: CHIME_SRC, from: 0 }]);
+	chat.deliver({ type: "chime" }, { type: "chime" }, { type: "chime" });
+	assert.deepEqual(plays, [{ src: CHIME_SRC, from: 0 }, { src: CHIME_SRC, from: 0 }, { src: CHIME_SRC, from: 0 }]);
 	assert.equal(loaded.length, 1, "no new load per chime");
+});
+
+test("with the sound switched off the page loads no audio; switched on, it loads it once", () => {
+	const { chat, loaded, players, plays } = openChatWithAudio(undefined, { soundOn: false });
+	chat.deliver({ type: "chime" });
+	assert.deepEqual(loaded, [], "nothing fetched while off");
+	assert.deepEqual(plays, []);
+	chat.deliver({ type: "sound", on: true }, { type: "sound", on: true });
+	players[0].finishLoading();
+	chat.deliver({ type: "chime" });
+	assert.deepEqual(loaded, [CHIME_SRC], "loaded once, however often it is told");
+	assert.equal(plays.length, 1);
+	chat.deliver({ type: "sound", on: false }, { type: "chime" });
+	assert.equal(plays.length, 1, "switched off again: silent");
+	chat.deliver({ type: "sound", on: true }, { type: "chime" });
+	assert.equal(plays.length, 1, "switched on again: silent until the sound has loaded again");
+});
+
+test("a chime before the sound has loaded is dropped, not played once it loads", async () => {
+	const { chat, players, plays } = openChatWithAudio(undefined, { loads: false });
+	chat.deliver({ type: "chime" });
+	players[0].finishLoading();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(plays, [], "the late chime never played");
+	chat.deliver({ type: "chime" });
+	assert.equal(plays.length, 1, "the next chime plays");
+});
+
+test("a sound that fails to load is reported", () => {
+	const { chat, players, plays, warnings } = openChatWithAudio(undefined, { loads: false });
+	players[0].error = { code: 4, message: "unsupported format" };
+	players[0].dispatchEvent(new chat.window.Event("error"));
+	chat.deliver({ type: "chime" });
+	assert.match(warnings[0], /could not load the finish chime/);
+	assert.deepEqual(plays, []);
 });
 
 test("a chime the browser refuses on an unused page is dropped quietly, not played when the user later types", async () => {
@@ -271,6 +325,14 @@ test("a chime the browser refuses on an unused page is dropped quietly, not play
 	chat.window.document.body.dispatchEvent(new chat.window.MouseEvent("click", { bubbles: true }));
 	await new Promise(resolve => setImmediate(resolve));
 	assert.equal(plays.length, 1, "tried once, never retried after the user interacted");
+	assert.deepEqual(warnings, []);
+});
+
+test("a chime cut short, e.g. by the page being hidden, is not reported", async () => {
+	const { chat, plays, warnings } = openChatWithAudio({ name: "AbortError" });
+	chat.deliver({ type: "chime" });
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(plays.length, 1);
 	assert.deepEqual(warnings, []);
 });
 

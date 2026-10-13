@@ -203,16 +203,34 @@
 	}
 
 	// ---------- finish chime ----------
-	// opencode's desktop "task finished" sound, loaded once with the page so a finished turn plays it
-	// straight away. A page nobody has typed in or clicked yet (e.g. one just moved to a new window)
-	// may not play sound; the browser then refuses at once, so a chime is dropped rather than played late.
-	const chimeSound = document.body.dataset.chime ? new Audio(document.body.dataset.chime) : null;
+	// opencode's desktop "task finished" sound, loaded ahead of time (only while omp.soundOnFinish is on)
+	// so a finished turn plays it straight away. A chime is dropped rather than played late: if the sound
+	// has not loaded yet, or the page is one nobody has typed in or clicked yet (e.g. one just moved to a
+	// new window), where the browser refuses at once.
+	let chimeSound = null;
+	// Set once the sound has loaded, and kept: readyState is no use here, as it drops once a play ends.
+	let chimeLoaded = false;
+
+	function setSound(on) {
+		if (!on) {
+			chimeSound = null;
+			chimeLoaded = false;
+			return;
+		}
+		if (chimeSound) return;
+		const sound = (chimeSound = new Audio(document.body.dataset.chime));
+		sound.addEventListener("canplaythrough", () => {
+			if (chimeSound === sound) chimeLoaded = true;
+		}, { once: true });
+		sound.addEventListener("error", () => console.warn("OMP: could not load the finish chime", sound.error));
+	}
 
 	function chime() {
-		if (!chimeSound) return;
+		if (!chimeLoaded) return;
 		chimeSound.currentTime = 0;
 		chimeSound.play().catch(error => {
-			if (error.name !== "NotAllowedError") console.warn("OMP: could not play the finish chime", error);
+			// Refused on an unused page, or cut short (e.g. the page was hidden or reloaded mid-play): nothing went wrong.
+			if (error.name !== "NotAllowedError" && error.name !== "AbortError") console.warn("OMP: could not play the finish chime", error);
 		});
 	}
 
@@ -567,6 +585,7 @@
 			case "review": return onReview(msg.info);
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
+			case "sound": return setSound(msg.on);
 			case "chime": return chime();
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
