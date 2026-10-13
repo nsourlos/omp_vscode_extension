@@ -74,4 +74,4 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 
 MIT (see the `LICENSE` file): free for anyone to use, copy, change and share, including commercially. Keep the license notice when you redistribute it.
 
-The finish sound, `media/staplebops-01.mp3`, is the "task finished" sound from [opencode](https://github.com/sst/opencode) (`packages/ui/src/assets/audio/`), copyright (c) 2025 opencode, used under the MIT License: see its terms at https://github.com/sst/opencode/blob/dev/packages/ui/LICENSE.
+The finish sound, `media/staplebops-01.mp3`, is the "task finished" sound from [opencode](https://github.com/anomalyco/opencode), copyright (c) 2025 opencode, used under the MIT License. Its full license notice is in the `THIRD_PARTY_NOTICES.md` file, which ships with the extension.
