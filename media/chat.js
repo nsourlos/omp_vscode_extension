@@ -203,47 +203,57 @@
 	}
 
 	// ---------- finish chime ----------
-	// Audio runs only for a chime and pauses after it. A page nobody has typed in or clicked yet
-	// (e.g. one just moved to a new window) is not allowed to play sound until they do; such a
-	// chime is dropped, because playing it on the next key press would come too late to mean anything.
-	const CHIME_DEADLINE_MS = 1000;
-	let audio = null;
-	let chimeCount = 0;
+	// opencode's desktop "task finished" sound, loaded ahead of time (only while omp.soundOnFinish is on)
+	// so a finished turn plays it straight away. A chime is dropped rather than played late: if the sound
+	// has not loaded yet, or the page is one nobody has typed in or clicked yet (e.g. one just moved to a
+	// new window), where the browser refuses at once.
+	let soundOn = false;
+	let chimeSound = null;
+	// Set once the sound has loaded, and kept: readyState is no use here, as it drops once a play ends.
+	let chimeLoaded = false;
 
-	function chime() {
-		if (!window.AudioContext) return; // e.g. the test page
-		audio = audio || new AudioContext();
-		const asked = Date.now();
-		const id = ++chimeCount;
-		audio.resume().then(
-			() => {
-				// A dropped chime's resume can complete together with a newer chime's: leave the audio to that one.
-				if (id !== chimeCount) return;
-				if (Date.now() - asked <= CHIME_DEADLINE_MS) playTones(id);
-				else void audio.suspend();
-			},
-			error => console.warn("OMP: could not play the finish chime", error),
-		);
+	function setSound(on) {
+		soundOn = on;
+		if (!on) dropSound();
+		else if (!chimeSound) loadSound();
 	}
 
-	function playTones(id) {
-		const now = audio.currentTime;
-		const tones = [880, 1318.5].map((frequency, i) => {
-			const start = now + i * 0.12;
-			const tone = audio.createOscillator();
-			const volume = audio.createGain();
-			tone.frequency.value = frequency;
-			volume.gain.setValueAtTime(0.0001, start);
-			volume.gain.exponentialRampToValueAtTime(0.15, start + 0.02);
-			volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.5);
-			tone.connect(volume).connect(audio.destination);
-			tone.start(start);
-			tone.stop(start + 0.55);
-			return tone;
+	function loadSound() {
+		const src = document.body.dataset.chime;
+		if (!src) return; // e.g. a test page
+		const sound = (chimeSound = new Audio(src));
+		sound.addEventListener("canplaythrough", () => {
+			if (chimeSound === sound) chimeLoaded = true;
+		}, { once: true });
+		sound.addEventListener("error", () => {
+			if (chimeSound !== sound) return; // already dropped
+			console.warn("OMP: could not load the finish chime", sound.error);
+			chimeSound = null; // the next chime loads it again
+			chimeLoaded = false;
 		});
-		tones.at(-1).onended = () => {
-			if (id === chimeCount) void audio.suspend(); // a newer chime may still be playing
-		};
+	}
+
+	/** Stop the sound, including a load still running. */
+	function dropSound() {
+		if (chimeSound) {
+			chimeSound.pause();
+			chimeSound.removeAttribute("src");
+			chimeSound.load();
+		}
+		chimeSound = null;
+		chimeLoaded = false;
+	}
+
+	function chime() {
+		if (!chimeLoaded) {
+			if (soundOn && !chimeSound) loadSound(); // the last load failed: this chime is skipped, the next one plays
+			return;
+		}
+		chimeSound.currentTime = 0;
+		chimeSound.play().catch(error => {
+			// Refused on an unused page, or cut short (e.g. the page was hidden or reloaded mid-play): nothing went wrong.
+			if (error.name !== "NotAllowedError" && error.name !== "AbortError") console.warn("OMP: could not play the finish chime", error);
+		});
 	}
 
 	// ---------- agent output ----------
@@ -597,6 +607,7 @@
 			case "review": return onReview(msg.info);
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
+			case "sound": return setSound(msg.on);
 			case "chime": return chime();
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);

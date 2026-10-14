@@ -43,10 +43,14 @@ export class ChatPanel implements vscode.Disposable {
 			}
 			if (this.#panel.active) this.#activated.fire();
 		});
+		const settings = vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration("omp.soundOnFinish")) this.#postSound();
+		});
 		// Registered before any outside listener, so cleanup that posts during dispose is dropped.
 		this.#panel.onDidDispose(() => {
 			this.#ready = false;
 			this.#disposed = true;
+			settings.dispose();
 		});
 		this.onDidDispose = this.#panel.onDidDispose;
 	}
@@ -63,9 +67,15 @@ export class ChatPanel implements vscode.Disposable {
 	receive(message: any): void {
 		if (message?.type === "ready") {
 			this.#ready = true;
+			this.#postSound();
 			for (const item of this.#history) void this.#panel.webview.postMessage(item);
 		}
 		this.#messages.fire(message);
+	}
+
+	/** Tell the page whether to load the finish sound: on every (re)load, and when the setting changes. */
+	#postSound(): void {
+		this.notify({ type: "sound", on: vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true) });
 	}
 
 	post(message: unknown): void {
@@ -114,16 +124,17 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
 	const n = nonce();
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.js"));
 	const style = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.css"));
+	const chime = webview.asWebviewUri(vscode.Uri.joinPath(media, "staplebops-01.mp3"));
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${n}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; media-src ${webview.cspSource}; script-src 'nonce-${n}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${style}">
 <title>OMP</title>
 </head>
-<body>
+<body data-chime="${chime}">
 <div id="log" role="log" aria-live="polite"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>

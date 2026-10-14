@@ -468,9 +468,16 @@ exports.run = async function run() {
 				await turn;
 				assert.equal(chimes(), 1, "no chime after Stop");
 
+				const sound = () => notified.slice(seen).filter(m => m.type === "sound").at(-1);
 				await config.update("soundOnFinish", false, vscode.ConfigurationTarget.Workspace);
+				await waitFor(() => sound()?.on === false, "the page to be told to drop the sound");
 				await controller.send(steps({ say: "done" }));
 				assert.equal(chimes(), 1, "no chime with the setting off");
+
+				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
+				await waitFor(() => sound()?.on === true, "the page to be told to load the sound again");
+				await controller.send(steps({ say: "done" }));
+				assert.equal(chimes(), 2, "switched back on: the next finished reply chimes again");
 			} finally {
 				await config.update("soundOnFinish", undefined, vscode.ConfigurationTarget.Workspace);
 			}
