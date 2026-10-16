@@ -6,6 +6,7 @@
  */
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { ReviewNotes } from "../omp/policy";
 import { diffFile, type FileDiff } from "./hunks";
 
 export const REVIEW_SCHEME = "omp-review";
@@ -15,6 +16,7 @@ type Decision = "pending" | "accepted" | "rejected";
 export interface ReviewOutcome {
 	diff: FileDiff;
 	accepted: boolean[];
+	notes: ReviewNotes;
 }
 
 export interface ReviewInfo {
@@ -36,6 +38,7 @@ interface ReviewSession {
 	proposed: string;
 	diff: FileDiff;
 	decisions: Decision[];
+	notes: ReviewNotes;
 	originalUri: vscode.Uri;
 	proposedUri: vscode.Uri;
 	resolve: (outcome: ReviewOutcome) => void;
@@ -88,6 +91,13 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 			vscode.commands.registerCommand("omp.review.rejectHunk", (id: string, index: number) =>
 				this.#decide(id, index, "rejected"),
 			),
+			// `note` is asked for when not given (tests pass it directly).
+			vscode.commands.registerCommand("omp.review.rejectHunkWithNote", (id: string, index: number, note?: string) =>
+				this.#rejectHunkWithNote(id, index, note),
+			),
+			vscode.commands.registerCommand("omp.review.rejectAllWithNote", (target?: unknown, note?: string) =>
+				this.#rejectAllWithNote(target, note),
+			),
 			// Title-bar buttons pass the address of their own diff; the Command Palette passes nothing.
 			vscode.commands.registerCommand("omp.review.acceptAll", (target?: unknown) => this.#decideAll("accepted", target)),
 			vscode.commands.registerCommand("omp.review.rejectAll", (target?: unknown) => this.#decideAll("rejected", target)),
@@ -113,6 +123,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 				proposed,
 				diff,
 				decisions: diff.hunks.map(() => "pending"),
+				notes: { hunks: [] },
 				originalUri: vscode.Uri.from({ scheme: REVIEW_SCHEME, path: `/${id}/original/${name}` }),
 				proposedUri: vscode.Uri.from({ scheme: REVIEW_SCHEME, path: `/${id}/proposed/${name}` }),
 				resolve,
@@ -173,13 +184,21 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 			const decision = session.decisions[hunk.index];
 			const accept = { title: "$(check) Accept", command: "omp.review.acceptHunk", arguments: [session.id, hunk.index] };
 			const reject = { title: "$(close) Reject", command: "omp.review.rejectHunk", arguments: [session.id, hunk.index] };
+			const rejectWithNote = {
+				title: "$(comment) Reject with note…",
+				tooltip: "Reject this change and tell omp what to do instead",
+				command: "omp.review.rejectHunkWithNote",
+				arguments: [session.id, hunk.index],
+			};
 			if (decision === "pending") {
 				lenses.push(new vscode.CodeLens(range, { title: label, command: "" }));
-				lenses.push(new vscode.CodeLens(range, accept), new vscode.CodeLens(range, reject));
+				lenses.push(new vscode.CodeLens(range, accept), new vscode.CodeLens(range, reject), new vscode.CodeLens(range, rejectWithNote));
 			} else if (decision === "accepted") {
 				lenses.push(new vscode.CodeLens(range, { ...reject, title: `$(pass-filled) ${label}: accepted — click to reject` }));
 			} else {
-				lenses.push(new vscode.CodeLens(range, { ...accept, title: `$(error) ${label}: rejected — click to accept` }));
+				const note = session.notes.hunks[hunk.index];
+				const rejected = note ? `rejected with note "${note}"` : "rejected";
+				lenses.push(new vscode.CodeLens(range, { ...accept, title: `$(error) ${label}: ${rejected} — click to accept` }));
 			}
 		}
 		return lenses;
@@ -261,6 +280,24 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		void this.#complete(session);
 	}
 
+	async #rejectHunkWithNote(id: string, index: number, note?: string): Promise<void> {
+		const session = this.#byId.get(id);
+		if (!session || !this.#isPending(session)) return;
+		const text = note ?? (await askNote(`Change ${index + 1} to ${session.displayPath}: what should omp do instead?`));
+		if (text === undefined) return; // cancelled: nothing decided
+		session.notes.hunks[index] = text || undefined;
+		this.#decide(id, index, "rejected");
+	}
+
+	async #rejectAllWithNote(target?: unknown, note?: string): Promise<void> {
+		const session = this.#activeSession(target);
+		if (!session) return;
+		const text = note ?? (await askNote(`${session.displayPath}: what should omp do instead?`));
+		if (text === undefined || !this.#isPending(session)) return;
+		session.notes.file = text || undefined;
+		this.#decideAll("rejected", session.proposedUri);
+	}
+
 	#submitActive(target?: unknown): void {
 		const session = this.#activeSession(target);
 		if (!session) return;
@@ -273,7 +310,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		const accepted = session.decisions.map(d => d === "accepted");
 		const acceptedCount = accepted.filter(Boolean).length;
 		this.#finish(session, `${acceptedCount}/${accepted.length} accepted`);
-		session.resolve({ diff: session.diff, accepted });
+		session.resolve({ diff: session.diff, accepted, notes: session.notes });
 	}
 
 	#finish(session: ReviewSession, summary: string): void {
@@ -337,4 +374,13 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		this.#statusBar.tooltip = "Open the pending omp change review";
 		this.#statusBar.show();
 	}
+}
+
+/** The user's note, "" if they confirmed an empty box, or undefined if they cancelled. */
+function askNote(prompt: string): Thenable<string | undefined> {
+	return vscode.window.showInputBox({
+		prompt,
+		placeHolder: "e.g. keep the old name, but add a docstring",
+		ignoreFocusOut: true,
+	});
 }

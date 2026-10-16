@@ -3,7 +3,7 @@
 Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code, with:
 
 - **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning. A request to use the browser shows the code omp is about to run, open and in full, with the web addresses written in it listed above (the code may open other pages too, so check it).
-- **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected (and why, if you say).
+- **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** / **Reject with note…** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected. A note (what to do instead) reaches omp straight away, in the same turn, and omp acts on it.
 - **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
 - **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, the queued messages are sent together as the next message; a queued slash command (like `/compact`) is sent on its own. If you press **Stop**, or the turn fails or omp crashes, the queued messages go back into the input instead of being sent. A message you send after pressing Stop runs as soon as the stopped turn ends.
 - **Activity line:** while omp works, a line above the input says what it is doing (thinking, running a tool, waiting for your answer or review) and for how long.
@@ -40,7 +40,7 @@ Reload VS Code. Click the **OMP** icon in the left activity bar: the chat opens 
 
 To work on the extension itself, open this folder and press **F5** to start a test window with the current code.
 
-While reviewing: click **Accept** / **Reject** above each change, or put the cursor on a change and press **Alt+Y** / **Alt+N**. The buttons in the editor title accept all, reject all, or submit (undecided changes count as accepted). The review finishes on its own once every change is decided.
+While reviewing: click **Accept** / **Reject** above each change, or put the cursor on a change and press **Alt+Y** / **Alt+N**. The buttons in the editor title accept all, reject all, reject all with a note, or submit (undecided changes count as accepted). The review finishes on its own once every change is decided.
 
 ## Settings
 

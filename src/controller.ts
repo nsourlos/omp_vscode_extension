@@ -355,7 +355,7 @@ export class Controller implements vscode.Disposable {
 			await saveText(uri, applyDecisions(outcome.diff, outcome.accepted), current !== undefined);
 		}
 		if (outcome.accepted.every(Boolean)) return;
-		throw new RpcError(-32000, rejectionMessage(displayPath, outcome.diff.hunks, outcome.accepted));
+		throw new RpcError(-32000, rejectionMessage(displayPath, outcome.diff.hunks, outcome.accepted, outcome.notes));
 	}
 
 	/** Current file text, preferring unsaved editor content; undefined if the file does not exist. */

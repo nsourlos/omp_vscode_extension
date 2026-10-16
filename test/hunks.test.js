@@ -89,4 +89,19 @@ test("tells the agent exactly what was rejected", () => {
 	assert.match(partial, /\+    """Sum."""/);
 	assert.match(partial, /Continue with the rest of the task/);
 	assert.match(rejectionMessage("demo.py", diff.hunks, [false, false]), /NOT modified/);
+	assert.match(partial, /gave no further explanation/, "without notes, omp is told to leave it");
+});
+
+test("passes the user's notes on rejected changes to the agent, and asks it to act on them", () => {
+	const diff = diffFile(original, proposed);
+	const withNote = rejectionMessage("demo.py", diff.hunks, [true, false], { hunks: [undefined, "Use a one-line docstring in English"] });
+	assert.match(withNote, /\+    """Sum."""\nThe user's note on this change: Use a one-line docstring in English/);
+	assert.match(withNote, /Do what the user's notes ask/);
+	assert.doesNotMatch(withNote, /gave no further explanation/);
+
+	const single = diffFile("a\n", "b\n");
+	assert.match(rejectionMessage("x.txt", single.hunks, [false], { hunks: ["keep a"] }), /The user's note on this change: keep a/);
+	const fileNote = rejectionMessage("demo.py", diff.hunks, [false, false], { hunks: [], file: "Split this into two functions" });
+	assert.match(fileNote, /The user's note on this file: Split this into two functions/);
+	assert.match(fileNote, /Do what the user's notes ask/);
 });

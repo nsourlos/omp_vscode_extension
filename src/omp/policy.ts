@@ -85,10 +85,22 @@ export function staleFileMessage(displayPath: string): string {
 	].join(" ");
 }
 
+/** What the user wrote when rejecting: per hunk (by index) and for the whole file. */
+export interface ReviewNotes {
+	hunks: (string | undefined)[];
+	file?: string;
+}
+
 /** Message returned to the agent (as a failed write) when the user rejected some or all hunks. */
-export function rejectionMessage(displayPath: string, hunks: Hunk[], accepted: readonly boolean[]): string {
+export function rejectionMessage(
+	displayPath: string,
+	hunks: Hunk[],
+	accepted: readonly boolean[],
+	notes: ReviewNotes = { hunks: [] },
+): string {
 	const rejected = hunks.filter((_, i) => !accepted[i]);
 	const acceptedCount = hunks.length - rejected.length;
+	const noteOn = (hunk: Hunk) => notes.hunks[hunk.index];
 	const lines: string[] = [];
 	if (acceptedCount === 0) {
 		lines.push(`The user rejected this change to ${displayPath}. The file was NOT modified.`);
@@ -99,12 +111,26 @@ export function rejectionMessage(displayPath: string, hunks: Hunk[], accepted: r
 		);
 	}
 	if (acceptedCount > 0 || hunks.length > 1) {
-		for (const hunk of rejected) lines.push("", describeHunk(hunk));
+		for (const hunk of rejected) {
+			lines.push("", describeHunk(hunk));
+			if (noteOn(hunk)) lines.push(`The user's note on this change: ${noteOn(hunk)}`);
+		}
+	} else if (noteOn(rejected[0])) {
+		lines.push("", `The user's note on this change: ${noteOn(rejected[0])}`);
 	}
-	lines.push(
-		"",
-		"The user does not want the rejected changes and gave no further explanation. Do not ask why and do not re-apply them or try an alternative to them.",
-		"Continue with the rest of the task. Read the file again before editing it further.",
-	);
+	if (notes.file) lines.push("", `The user's note on this file: ${notes.file}`);
+
+	if (notes.file || rejected.some(noteOn)) {
+		lines.push(
+			"",
+			"Do what the user's notes ask: they say what to do instead of the rejected changes. Do not re-apply the rejected changes as they were.",
+		);
+	} else {
+		lines.push(
+			"",
+			"The user does not want the rejected changes and gave no further explanation. Do not ask why and do not re-apply them or try an alternative to them.",
+		);
+	}
+	lines.push("Continue with the rest of the task. Read the file again before editing it further.");
 	return lines.join("\n");
 }

@@ -164,6 +164,29 @@ exports.run = async function run() {
 			await waitFor(() => reviewTabs().length === 0, "the diff that finished opening after its review ended to close");
 		},
 
+		async "a change or a whole file rejected with a note sends the note to omp in the same turn"() {
+			fs.writeFileSync(file("n1.txt"), "1\n2\n3\n");
+			let seen = reviews.length;
+			let turn = controller.send(steps({ write: { path: file("n1.txt"), content: "one\n2\nthree\n" } }));
+			const info = await nextOpenReview(seen);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", info.id, 0);
+			await vscode.commands.executeCommand("omp.review.rejectHunkWithNote", info.id, 1, "write it as THREE");
+			await turn;
+			assert.equal(fs.readFileSync(file("n1.txt"), "utf8"), "one\n2\n3\n", "the rejected change was not saved");
+			assert.match(fakeLog().at(-1).error, /\+three\nThe user's note on this change: write it as THREE/);
+			assert.match(fakeLog().at(-1).error, /Do what the user's notes ask/);
+
+			fs.writeFileSync(file("n2.txt"), "a\n");
+			seen = reviews.length;
+			turn = controller.send(steps({ write: { path: file("n2.txt"), content: "b\n" } }));
+			const whole = await nextOpenReview(seen);
+			const diff = vscode.Uri.from({ scheme: "omp-review", path: `/${whole.id}/proposed/n2.txt` });
+			await vscode.commands.executeCommand("omp.review.rejectAllWithNote", diff, "split this into two files");
+			await turn;
+			assert.equal(fs.readFileSync(file("n2.txt"), "utf8"), "a\n");
+			assert.match(fakeLog().at(-1).error, /The user's note on this file: split this into two files/);
+		},
+
 		async "New Session opens another tab with its own omp"() {
 			const before = fakeLog().length;
 			const second = await newSession();

@@ -90,6 +90,17 @@
         "icon": "$(close-all)"
       },
       {
+        "command": "omp.review.rejectAllWithNote",
+        "title": "Reject All Changes with a Note…",
+        "category": "OMP",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "omp.review.rejectHunkWithNote",
+        "title": "Reject Change with a Note…",
+        "category": "OMP"
+      },
+      {
         "command": "omp.review.submit",
         "title": "Submit Review (accept undecided changes)",
         "category": "OMP",
@@ -166,9 +177,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "omp.review.submit",
+          "command": "omp.review.rejectAllWithNote",
           "when": "resourceScheme == omp-review",
           "group": "navigation@3"
+        },
+        {
+          "command": "omp.review.submit",
+          "when": "resourceScheme == omp-review",
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -178,6 +194,10 @@
         },
         {
           "command": "omp.review.rejectHunk",
+          "when": "false"
+        },
+        {
+          "command": "omp.review.rejectHunkWithNote",
           "when": "false"
         }
       ]
