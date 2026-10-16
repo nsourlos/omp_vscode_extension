@@ -412,6 +412,12 @@ label.choice {
 	cursor: pointer;
 }
 
+.reply-meta {
+	margin: -2px 0 8px;
+	font-size: 0.8em;
+	opacity: 0.55;
+}
+
 .notice {
 	margin: 6px 0;
 	padding: 4px 8px;

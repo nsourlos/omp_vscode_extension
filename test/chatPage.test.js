@@ -166,6 +166,13 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
 });
 
+test("each reply ends with the model and how long the turn took", () => {
+	const chat = openChat();
+	chat.deliver(chunk("Done."), { type: "turnEnd", stopReason: "end_turn", seconds: 12, model: "GLM 5.3 (Nebul)" });
+	chat.deliver(chunk("Done again."), { type: "turnEnd", stopReason: "end_turn", seconds: 135 });
+	assert.deepEqual([...chat.log.querySelectorAll(".reply-meta")].map(node => node.textContent), ["GLM 5.3 (Nebul) · 12s", "2m 15s"]);
+});
+
 test("context notices: a warning when it gets full, and a note when omp compacts it", () => {
 	const chat = openChat();
 	const usage = used => ({ type: "update", update: { sessionUpdate: "usage_update", used, size: 100_000 } });

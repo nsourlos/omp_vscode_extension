@@ -482,6 +482,8 @@ exports.run = async function run() {
 			try {
 				await controller.send(steps({ say: "done" }));
 				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
+				const ended = postsOf(panel).filter(m => m.type === "turnEnd").at(-1);
+				assert.equal(typeof ended.seconds, "number", "the turn's length goes to the reply's footer");
 				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
 
 				const hung = fakeLog().length;

@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
 import { RpcError } from "./acp/rpc";
 import type {
+	ConfigOption,
 	ElicitationParams,
 	ElicitationResult,
 	PermissionOption,
@@ -104,9 +105,15 @@ export class Controller implements vscode.Disposable {
 		let finished = false;
 		try {
 			agent = await this.#ensureAgent();
+			const started = Date.now();
 			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
 			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
-			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
+			this.chat.post({
+				type: "turnEnd",
+				stopReason: result.stopReason,
+				seconds: Math.round((Date.now() - started) / 1000),
+				model: currentModelName(agent.configOptions),
+			});
 			finished = result.stopReason !== "cancelled" && !this.#stopRequested;
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
@@ -502,6 +509,12 @@ async function saveText(uri: vscode.Uri, text: string, exists: boolean): Promise
 	edit.replace(uri, document.validateRange(new vscode.Range(0, 0, Number.MAX_SAFE_INTEGER, 0)), text);
 	if (!(await vscode.workspace.applyEdit(edit))) throw new Error(`VS Code refused to edit ${uri.fsPath}`);
 	await document.save();
+}
+
+/** The display name of the model omp is using, from its "model" setting. */
+function currentModelName(options: ConfigOption[]): string | undefined {
+	const model = options.find(option => option.category === "model" || option.id === "model");
+	return model?.options.find(choice => choice.value === model.currentValue)?.name;
 }
 
 function errorText(error: unknown): string {

@@ -107,6 +107,11 @@
 			.join("\n");
 	}
 
+	function duration(seconds) {
+		if (seconds < 60) return `${seconds}s`;
+		return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+	}
+
 	function truncate(text) {
 		return text.length > MAX_OUTPUT ? text.slice(0, MAX_OUTPUT) + `\n… (${text.length - MAX_OUTPUT} more characters)` : text;
 	}
@@ -642,6 +647,10 @@
 			case "turnEnd":
 				breakFlow();
 				if (msg.stopReason && msg.stopReason !== "end_turn") append(el("div", "notice warning", `Stopped: ${msg.stopReason}`));
+				if (typeof msg.seconds === "number") {
+					const meta = msg.model ? `${msg.model} · ${duration(msg.seconds)}` : duration(msg.seconds);
+					append(el("div", "reply-meta", meta));
+				}
 				return;
 		}
 	});
