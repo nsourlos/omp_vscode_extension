@@ -2,7 +2,7 @@
 
 Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code, with:
 
-- **Command approval:** every shell command shows a card in the chat with Allow once / Always allow / Reject / Always reject. Commands that look like they change files get a warning. A request to use the browser shows the code omp is about to run, open and in full, with the web addresses written in it listed above (the code may open other pages too, so check it).
+- **Command approval:** every shell command asks inside its own row in the chat (Allow once / Reject / Always reject); afterwards the same row shows ✓ or ✗ and the output. Commands that look like they change files get a warning. For a command that only reads or navigates, **Always allow read-only commands** lets later read-only commands (`cd`, `pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `git status/log/diff/show`, `echo`) run without asking in that chat; anything else, or any redirection to a file, still asks. A request to use the browser shows the code omp is about to run, open and in full, with the web addresses written in it listed above (the code may open other pages too, so check it).
 - **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** / **Reject with note…** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected. A note (what to do instead) reaches omp straight away, in the same turn, and omp acts on it.
 - **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
 - **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, the queued messages are sent together as the next message; a queued slash command (like `/compact`) is sent on its own. If you press **Stop**, or the turn fails or omp crashes, the queued messages go back into the input instead of being sent. A message you send after pressing Stop runs as soon as the stopped turn ends.
@@ -65,7 +65,7 @@ The extension also turns on `diffEditor.codeLens`, which VS Code hides by defaul
 ## Known limits
 
 - Changes made by shell commands (scripts, `sed -i`, …) skip the diff review. You only see the command approval.
-- "Always allow" on a shell command allows **all** shell commands for the rest of the session (that's how omp groups it).
+- omp's own "Always allow" for shell commands would allow **every** later command, so the extension doesn't offer it. "Always allow read-only commands" lasts until the chat tab closes, and judges commands by their text, so it errs on the side of asking.
 - Shell commands run inside omp, not in a VS Code terminal.
 - A queued message waits for the whole turn to end: omp's editor mode has no way to add a message to a turn that is already running. Use New Session to work on two things at once.
 - All sessions work in the first folder of the workspace.

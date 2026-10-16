@@ -345,8 +345,8 @@
 	}
 
 	const OPTION_HINTS = {
-		allow_always: "Allow this kind of tool for the rest of the session (for shell commands: every command)",
-		reject_always: "Reject this kind of tool for the rest of the session",
+		allow_always: "Allow this kind of action for the rest of this chat",
+		reject_always: "Reject this kind of action for the rest of this chat",
 	};
 
 	// The question goes inside the tool's own row (omp gives both the same toolCallId), so the
@@ -371,10 +371,16 @@
 		const buttons = node.appendChild(el("div", "buttons"));
 		for (const option of msg.options || []) {
 			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "secondary", option.name));
-			if (OPTION_HINTS[option.kind]) button.title = OPTION_HINTS[option.kind];
+			const hint = option.description || OPTION_HINTS[option.kind];
+			if (hint) button.title = hint;
 			button.addEventListener("click", () => respond(msg.requestId, option.optionId, option.name));
 		}
 		finishCard(node);
+	}
+
+	function onAutoAllowed(toolCallId) {
+		const tool = tools.get(toolCallId);
+		if (tool) tool.card.insertBefore(el("div", "tool-note", "Allowed automatically: read-only command"), tool.details);
 	}
 
 	function onApproval(msg) {
@@ -556,6 +562,7 @@
 				return;
 			case "update": return onUpdate(msg.update);
 			case "permission": return onPermission(msg);
+			case "autoAllowed": return onAutoAllowed(msg.toolCallId);
 			case "approval": return onApproval(msg);
 			case "question": return onQuestion(msg);
 			case "resolved": return markResolved(msg.requestId, msg.label);

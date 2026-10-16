@@ -9,6 +9,7 @@ import { RpcError } from "./acp/rpc";
 import type {
 	ElicitationParams,
 	ElicitationResult,
+	PermissionOption,
 	ReadTextFileParams,
 	RequestPermissionParams,
 	RequestPermissionResult,
@@ -22,6 +23,7 @@ import {
 	PREFER_EDIT_TOOL_PROMPT,
 	codeOfToolInput,
 	fileChangeWarning,
+	isReadOnlyCommand,
 	parseApprovalMessage,
 	rejectionMessage,
 	staleFileMessage,
@@ -40,6 +42,9 @@ interface QueuedMessage {
 	text: string;
 }
 
+/** The extension's own permission option; answered to omp as "allow once". */
+const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
+
 let nextRequestId = 1;
 let nextQueuedId = 1;
 let nextControllerId = 1;
@@ -52,6 +57,8 @@ export class Controller implements vscode.Disposable {
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
 	#stopRequested = false;
+	/** Set by "Always allow read-only commands"; lasts as long as this chat tab. */
+	#allowReadOnly = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
 	#queue: QueuedMessage[] = [];
@@ -372,6 +379,29 @@ export class Controller implements vscode.Disposable {
 	async #requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {
 		const command: string | undefined =
 			typeof params.toolCall.rawInput?.command === "string" ? params.toolCall.rawInput.command : undefined;
+		const allowOnce = params.options.find(option => option.kind === "allow_once");
+		const readOnly = command !== undefined && allowOnce !== undefined && isReadOnlyCommand(command);
+		if (readOnly && this.#allowReadOnly) {
+			this.log(`auto-allowed a read-only command: ${command}`);
+			this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId });
+			return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
+		}
+
+		// omp's own "always" for a shell command allows every later command in the session, writes
+		// included, so it is replaced by an "always" that covers read-only commands only.
+		const options: (PermissionOption & { description?: string })[] = [];
+		for (const option of params.options) {
+			if (command !== undefined && option.kind === "allow_always") continue;
+			options.push(option);
+			if (readOnly && option === allowOnce) {
+				options.push({
+					optionId: ALLOW_READ_ONLY,
+					name: "Always allow read-only commands",
+					kind: "allow_always",
+					description: "Allow this and later commands that only read or navigate (cd, ls, cat, grep, find, git log…) in this chat. Anything else still asks.",
+				});
+			}
+		}
 		const warn = vscode.workspace.getConfiguration("omp").get<boolean>("warnOnShellFileChanges", true);
 		const optionId = await this.#ask<string | undefined>(
 			{
@@ -382,10 +412,14 @@ export class Controller implements vscode.Disposable {
 				command,
 				warning: command && warn ? fileChangeWarning(command) : undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
-				options: params.options,
+				options,
 			},
 			undefined,
 		);
+		if (optionId === ALLOW_READ_ONLY) {
+			this.#allowReadOnly = true;
+			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
+		}
 		return optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
 	}
 

@@ -33,6 +33,92 @@ export function fileChangeWarning(command: string): string | undefined {
 	return `This command may change files without a diff review (${[...new Set(hits)].join(", ")}).`;
 }
 
+/** Commands that only read or navigate; anything not listed here is never auto-allowed. */
+const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "git", "echo"]);
+const READ_ONLY_GIT = new Set(["status", "log", "diff", "show"]);
+/** Options that make an otherwise read-only command write files or run another program. */
+const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls|--pre(=.*)?|--output(=.*)?)$/;
+/** Redirections that only discard output or merge it into the pipe. */
+const HARMLESS_REDIRECT = /^(\d|&)?>>?\s*\/dev\/null$|^\d>&\d$/;
+
+/**
+ * Splits a shell command into its simple commands (by ;, &&, ||, |, newlines), each as a list of
+ * words, honouring quotes and backslashes. Returns undefined for anything it will not judge:
+ * command substitution, backgrounding, here-docs, or a redirection other than to /dev/null.
+ */
+function splitCommand(command: string): string[][] | undefined {
+	const commands: string[][] = [[]];
+	let word = "";
+	let inWord = false;
+	let quote: "'" | '"' | undefined;
+	const endWord = () => {
+		if (inWord) commands.at(-1)!.push(word);
+		word = "";
+		inWord = false;
+	};
+	for (let i = 0; i < command.length; i++) {
+		const c = command[i];
+		if (quote === "'") {
+			if (c === "'") quote = undefined;
+			else word += c;
+			continue;
+		}
+		if (c === "`" || (c === "$" && command[i + 1] === "(")) return undefined; // runs another command
+		if (c === "\\") {
+			word += command[++i] ?? "";
+			inWord = true;
+			continue;
+		}
+		if (quote === '"') {
+			if (c === '"') quote = undefined;
+			else word += c;
+			continue;
+		}
+		if (c === "'" || c === '"') {
+			quote = c;
+			inWord = true;
+		} else if (c === " " || c === "\t") {
+			endWord();
+		} else if (c === ";" || c === "\n" || c === "|" || c === "&") {
+			const pair = command.slice(i, i + 2);
+			if (c === "&" && pair !== "&&" && !/^&>/.test(pair)) return undefined; // backgrounding
+			if (c === "&" && pair !== "&&") {
+				word += c; // part of "&>/dev/null"
+				inWord = true;
+				continue;
+			}
+			endWord();
+			if (pair === "&&" || pair === "||") i++;
+			commands.push([]);
+		} else if (c === ">" || c === "<") {
+			if (c === "<") return undefined; // input redirection and here-docs: not judged
+			const target = /^>>?\s*\S+/.exec(command.slice(i))![0];
+			const redirect = (inWord ? word : "") + target;
+			if (!HARMLESS_REDIRECT.test(redirect.replace(/\s+/g, ""))) return undefined;
+			word = "";
+			inWord = false;
+			i += target.length - 1;
+		} else {
+			word += c;
+			inWord = true;
+		}
+	}
+	if (quote) return undefined;
+	endWord();
+	return commands.filter(words => words.length > 0);
+}
+
+/** True when every part of a shell command only reads or navigates (see READ_ONLY_COMMANDS). */
+export function isReadOnlyCommand(command: string): boolean {
+	const commands = splitCommand(command);
+	if (!commands || commands.length === 0) return false;
+	return commands.every(([name, ...args]) => {
+		if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
+		if (name === "git" && !READ_ONLY_GIT.has(args[0])) return false;
+		return !args.some(arg => WRITING_FLAGS.test(arg));
+	});
+}
+
 /** Parse omp's generic approval prompt ("Allow tool: edit\nFile: x"). */
 export function parseApprovalMessage(message: string): { toolName: string; details: string } | undefined {
 	const match = /^Allow tool:\s*(\S+)\s*\n?([\s\S]*)$/.exec(message.trim());

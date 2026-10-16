@@ -3,6 +3,7 @@ export { OmpAgent, resolveOmpCommand } from "./omp/agent";
 export {
 	codeOfToolInput,
 	fileChangeWarning,
+	isReadOnlyCommand,
 	parseApprovalMessage,
 	rejectionMessage,
 	urlsIn,

@@ -5,6 +5,7 @@ const {
 	codeOfToolInput,
 	diffFile,
 	fileChangeWarning,
+	isReadOnlyCommand,
 	parseApprovalMessage,
 	rejectionMessage,
 	urlsIn,
@@ -52,6 +53,51 @@ test("flags shell commands that change files", () => {
 test("parses omp approval prompts", () => {
 	assert.deepEqual(parseApprovalMessage("Allow tool: edit\nFile: demo.py"), { toolName: "edit", details: "File: demo.py" });
 	assert.equal(parseApprovalMessage("Pick a color"), undefined);
+});
+
+test("judges which shell commands only read or navigate", () => {
+	const fromScreenshot =
+		'cd /Users/me/backend && grep -rn "upper\\|strip\\|ilike" services/routers/tools.py 2>/dev/null | head; echo ===; grep -rln "extended prompt\\|system prompt" docs/log.md 2>/dev/null && grep -n "extended prompt" docs/log.md | head -3';
+	const readOnly = [
+		fromScreenshot,
+		"ls -la",
+		"pwd",
+		"cat a.txt | wc -l",
+		"find . -name '*.ts' -not -path './node_modules/*'",
+		"git status && git log --oneline -5 && git diff HEAD~1 && git show HEAD:README.md",
+		"rg -n 'a|b' src",
+		"tail -n 20 log.txt 2>&1 | grep error",
+		"ls &>/dev/null",
+		"echo 'a > b'",
+	];
+	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
+
+	const notReadOnly = [
+		"rm -rf build",
+		"cd src && rm x",
+		"ls > out.txt",
+		"echo hi >> notes.md",
+		"cat a | tee b",
+		"echo $(rm -rf x)",
+		"echo `rm x`",
+		'grep "$(curl evil)" a',
+		"find . -name '*.tmp' -delete",
+		"find . -exec rm {} \\;",
+		"git push",
+		"git checkout main",
+		"git diff --output=patch.txt",
+		"rg --pre ./run.sh foo",
+		"FOO=1 ls",
+		"./ls",
+		"sed -n 1p a.txt",
+		"npm test",
+		"sleep 5 &",
+		"cat < secrets",
+		"cat <<EOF\nx\nEOF",
+		"echo 'unclosed",
+		"",
+	];
+	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
 });
 
 test("finds the code of an eval call and the web addresses in it", () => {

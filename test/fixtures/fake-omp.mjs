@@ -56,7 +56,9 @@ async function runTurn(steps) {
 				toolCall: { toolCallId: `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission } },
 				options: [
 					{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+					{ optionId: "allow_always", name: "Always allow", kind: "allow_always" },
 					{ optionId: "reject_once", name: "Reject", kind: "reject_once" },
+					{ optionId: "reject_always", name: "Always reject", kind: "reject_always" },
 				],
 			});
 			record({ event: "permission", result: reply.result });

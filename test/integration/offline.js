@@ -801,6 +801,48 @@ exports.run = async function run() {
 			}
 		},
 
+		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.
+		async "\"Always allow read-only commands\" auto-allows only read-only commands, for this chat only"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const cards = () => posts.slice(seen).filter(m => m.type === "permission");
+			const answered = () => fakeLog().slice(logged).filter(e => e.event === "permission").map(e => e.result.outcome.optionId);
+			const seen = posts.length;
+			const logged = fakeLog().length;
+
+			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
+			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
+			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject", "Always reject"], "no 'allow every command' and no read-only option");
+			respond(panel, writeCard, "reject_once", "Reject");
+			await writeCommand;
+
+			const first = controller.send(steps({ permission: "ls -la" }));
+			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow read-only commands", "Reject", "Always reject"]);
+			respond(panel, readCard, readCard.options[1].optionId, "Always allow read-only commands");
+			await first;
+			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");
+
+			await controller.send(steps({ permission: "cd src && grep -rn \"a\\|b\" . | head" }));
+			assert.equal(cards().length, 2, "a later read-only command asks nothing");
+			assert.equal(answered().at(-1), "allow_once");
+			assert.ok(posts.slice(seen).some(m => m.type === "autoAllowed"), "and its row says it was allowed automatically");
+
+			const write = controller.send(steps({ permission: "echo hi > notes.md" }));
+			const asked = await waitFor(() => cards()[2], "a command that writes still asks");
+			respond(panel, asked, "reject_once", "Reject");
+			await write;
+
+			const second = await newSession();
+			const secondPosts = postsOf(second.panel);
+			const before = secondPosts.length;
+			const other = second.controller.send(steps({ permission: "ls" }));
+			const otherCard = await waitFor(() => secondPosts.slice(before).find(m => m.type === "permission"), "another chat still asks");
+			respond(second.panel, otherCard, "allow_once", "Allow once");
+			await other;
+			second.panel.dispose();
+		},
+
 		async "moving a chat into its own window keeps the session working"() {
 			const [first] = api.sessions.all;
 			let reloads = 0;

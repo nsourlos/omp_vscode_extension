@@ -308,6 +308,13 @@ details.thought summary,
 	background: var(--vscode-editor-background);
 }
 
+.tool-note {
+	margin: 2px 0;
+	font-style: italic;
+	opacity: 0.75;
+	font-size: 0.9em;
+}
+
 .tool-ask.resolved {
 	margin: 2px 0;
 	padding: 0;
