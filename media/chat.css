@@ -169,6 +169,27 @@ button:disabled {
 	padding: 6px 8px;
 }
 
+.msg.user {
+	position: relative;
+}
+
+.msg.user button.edit {
+	position: absolute;
+	top: 2px;
+	right: 2px;
+	padding: 0 5px;
+	opacity: 0;
+}
+
+.msg.user button.edit::before {
+	content: "✎";
+}
+
+.msg.user:hover button.edit,
+.msg.user button.edit:focus {
+	opacity: 1;
+}
+
 .msg p {
 	margin: 0 0 6px;
 }

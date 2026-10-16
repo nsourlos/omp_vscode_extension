@@ -107,6 +107,17 @@
 			.join("\n");
 	}
 
+	/** One of the user's messages, with an edit button that puts its text back in the input. */
+	function userMessage(text) {
+		const node = el("div", "msg user");
+		const body = node.appendChild(el("span", "", text));
+		const edit = node.appendChild(el("button", "edit secondary"));
+		edit.title = "Edit: put this message back in the input to change and send again";
+		edit.setAttribute("aria-label", "Edit this message");
+		edit.addEventListener("click", () => restoreInput(body.textContent));
+		return node;
+	}
+
 	function duration(seconds) {
 		if (seconds < 60) return `${seconds}s`;
 		return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
@@ -257,7 +268,7 @@
 				thought = null;
 				if (!replayedUser) {
 					planEl = null;
-					replayedUser = append(el("div", "msg user"));
+					replayedUser = append(userMessage("")).firstChild;
 				}
 				keepScrolled(() => (replayedUser.textContent += text));
 				return;
@@ -624,7 +635,7 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				append(el("div", "msg user", msg.text));
+				append(userMessage(msg.text));
 				return;
 			case "update": return onUpdate(msg.update);
 			case "permission": return onPermission(msg);

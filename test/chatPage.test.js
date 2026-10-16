@@ -166,6 +166,21 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
 });
 
+test("a sent or replayed message of the user's can be put back in the input to edit and resend", () => {
+	const chat = openChat();
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "user", text: "Fix the parser" });
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "Earlier question" } } });
+	const [sent, replayed] = chat.log.querySelectorAll(".msg.user");
+	assert.equal(sent.textContent, "Fix the parser", "the button adds no text to the message");
+	sent.querySelector("button.edit").click();
+	assert.equal(input.value, "Fix the parser");
+	input.value = "";
+	replayed.querySelector("button.edit").click();
+	assert.equal(input.value, "Earlier question");
+	assert.deepEqual(chat.posted.filter(m => m.type === "send"), [], "nothing is sent until the user presses Enter");
+});
+
 test("each reply ends with the model and how long the turn took", () => {
 	const chat = openChat();
 	chat.deliver(chunk("Done."), { type: "turnEnd", stopReason: "end_turn", seconds: 12, model: "GLM 5.3 (Nebul)" });
