@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { OmpAgent, loadMcpServers } = require("../dist/core.js");
+const { OmpAgent, addSavedLogins, loadMcpServers, ompSavedToken } = require("../dist/core.js");
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -69,6 +69,31 @@ test("reads MCP servers from mcp.json files in the format omp's session/new expe
 	assert.match(problems[0], /"odd" has neither a command nor a url/);
 	assert.match(problems[1], /broken\.json/);
 	assert.deepEqual(loadMcpServers([user]).servers[0].env, [{ name: "KEY", value: "secret-123" }], "env as a name/value list, ${VAR} filled in");
+});
+
+test("web MCP servers without a login get omp's saved sign-in as a header; others are left alone", async () => {
+	const asked = [];
+	const savedToken = async url => (asked.push(url), url.includes("atlassian") ? "tok-1" : undefined);
+	const servers = await addSavedLogins(
+		[
+			{ name: "atlassian", type: "http", url: "https://mcp.atlassian.com/v2/mcp", headers: [] },
+			{ name: "github", type: "http", url: "https://api.github.example/mcp", headers: [{ name: "authorization", value: "Bearer mine" }] },
+			{ name: "other", type: "sse", url: "https://other.example/sse", headers: [] },
+			{ name: "files", command: "npx", args: [], env: [] },
+		],
+		savedToken,
+	);
+	assert.deepEqual(servers[0].headers, [{ name: "Authorization", value: "Bearer tok-1" }]);
+	assert.deepEqual(servers[1].headers, [{ name: "authorization", value: "Bearer mine" }], "an existing login is kept");
+	assert.deepEqual(servers[2].headers, [], "no saved sign-in: unchanged");
+	assert.deepEqual(servers[3], { name: "files", command: "npx", args: [], env: [] });
+	assert.deepEqual(asked, ["https://mcp.atlassian.com/v2/mcp", "https://other.example/sse"], "only web servers without a login are looked up");
+});
+
+test("omp's saved sign-in is read with `omp token`, and a missing one is no error", async () => {
+	const lookup = ompSavedToken(join(__dirname, "fixtures", "fake-omp.mjs"));
+	assert.equal(await lookup("https://signed-in.example/mcp"), "fake-token-123");
+	assert.equal(await lookup("https://nobody.example/mcp"), undefined);
 });
 
 test("an MCP server that won't start is left out instead of failing the whole session", async () => {

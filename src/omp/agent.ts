@@ -2,7 +2,7 @@
  * Runs `omp acp` as a child process and speaks ACP to it.
  * No VS Code dependency: everything editor-specific comes in through `ClientHandlers`.
  */
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import spawn from "cross-spawn";
@@ -67,6 +67,21 @@ function searchPath(): string {
 	return [process.env[pathKey(process.env)] ?? "", ...EXTRA_PATHS].join(delimiter);
 }
 
+/** The environment omp runs in: ours, with the usual install locations added to PATH. */
+export function ompEnvironment(): NodeJS.ProcessEnv {
+	return { ...process.env, [pathKey(process.env)]: searchPath() };
+}
+
+/** omp's saved, refreshed sign-in token for an MCP server URL (`omp token`), or undefined if there is none. */
+export function ompSavedToken(ompCommand: string): (url: string) => Promise<string | undefined> {
+	return url =>
+		new Promise(resolve => {
+			execFile(ompCommand, ["token", `mcp_oauth:profile:default:${url}`], { env: ompEnvironment(), timeout: 20_000 }, (error, stdout) => {
+				resolve(error ? undefined : stdout.trim() || undefined);
+			});
+		});
+}
+
 /** Full path to omp (finds omp, omp.exe, omp.cmd…), or the name itself if not found. */
 export function resolveOmpCommand(configured: string): string {
 	return which.sync(configured, { nothrow: true, path: searchPath() }) ?? configured;
@@ -118,7 +133,7 @@ export class OmpAgent {
 	/** Start the process and run the ACP handshake, without opening a session. */
 	async connect(): Promise<JsonRpcConnection> {
 		const { command, args, cwd, handlers } = this.options;
-		const env = { ...process.env, [pathKey(process.env)]: searchPath() };
+		const env = ompEnvironment();
 		const child = spawn(command, ["acp", ...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
 		this.#process = child;
 

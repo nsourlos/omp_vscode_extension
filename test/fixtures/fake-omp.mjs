@@ -17,6 +17,15 @@ import { appendFileSync, closeSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
+// `omp token <id>`: a saved MCP sign-in exists only for URLs containing "signed-in".
+if (args[0] === "token") {
+	if (args[1]?.includes("signed-in")) {
+		process.stdout.write("fake-token-123\n");
+		process.exit(0);
+	}
+	process.stderr.write("No credentials found\n");
+	process.exit(1);
+}
 const flag = name => {
 	const index = args.indexOf(name);
 	return index === -1 ? undefined : args[index + 1];

@@ -62,6 +62,22 @@ export function loadMcpServers(files: string[]): { servers: McpServer[]; problem
 	return { servers: [...byName.values()], problems };
 }
 
+/**
+ * Web servers with no login header get omp's saved sign-in for their URL (made once with
+ * `/mcp reauth <name>` in omp's terminal app; `omp token` refreshes it when needed). omp doesn't
+ * apply saved sign-ins to servers an editor passes in, so the extension adds them as a header.
+ */
+export async function addSavedLogins(servers: McpServer[], savedToken: (url: string) => Promise<string | undefined>): Promise<McpServer[]> {
+	const result: McpServer[] = [];
+	for (const server of servers) {
+		const hasLogin = "url" in server && server.headers.some(header => header.name.toLowerCase() === "authorization");
+		const token = "url" in server && !hasLogin ? await savedToken(server.url) : undefined;
+		if (token && "url" in server) result.push({ ...server, headers: [...server.headers, { name: "Authorization", value: `Bearer ${token}` }] });
+		else result.push(server);
+	}
+	return result;
+}
+
 /** The servers named in omp's "name: error; name2: error" message when they failed to connect. */
 export function failedMcpServers(servers: McpServer[], message: string): McpServer[] {
 	return servers.filter(server => message.includes(`${server.name}:`));
