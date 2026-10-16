@@ -6,6 +6,8 @@ const path = require("node:path");
 const { JSDOM } = require("jsdom");
 
 const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "utf8");
+// Loaded first, as on the real page (needs `npm run build`, like the other tests' dist/core.js).
+const markdown = fs.readFileSync(path.join(__dirname, "..", "dist", "markdown.js"), "utf8");
 
 const CHIME_SRC = "media/staplebops-01.mp3";
 
@@ -33,6 +35,8 @@ function openChat(setup = () => {}) {
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
 	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
 	window.Element.prototype.scrollIntoView = () => {};
+	// The bundle is strict, so its top-level `var` stays inside an eval (on the page, a <script>, it is global).
+	window.eval(`${markdown}\nwindow.ompMarkdown = ompMarkdown;`);
 	window.eval(script);
 	return {
 		posted,
@@ -148,7 +152,7 @@ test("a streamed reply renders once per frame, with nothing lost", async () => {
 	assert.equal(reply.length, 1);
 	assert.equal(reply[0].textContent, "", "500 chunks caused no render before the frame");
 	await chat.nextFrame();
-	assert.equal(reply[0].textContent, words.join(""));
+	assert.equal(reply[0].textContent.trim(), words.join("").trim());
 });
 
 test("a reply cut by a tool call is rendered in full before the next one starts", async () => {
@@ -157,9 +161,33 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	chat.deliver({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a file", kind: "read" } });
 	chat.deliver(chunk("Done"));
 	const replies = chat.log.querySelectorAll(".msg.assistant");
-	assert.equal(replies[0].textContent, "Hello there", "the first reply rendered as soon as the second began");
+	assert.equal(replies[0].textContent.trim(), "Hello there", "the first reply rendered as soon as the second began");
 	await chat.nextFrame();
-	assert.deepEqual([...replies].map(reply => reply.textContent), ["Hello there", "Done"]);
+	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
+});
+
+test("a reply's markdown table, list, code and link render as such", async () => {
+	const chat = openChat();
+	chat.deliver(chunk("| # | Finding |\n|---|---|\n| 1 | **Real** bug |\n| 2 | `code` |\n\n- one\n- two\n\n```js\nconst x = 1;\n```\n\nSee [docs](https://example.com/docs)."));
+	await chat.nextFrame();
+	const reply = chat.log.querySelector(".msg.assistant");
+	const cells = [...reply.querySelectorAll("table tr")].map(row => [...row.children].map(cell => cell.textContent));
+	assert.deepEqual(cells, [["#", "Finding"], ["1", "Real bug"], ["2", "code"]]);
+	assert.equal(reply.querySelector("td strong").textContent, "Real");
+	assert.deepEqual([...reply.querySelectorAll("ul li")].map(li => li.textContent), ["one", "two"]);
+	assert.equal(reply.querySelector("pre code").textContent, "const x = 1;\n");
+	assert.equal(reply.querySelector("a").getAttribute("href"), "https://example.com/docs");
+});
+
+test("a reply's markdown cannot run script or inject handlers", async () => {
+	const chat = openChat();
+	chat.deliver(chunk('Hi <script>window.hacked = 1</script><img src=x onerror="window.hacked = 2"> [x](javascript:alert(1))'));
+	await chat.nextFrame();
+	const reply = chat.log.querySelector(".msg.assistant");
+	assert.equal(reply.querySelector("script"), null);
+	assert.equal(reply.querySelector("[onerror]"), null);
+	assert.ok(![...reply.querySelectorAll("a")].some(a => (a.getAttribute("href") || "").startsWith("javascript:")));
+	assert.equal(chat.window.hacked, undefined);
 });
 
 test("the activity line says what omp is doing during a turn, and hides when it ends", () => {

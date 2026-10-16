@@ -179,9 +179,53 @@ button:disabled {
 	padding-left: 20px;
 }
 
-.heading {
+.heading,
+.msg h1,
+.msg h2,
+.msg h3,
+.msg h4,
+.msg h5,
+.msg h6 {
+	font-size: 1em;
 	font-weight: 600;
 	margin: 8px 0 4px;
+}
+
+.msg h1,
+.msg h2 {
+	font-size: 1.1em;
+}
+
+.msg table {
+	border-collapse: collapse;
+	margin: 6px 0;
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+.msg th,
+.msg td {
+	border: 1px solid var(--vscode-panel-border);
+	padding: 3px 8px;
+	text-align: left;
+	vertical-align: top;
+}
+
+.msg th {
+	background: var(--vscode-textCodeBlock-background);
+	font-weight: 600;
+}
+
+.msg a {
+	color: var(--vscode-textLink-foreground);
+}
+
+.msg blockquote {
+	margin: 4px 0;
+	padding-left: 8px;
+	border-left: 3px solid var(--vscode-panel-border);
+	opacity: 0.85;
 }
 
 code {

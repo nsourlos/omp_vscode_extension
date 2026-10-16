@@ -14,9 +14,22 @@ const options = {
 	logLevel: "info",
 };
 
+/** The chat page's markdown renderer, loaded by the webview as the global `ompMarkdown`. */
+const webview = {
+	entryPoints: { markdown: "src/webview/markdown.ts" },
+	outdir: "dist",
+	bundle: true,
+	platform: "browser",
+	format: "iife",
+	globalName: "ompMarkdown",
+	target: "chrome120",
+	minify: true,
+	sourcemap: true,
+	logLevel: "info",
+};
+
 if (watch) {
-	const ctx = await esbuild.context(options);
-	await ctx.watch();
+	for (const build of [options, webview]) await (await esbuild.context(build)).watch();
 } else {
-	await esbuild.build(options);
+	await Promise.all([esbuild.build(options), esbuild.build(webview)]);
 }

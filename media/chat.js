@@ -1,4 +1,5 @@
-// OMP chat panel. Everything from the agent is inserted as text (never as HTML).
+// OMP chat panel. Everything from the agent is inserted as text, except replies, which are rendered
+// as markdown and sanitised (dist/markdown.js) before they reach the page.
 (function () {
 	const vscode = acquireVsCodeApi();
 	const log = document.getElementById("log");
@@ -64,70 +65,9 @@
 		thought = null;
 	}
 
-	function inline(parent, text) {
-		const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/);
-		for (const part of parts) {
-			if (!part) continue;
-			if (part.startsWith("`") && part.endsWith("`") && part.length > 1) parent.appendChild(el("code", "", part.slice(1, -1)));
-			else if (part.startsWith("**") && part.endsWith("**") && part.length > 3) parent.appendChild(el("strong", "", part.slice(2, -2)));
-			else parent.appendChild(document.createTextNode(part));
-		}
-	}
-
-	// Small, safe markdown subset: code fences, headings, lists, paragraphs, inline code and bold.
+	// GitHub-style markdown (tables, lists, code, links), sanitised by the bundled renderer (dist/markdown.js).
 	function renderMarkdown(container, text) {
-		container.textContent = "";
-		const fence = /```[^\n]*\n?([\s\S]*?)(```|$)/g;
-		let last = 0;
-		let match;
-		while ((match = fence.exec(text))) {
-			renderBlocks(container, text.slice(last, match.index));
-			const pre = el("pre", "code");
-			pre.appendChild(el("code", "", match[1].replace(/\n$/, "")));
-			container.appendChild(pre);
-			last = fence.lastIndex;
-			if (match[0].length === 0) break;
-		}
-		renderBlocks(container, text.slice(last));
-	}
-
-	function renderBlocks(container, text) {
-		let paragraph = null;
-		let list = null;
-		for (const line of text.split("\n")) {
-			const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-			const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-			const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-			if (!line.trim()) {
-				paragraph = null;
-				list = null;
-			} else if (heading) {
-				paragraph = null;
-				list = null;
-				const h = el("div", "heading");
-				inline(h, heading[2]);
-				container.appendChild(h);
-			} else if (bullet || numbered) {
-				paragraph = null;
-				const tag = bullet ? "ul" : "ol";
-				if (!list || list.tagName.toLowerCase() !== tag) {
-					list = el(tag);
-					container.appendChild(list);
-				}
-				const li = el("li");
-				inline(li, (bullet || numbered)[1]);
-				list.appendChild(li);
-			} else {
-				list = null;
-				if (!paragraph) {
-					paragraph = el("p");
-					container.appendChild(paragraph);
-				} else {
-					paragraph.appendChild(el("br"));
-				}
-				inline(paragraph, line);
-			}
-		}
+		container.innerHTML = ompMarkdown.toHtml(text);
 	}
 
 	function textOf(blocks) {

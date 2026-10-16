@@ -26,15 +26,16 @@ export class ChatPanel implements vscode.Disposable {
 		private readonly coversAnotherSession: () => boolean,
 	) {
 		const media = vscode.Uri.joinPath(extensionUri, "media");
+		const markdown = vscode.Uri.joinPath(extensionUri, "dist", "markdown.js");
 		this.#panel = vscode.window.createWebviewPanel(CHAT_PANEL_TYPE, label, viewColumn, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
-			localResourceRoots: [media],
+			localResourceRoots: [media, markdown],
 		});
 		this.#icon = vscode.Uri.joinPath(media, "omp.svg");
 		this.#markedIcon = vscode.Uri.joinPath(media, "omp-done.svg");
 		this.#panel.iconPath = this.#icon;
-		this.#panel.webview.html = chatHtml(this.#panel.webview, media);
+		this.#panel.webview.html = chatHtml(this.#panel.webview, media, markdown);
 		this.#panel.webview.onDidReceiveMessage(message => this.receive(message));
 		this.#panel.onDidChangeViewState(() => {
 			if (this.#panel.visible) {
@@ -120,9 +121,10 @@ function nonce(): string {
 	return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
-function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
+function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.Uri): string {
 	const n = nonce();
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.js"));
+	const markdownScript = webview.asWebviewUri(markdown);
 	const style = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.css"));
 	const chime = webview.asWebviewUri(vscode.Uri.joinPath(media, "staplebops-01.mp3"));
 	return `<!DOCTYPE html>
@@ -148,6 +150,7 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
     <button id="send">Send</button>
   </div>
 </footer>
+<script nonce="${n}" src="${markdownScript}"></script>
 <script nonce="${n}" src="${script}"></script>
 </body>
 </html>`;

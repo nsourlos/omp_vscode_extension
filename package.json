@@ -233,6 +233,8 @@
   "dependencies": {
     "cross-spawn": "^7.0.6",
     "diff": "^8.0.2",
+    "dompurify": "3.4.16",
+    "marked": "18.0.14",
     "which": "^5.0.0"
   },
   "devDependencies": {
