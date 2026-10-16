@@ -181,6 +181,12 @@ test("a sent or replayed message of the user's can be put back in the input to e
 	assert.deepEqual(chat.posted.filter(m => m.type === "send"), [], "nothing is sent until the user presses Enter");
 });
 
+test("a reply is drawn in full when its turn ends, without waiting for a screen frame", () => {
+	const chat = openChat(window => (window.requestAnimationFrame = () => 0)); // a page in the background gets no frames
+	chat.deliver(chunk("| a |\n|---|\n| b |"), { type: "turnEnd", stopReason: "end_turn", seconds: 1 });
+	assert.equal(chat.log.querySelectorAll(".msg.assistant table tr").length, 2);
+});
+
 test("each reply ends with the model and how long the turn took", () => {
 	const chat = openChat();
 	chat.deliver(chunk("Done."), { type: "turnEnd", stopReason: "end_turn", seconds: 12, model: "GLM 5.3 (Nebul)" });

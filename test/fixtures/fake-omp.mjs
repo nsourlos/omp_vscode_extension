@@ -5,7 +5,7 @@
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
-//   {"permission": "<command>"}     ask permission to run a shell command
+//   {"permission": "<command>"}     ask permission to run a shell command ("toolCallId" ties it to a tool_call)
 //   {"approve": "<tool>\n<details>"} send omp's "Allow tool" approval prompt
 //   {"say": "<text>"}               stream a message chunk
 //   {"update": {...}}               send this session/update as is (e.g. a tool_call)
@@ -53,7 +53,7 @@ async function runTurn(steps) {
 		} else if (step.permission) {
 			const reply = await request("session/request_permission", {
 				sessionId,
-				toolCall: { toolCallId: `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission } },
+				toolCall: { toolCallId: step.toolCallId ?? `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission } },
 				options: [
 					{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
 					{ optionId: "allow_always", name: "Always allow", kind: "allow_always" },

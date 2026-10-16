@@ -656,6 +656,7 @@
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));
 				return;
 			case "turnEnd":
+				flushRender(); // a page in the background gets no frames: draw the finished reply now
 				breakFlow();
 				if (msg.stopReason && msg.stopReason !== "end_turn") append(el("div", "notice warning", `Stopped: ${msg.stopReason}`));
 				if (typeof msg.seconds === "number") {
