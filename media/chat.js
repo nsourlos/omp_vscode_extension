@@ -198,6 +198,26 @@
 		});
 	}
 
+	// ---------- context window ----------
+	// omp compacts the conversation by itself when the context fills up, but doesn't tell the editor,
+	// so a sharp drop in the context used between turns is reported as a compaction.
+	const CONTEXT_WARNING_PERCENT = 80;
+	let lastContextUsed = 0;
+	let warnedContextFull = false;
+
+	function onContextUsage(used, size) {
+		const percent = Math.round((used / size) * 100);
+		if (lastContextUsed && used < lastContextUsed * 0.6) {
+			breakFlow();
+			append(el("div", "notice info", `omp compacted the conversation to fit its context window (now ${percent}% full).`));
+		} else if (percent >= CONTEXT_WARNING_PERCENT && !warnedContextFull) {
+			breakFlow();
+			append(el("div", "notice warning", `Context ${percent}% full. omp compacts the conversation by itself when it has to; type /compact to do it now.`));
+		}
+		warnedContextFull = percent >= CONTEXT_WARNING_PERCENT;
+		lastContextUsed = used;
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -253,6 +273,7 @@
 				if (update.used && update.size) parts.push(`${Math.round((update.used / update.size) * 100)}% context`);
 				if (update.cost?.amount !== undefined) parts.push(`$${update.cost.amount.toFixed(3)}`);
 				usageEl.textContent = parts.join(" · ");
+				if (update.used && update.size) onContextUsage(update.used, update.size);
 				return;
 			}
 			case "available_commands_update":

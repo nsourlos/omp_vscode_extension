@@ -166,6 +166,22 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
 });
 
+test("context notices: a warning when it gets full, and a note when omp compacts it", () => {
+	const chat = openChat();
+	const usage = used => ({ type: "update", update: { sessionUpdate: "usage_update", used, size: 100_000 } });
+	const notices = () => [...chat.log.querySelectorAll(".notice")].map(node => node.textContent);
+	chat.deliver(usage(30_000), usage(60_000));
+	assert.deepEqual(notices(), [], "nothing while there is room");
+	chat.deliver(usage(85_000), usage(90_000));
+	assert.equal(notices().length, 1, "warned once when crossing 80%, not every turn");
+	assert.match(notices()[0], /Context 85% full.*\/compact/);
+	chat.deliver(usage(20_000));
+	assert.match(notices()[1], /omp compacted the conversation .*now 20% full/);
+	chat.deliver(usage(83_000));
+	assert.match(notices()[2], /Context 83% full/, "warned again after filling up again");
+	assert.equal(chat.window.document.getElementById("usage").textContent, "83% context");
+});
+
 test("a saved chat's replayed messages show as the user's and omp's messages", async () => {
 	const chat = openChat();
 	const user = text => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
