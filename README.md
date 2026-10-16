@@ -5,6 +5,7 @@ Chat with [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) inside VS Code
 - **Command approval:** every shell command asks inside its own row in the chat (Allow once / Reject / Always reject); afterwards the same row shows ✓ or ✗ and the output. Commands that look like they change files get a warning. For a command that only reads or navigates, **Always allow read-only commands** lets later read-only commands (`cd`, `pwd`, `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `git status/log/diff/show`, `echo`) run without asking in that chat; anything else, or any redirection to a file, still asks. A request to use the browser shows the code omp is about to run, open and in full, with the web addresses written in it listed above (the code may open other pages too, so check it).
 - **Change review:** every file edit opens VS Code's diff view, split into small changes. Each change has **Accept** / **Reject** / **Reject with note…** buttons above it. Only accepted changes are saved, and omp is told exactly which ones you rejected. A note (what to do instead) reaches omp straight away, in the same turn, and omp acts on it.
 - **Edit tool first:** omp is told to change files only with its edit tool, so every change goes through the review.
+- **MCP servers:** omp ignores its own MCP config when it runs inside an editor, so the extension reads `~/.omp/agent/mcp.json`, the project's `.omp/mcp.json` and the project's `.mcp.json` (Claude Code's file; `${VAR}` values are filled in from the environment) and gives those servers to omp when a chat starts. A server that won't start (for example one that needs a sign-in omp doesn't have) is left out, with a warning in the chat. Servers connect in the background, so their tools can take a few seconds to appear in a new chat.
 - **Message queue:** a message sent while omp works waits above the input (✕ removes it). When the turn ends, the queued messages are sent together as the next message; a queued slash command (like `/compact`) is sent on its own. If you press **Stop**, or the turn fails or omp crashes, the queued messages go back into the input instead of being sent. A message you send after pressing Stop runs as soon as the stopped turn ends.
 - **Activity line:** while omp works, a line above the input says what it is doing (thinking, running a tool, waiting for your answer or review) and for how long.
 
@@ -51,6 +52,7 @@ While reviewing: click **Accept** / **Reject** above each change, or put the cur
 | `omp.preferEditTool` | `true` | Tell omp to change files only through its edit tool |
 | `omp.autoApproveEditPrompts` | `true` | Skip omp's yes/no prompt for edits, since the diff review follows anyway |
 | `omp.warnOnShellFileChanges` | `true` | Warn on shell commands that look like they change files |
+| `omp.useMcpServers` | `true` | Give omp the MCP servers from its config files and the project's `.mcp.json` |
 | `omp.soundOnFinish` | `true` | Play opencode's "task finished" sound when omp finishes a reply |
 
 The extension also turns on `diffEditor.codeLens`, which VS Code hides by default; without it the per-change buttons don't show.

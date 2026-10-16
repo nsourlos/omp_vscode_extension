@@ -18,6 +18,7 @@ import type {
 } from "./acp/types";
 import type { ChatPanel } from "./chatPanel";
 import { OmpAgent, resolveOmpCommand } from "./omp/agent";
+import { loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
 	PREFER_EDIT_TOOL_PROMPT,
@@ -209,12 +210,17 @@ export class Controller implements vscode.Disposable {
 		const config = vscode.workspace.getConfiguration("omp");
 		const args = [...config.get<string[]>("extraArgs", [])];
 		if (config.get<boolean>("preferEditTool", true)) args.push("--append-system-prompt", PREFER_EDIT_TOOL_PROMPT);
+		const mcp = config.get<boolean>("useMcpServers", true)
+			? loadMcpServers(mcpConfigFiles(folder.uri.fsPath))
+			: { servers: [], problems: [] };
+		for (const problem of mcp.problems) this.#notice("warning", problem);
 
 		this.chat.post({ type: "status", state: "starting" });
 		const agent = new OmpAgent({
 			command: resolveOmpCommand(config.get<string>("path", "omp")),
 			args,
 			cwd: folder.uri.fsPath,
+			mcpServers: mcp.servers,
 			handlers: {
 				readTextFile: params => this.#readTextFile(params),
 				writeTextFile: params => this.#writeTextFile(params),
@@ -229,6 +235,8 @@ export class Controller implements vscode.Disposable {
 		try {
 			const session = await agent.start();
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
+			if (mcp.servers.length > 0) this.log(`MCP servers passed to omp: ${mcp.servers.map(server => server.name).join(", ")}`);
+			for (const problem of agent.mcpProblems) this.#notice("warning", problem);
 			this.chat.post({ type: "config", options: agent.configOptions });
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;

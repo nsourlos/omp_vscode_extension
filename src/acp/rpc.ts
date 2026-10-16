@@ -81,8 +81,14 @@ export class JsonRpcConnection {
 			const pending = this.#pending.get(message.id);
 			if (!pending) return;
 			this.#pending.delete(message.id);
-			if (message.error) pending.reject(new Error(message.error.message ?? "Agent error"));
-			else pending.resolve(message.result);
+			if (message.error) {
+				// omp often says only "Internal error" and puts the cause in data.details.
+				const details = message.error.data?.details;
+				const text = message.error.message ?? "Agent error";
+				pending.reject(new Error(typeof details === "string" && details ? `${text}: ${details}` : text));
+			} else {
+				pending.resolve(message.result);
+			}
 			return;
 		}
 

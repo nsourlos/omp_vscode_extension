@@ -87,6 +87,11 @@ export interface SessionUpdate {
 	[key: string]: any;
 }
 
+/** An MCP server passed in session/new: run as a local command, or reached over http/sse. */
+export type McpServer =
+	| { name: string; command: string; args: string[]; env: { name: string; value: string }[] }
+	| { name: string; type: "http" | "sse"; url: string; headers: { name: string; value: string }[] };
+
 export interface NewSessionResult {
 	sessionId: string;
 	configOptions?: ConfigOption[];

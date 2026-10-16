@@ -1,5 +1,6 @@
 /** VS Code-free modules, bundled separately so they can be tested with plain Node. */
 export { OmpAgent, resolveOmpCommand } from "./omp/agent";
+export { failedMcpServers, loadMcpServers } from "./omp/mcp";
 export {
 	codeOfToolInput,
 	fileChangeWarning,

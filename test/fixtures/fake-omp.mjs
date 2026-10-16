@@ -96,9 +96,17 @@ async function handle(message) {
 		case "initialize":
 			await sleep(initDelay);
 			return send({ id: message.id, result: { protocolVersion: 1 } });
-		case "session/new":
-			record({ event: "session/new", cwd: message.params.cwd });
+		case "session/new": {
+			const servers = message.params.mcpServers ?? [];
+			record({ event: "session/new", cwd: message.params.cwd, mcpServers: servers.map(server => server.name) });
+			// Like omp: one MCP server that won't connect fails the whole request.
+			const broken = servers.filter(server => server.name.startsWith("broken"));
+			if (broken.length > 0) {
+				const details = broken.map(server => `${server.name}: connection refused`).join("; ");
+				return send({ id: message.id, error: { code: -32603, message: "Internal error", data: { details } } });
+			}
 			return send({ id: message.id, result: { sessionId } });
+		}
 		case "session/prompt": {
 			const text = message.params.prompt[0].text;
 			if (text.startsWith("/")) {

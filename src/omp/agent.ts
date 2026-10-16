@@ -8,9 +8,11 @@ import { delimiter, join } from "node:path";
 import spawn from "cross-spawn";
 import which from "which";
 import { JsonRpcConnection, RpcError } from "../acp/rpc";
+import { failedMcpServers } from "./mcp";
 import {
 	PROTOCOL_VERSION,
 	type ConfigOption,
+	type McpServer,
 	type ElicitationParams,
 	type ElicitationResult,
 	type NewSessionResult,
@@ -39,6 +41,8 @@ export interface OmpAgentOptions {
 	args: string[];
 	cwd: string;
 	handlers: ClientHandlers;
+	/** MCP servers for the session (omp in ACP mode uses only these). */
+	mcpServers?: McpServer[];
 }
 
 /**
@@ -72,6 +76,7 @@ export class OmpAgent {
 	#rpc: JsonRpcConnection | undefined;
 	#sessionId: string | undefined;
 	#configOptions: ConfigOption[] = [];
+	#mcpProblems: string[] = [];
 
 	constructor(private readonly options: OmpAgentOptions) {}
 
@@ -81,6 +86,11 @@ export class OmpAgent {
 
 	get configOptions(): ConfigOption[] {
 		return this.#configOptions;
+	}
+
+	/** MCP servers that would not start, so the session runs without them. */
+	get mcpProblems(): string[] {
+		return this.#mcpProblems;
 	}
 
 	/** Start the process, run the ACP handshake and open a fresh session. */
@@ -140,7 +150,7 @@ export class OmpAgent {
 				},
 				clientInfo: { name: "omp-vscode", version: "0.1.0" },
 			});
-			const session = await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: [] });
+			const session = await this.#openSession(rpc, cwd, this.options.mcpServers ?? []);
 			this.#sessionId = session.sessionId;
 			this.#configOptions = session.configOptions ?? [];
 			return session;
@@ -174,6 +184,22 @@ export class OmpAgent {
 		this.#sessionId = undefined;
 		this.#rpc?.close("Session closed");
 		child?.kill();
+	}
+
+	/**
+	 * omp refuses a whole session when any MCP server fails to connect, so the failing ones are
+	 * dropped and the session is opened again with the rest (or, if it can't tell which, none).
+	 */
+	async #openSession(rpc: JsonRpcConnection, cwd: string, servers: McpServer[]): Promise<NewSessionResult> {
+		try {
+			return await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: servers });
+		} catch (error) {
+			if (servers.length === 0) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			const failed = failedMcpServers(servers, message);
+			this.#mcpProblems.push(`MCP servers not started: ${message}`);
+			return this.#openSession(rpc, cwd, failed.length > 0 ? servers.filter(server => !failed.includes(server)) : []);
+		}
 	}
 
 	#requireRpc(): JsonRpcConnection {

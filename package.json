@@ -233,6 +233,11 @@
           "default": true,
           "description": "Flag shell commands that look like they change files, since those changes skip the diff review."
         },
+        "omp.useMcpServers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give omp the MCP servers from ~/.omp/agent/mcp.json, the project's .omp/mcp.json and the project's .mcp.json (omp ignores its own config inside an editor). Servers that fail to start are left out, with a warning in the chat."
+        },
         "omp.soundOnFinish": {
           "type": "boolean",
           "default": true,
