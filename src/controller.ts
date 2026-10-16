@@ -376,6 +376,7 @@ export class Controller implements vscode.Disposable {
 		const optionId = await this.#ask<string | undefined>(
 			{
 				type: "permission",
+				toolCallId: params.toolCall.toolCallId,
 				title: params.toolCall.title ?? "omp wants to run a tool",
 				kind: params.toolCall.kind,
 				command,

@@ -257,6 +257,25 @@ details.thought summary,
 	overflow-wrap: anywhere;
 }
 
+.tool-ask {
+	margin: 6px 0;
+	padding: 6px 8px;
+	border: 1px solid var(--vscode-focusBorder);
+	background: var(--vscode-editor-background);
+}
+
+.tool-ask.resolved {
+	margin: 2px 0;
+	padding: 0;
+	border: none;
+	background: none;
+}
+
+.tool-ask.resolved .card-heading,
+.tool-ask.resolved .buttons {
+	display: none;
+}
+
 .card {
 	margin: 10px 0;
 	padding: 8px 10px;

@@ -341,6 +341,8 @@
 				tool.command.textContent = "$ " + command;
 				tool.command.hidden = false;
 			}
+			// A shell tool's title is its command, already shown in the command box: show it once.
+			tool.title.hidden = !tool.command.hidden && tool.title.textContent.trim() === tool.command.textContent.slice(2).trim();
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -407,10 +409,23 @@
 		reject_always: "Reject this kind of tool for the rest of the session",
 	};
 
+	// The question goes inside the tool's own row (omp gives both the same toolCallId), so the
+	// command is shown once; afterwards the same row shows ✓ / ✗ and the output.
 	function onPermission(msg) {
 		const isCommand = typeof msg.command === "string";
-		const node = card(msg.requestId, isCommand ? "Run this command?" : msg.title);
-		if (isCommand) node.appendChild(el("pre", "tool-command", "$ " + msg.command));
+		let id = msg.toolCallId;
+		if (!id || !tools.has(id)) {
+			id = id || `permission-${msg.requestId}`;
+			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command } : undefined });
+			if (!msg.toolCallId) runningTools.delete(id); // no tool updates will follow for a made-up row
+		}
+		const tool = tools.get(id);
+		breakFlow();
+		const node = tool.card.insertBefore(el("div", "tool-ask"), tool.details);
+		node.appendChild(el("div", "card-heading", isCommand ? "Run this command?" : "Allow this?"));
+		requests.set(msg.requestId, node);
+		waitingCards.add(msg.requestId);
+		showActivity();
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));

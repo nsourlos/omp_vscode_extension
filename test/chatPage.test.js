@@ -58,24 +58,46 @@ const permission = {
 };
 const chunk = text => ({ type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
 
-test("clicking a card sends the answer with its label and locks the card", () => {
+test("clicking a permission button sends the answer with its label and locks the question", () => {
 	const chat = openChat();
 	chat.deliver(permission);
-	const card = chat.log.querySelector(".card");
-	card.querySelector("button").click();
+	const ask = chat.log.querySelector(".tool-ask");
+	ask.querySelector("button").click();
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "7", value: "allow_once", label: "Allow once" });
-	assert.ok(card.classList.contains("resolved"));
-	assert.ok([...card.querySelectorAll("button")].every(button => button.disabled));
-	assert.equal(card.querySelector(".card-result").textContent, "Allow once");
+	assert.ok(ask.classList.contains("resolved"));
+	assert.ok([...ask.querySelectorAll("button")].every(button => button.disabled));
+	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
 });
 
-test("an answered card stays answered when the chat is replayed", () => {
+test("an answered permission stays answered when the chat is replayed", () => {
 	const chat = openChat();
 	chat.deliver(permission, { type: "resolved", requestId: "7", label: "Allow once" });
-	const card = chat.log.querySelector(".card");
-	assert.ok(card.classList.contains("resolved"));
-	assert.ok([...card.querySelectorAll("button")].every(button => button.disabled));
-	assert.equal(card.querySelector(".card-result").textContent, "Allow once");
+	const ask = chat.log.querySelector(".tool-ask");
+	assert.ok(ask.classList.contains("resolved"));
+	assert.ok([...ask.querySelectorAll("button")].every(button => button.disabled));
+	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
+});
+
+test("a command's permission goes inside its tool row, and the command is shown once", () => {
+	const chat = openChat();
+	const command = "cd /repo && grep -rn foo src | head";
+	const tool = status => ({
+		type: "update",
+		update: { sessionUpdate: status ? "tool_call_update" : "tool_call", toolCallId: "t9", title: command, kind: "execute", status: status ?? "pending", rawInput: { command } },
+	});
+	chat.deliver(tool(), { ...permission, toolCallId: "t9", command });
+	const rows = chat.log.querySelectorAll(".tool");
+	assert.equal(rows.length, 1, "one row, no separate card");
+	assert.equal(chat.log.querySelectorAll(".card").length, 0);
+	const shown = [...rows[0].querySelectorAll(".tool-title, .tool-command, .tool-ask pre")].filter(node => !node.hidden && node.textContent.includes(command));
+	assert.equal(shown.length, 1, "the command appears once");
+	assert.equal(rows[0].querySelector(".tool-ask .card-heading").textContent, "Run this command?");
+
+	rows[0].querySelector(".tool-ask button").click();
+	chat.deliver({ ...tool("completed"), update: { ...tool("completed").update, rawOutput: { content: [{ type: "text", text: "src/a.ts:1:foo" }] } } });
+	assert.equal(rows[0].querySelector(".tool-status").textContent, "✓");
+	assert.equal(rows[0].querySelector(".tool-output pre").textContent, "src/a.ts:1:foo");
+	assert.equal(rows[0].querySelector(".tool-ask .card-result").textContent, "Allow once", "the answer stays visible in the row");
 });
 
 test("approval cards send Approve or Deny with a label", () => {
