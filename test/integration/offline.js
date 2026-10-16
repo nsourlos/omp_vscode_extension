@@ -825,7 +825,8 @@ exports.run = async function run() {
 			};
 			try {
 				await pickFirst();
-				const resumed = await waitFor(() => api.sessions.all.find(s => s.panel.label.endsWith("Fix the parser")), "the saved chat's tab");
+				const resumed = await waitFor(() => api.sessions.all.find(s => s.panel.chatTitle === "Fix the parser"), "the saved chat's tab");
+				await waitFor(() => allTabs().some(tab => tab.label === `${resumed.panel.label}: Fix the parser`), "its tab to show its name");
 				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "saved-1"), "omp to load the saved chat");
 				await waitFor(() => posted.some(p => p.panel === resumed.panel && p.message.type === "status" && p.message.state === "idle"), "the load to finish");
 				assert.equal(resumed.controller.sessionId, "saved-1");
@@ -842,6 +843,29 @@ exports.run = async function run() {
 			} finally {
 				ChatPanel.prototype.post = post;
 			}
+		},
+
+		async "omp names a new chat after its first reply, and an untitled saved chat when it is opened"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const logged = fakeLog().length;
+			await session.controller.send(steps({ say: "hi" })); // omp finds nothing to name yet
+			assert.equal(session.panel.chatTitle, undefined);
+			await session.controller.send(steps({ say: "hello" }, { nameOnRename: "Parser fix" })); // asked again after this reply
+			assert.equal(session.panel.chatTitle, "Parser fix");
+			await waitFor(() => allTabs().some(tab => tab.label === `${session.panel.label}: Parser fix`), "the tab to show the name");
+			assert.ok(
+				!posts.some(m => m.type === "update" && String(m.update.content?.text ?? "").includes("Session renamed")),
+				"omp's 'Session renamed to …' reply stays out of the chat",
+			);
+			await session.controller.send(steps({ say: "again", nameOnRename: "Should not be used" }));
+			assert.equal(fakeLog().slice(logged).filter(e => e.event === "rename").length, 1, "a chat is named once");
+			assert.equal(session.panel.chatTitle, "Parser fix");
+			session.panel.dispose();
+
+			const old = api.sessions.openSaved({ sessionId: "untitled-1", cwd: root, title: "", _meta: { messageCount: 2 } });
+			await waitFor(() => old.panel.chatTitle === "Named on open", "the untitled chat to be named when opened");
+			old.panel.dispose();
 		},
 
 		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.

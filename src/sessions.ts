@@ -92,17 +92,15 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 			open.panel.reveal();
 			return open;
 		}
-		const title = chat.title?.trim() || "previous chat";
-		const session = this.create({ sessionId: chat.sessionId, title: title.length > 30 ? `${title.slice(0, 29)}…` : title });
+		const session = this.create(chat);
 		session.panel.reveal();
 		void session.controller.start();
 		return session;
 	}
 
 	/** Open a new session in its own tab, next to the current chat tab if there is one. */
-	create(saved?: { sessionId: string; title: string }): Session {
-		const number = this.#nextNumber++;
-		const label = saved ? `OMP ${number}: ${saved.title}` : `OMP ${number}`;
+	create(saved?: SavedSession): Session {
+		const label = `OMP ${this.#nextNumber++}`;
 		const panel: ChatPanel = new ChatPanel(
 			this.extensionUri,
 			label,
@@ -110,7 +108,15 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 			(): boolean =>
 				this.#sessions.some(other => other.panel !== panel && other.panel.visible && other.panel.viewColumn === panel.viewColumn),
 		);
-		const controller = new Controller(panel, this.reviews, line => this.output.appendLine(`[${label}] ${line}`), saved?.sessionId);
+		const title = saved?.title?.trim();
+		if (title) panel.setChatTitle(title);
+		const controller = new Controller(
+			panel,
+			this.reviews,
+			line => this.output.appendLine(`[${label}] ${line}`),
+			saved?.sessionId,
+			saved !== undefined && !title,
+		);
 		const session: Session = { panel, controller };
 		this.#sessions.push(session);
 		this.#active = session;

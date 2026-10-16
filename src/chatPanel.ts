@@ -10,6 +10,8 @@ export class ChatPanel implements vscode.Disposable {
 	#markedIcon: vscode.Uri;
 	#ready = false;
 	#disposed = false;
+	#marked = false;
+	#chatTitle: string | undefined;
 	#history: unknown[] = [];
 	#messages = new vscode.EventEmitter<any>();
 	#activated = new vscode.EventEmitter<void>();
@@ -41,7 +43,8 @@ export class ChatPanel implements vscode.Disposable {
 		this.#panel.webview.onDidReceiveMessage(message => this.receive(message));
 		this.#panel.onDidChangeViewState(() => {
 			if (this.#panel.visible) {
-				this.#panel.title = label;
+				this.#marked = false;
+				this.#panel.title = this.#tabTitle();
 				this.#panel.iconPath = this.#icon;
 			}
 			if (this.#panel.active) this.#activated.fire();
@@ -110,8 +113,26 @@ export class ChatPanel implements vscode.Disposable {
 	}
 
 	#mark(): void {
-		this.#panel.title = `● ${this.label}`;
+		this.#marked = true;
+		this.#panel.title = `● ${this.#tabTitle()}`;
 		this.#panel.iconPath = this.#markedIcon;
+	}
+
+	/** The chat's name (from omp), shown on the tab after its label. */
+	get chatTitle(): string | undefined {
+		return this.#chatTitle;
+	}
+
+	setChatTitle(title: string): void {
+		if (this.#disposed) return;
+		this.#chatTitle = title;
+		this.#panel.title = this.#marked ? `● ${this.#tabTitle()}` : this.#tabTitle();
+	}
+
+	#tabTitle(): string {
+		if (!this.#chatTitle) return this.label;
+		const name = this.#chatTitle.length > 32 ? `${this.#chatTitle.slice(0, 31)}…` : this.#chatTitle;
+		return `${this.label}: ${name}`;
 	}
 
 	dispose(): void {

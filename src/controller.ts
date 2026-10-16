@@ -45,6 +45,9 @@ interface QueuedMessage {
 	text: string;
 }
 
+/** How many replies may be followed by an attempt to name an untitled chat. */
+const MAX_NAMING_ATTEMPTS = 3;
+
 /** The extension's own permission option; answered to omp as "allow once". */
 const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
 
@@ -63,6 +66,11 @@ export class Controller implements vscode.Disposable {
 	/** Set by "Always allow read-only commands"; lasts as long as this chat tab. */
 	#allowReadOnly = false;
 	#disposed = false;
+	/** The chat's name from omp, once it has one. */
+	#title: string | undefined;
+	#namingAttempts = 0;
+	/** True while omp is naming the chat, so its reply is not shown. */
+	#naming = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
 	#queue: QueuedMessage[] = [];
@@ -75,6 +83,8 @@ export class Controller implements vscode.Disposable {
 		private readonly log: (line: string) => void,
 		/** A saved chat to load on first start; after that (e.g. a restart after a crash) a fresh one opens. */
 		private resumeSessionId?: string,
+		/** The saved chat has no name yet: name it once it has loaded. */
+		private readonly nameOnLoad = false,
 	) {
 		this.#disposables.push(
 			chat.onMessage(message => this.#onChatMessage(message)),
@@ -132,6 +142,30 @@ export class Controller implements vscode.Disposable {
 		this.chat.markFinished();
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
 			this.chat.notify({ type: "chime" });
+		}
+		if (!finished || !this.#agent) return;
+		this.#busy = true; // a message sent while the chat is being named waits in the queue
+		await this.#nameIfUntitled(this.#agent);
+		this.#busy = false;
+		if (this.#queue.length > 0) return this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+	}
+
+	/**
+	 * omp names chats only in its terminal app, so the extension asks it to after a reply, until it has a name:
+	 * `/rename` with no title makes omp name the chat from the conversation. Its reply
+	 * ("Session renamed to …") is kept out of the chat.
+	 */
+	async #nameIfUntitled(agent: OmpAgent): Promise<void> {
+		// omp gives no name to a chat with nothing to name yet ("hi"), so it is asked again after later replies.
+		if (this.#title || this.#namingAttempts >= MAX_NAMING_ATTEMPTS) return;
+		this.#namingAttempts++;
+		this.#naming = true;
+		try {
+			await agent.prompt("/rename");
+		} catch (error) {
+			this.log(`naming the chat failed: ${errorText(error)}`);
+		} finally {
+			this.#naming = false;
 		}
 	}
 
@@ -262,6 +296,7 @@ export class Controller implements vscode.Disposable {
 				this.#notice("warning", problem + signIn);
 			}
 			this.chat.post({ type: "config", options: agent.configOptions });
+			if (this.nameOnLoad) await this.#nameIfUntitled(agent); // an old chat that never got a name
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
 		} catch (error) {
@@ -356,6 +391,14 @@ export class Controller implements vscode.Disposable {
 			this.chat.post({ type: "config", options: update.configOptions });
 			return;
 		}
+		if (update.sessionUpdate === "session_info_update") {
+			if (typeof update.title === "string" && update.title.trim()) {
+				this.#title = update.title.trim();
+				this.chat.setChatTitle(this.#title);
+			}
+			return;
+		}
+		if (this.#naming && update.sessionUpdate === "agent_message_chunk") return; // omp's "Session renamed to …"
 		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
 			const code = codeOfToolInput(update.rawInput);
 			if (update.status === "completed" || update.status === "failed") this.#runningCode.delete(update.toolCallId);

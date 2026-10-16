@@ -9,6 +9,7 @@
 //   {"approve": "<tool>\n<details>"} send omp's "Allow tool" approval prompt
 //   {"say": "<text>"}               stream a message chunk
 //   {"update": {...}}               send this session/update as is (e.g. a tool_call)
+//   {"nameOnRename": "<title>"}     the next "/rename" names the chat this
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
@@ -36,6 +37,8 @@ const sessionId = `fake-${process.pid}`;
 
 let nextId = 1;
 const waiting = new Map();
+/** The name the next "/rename" gives the chat (set by a step, or by loading "untitled-1"). */
+let pendingName;
 let cancelTurn;
 
 const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -81,6 +84,8 @@ async function runTurn(steps) {
 			record({ event: "approve", result: reply.result });
 		} else if (step.say) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
+		} else if (step.nameOnRename) {
+			pendingName = step.nameOnRename;
 		} else if (step.update) {
 			send({ method: "session/update", params: { sessionId, update: step.update } });
 		} else if (step.hang) {
@@ -129,6 +134,7 @@ async function handle(message) {
 			});
 		case "session/load": {
 			record({ event: "session/load", sessionId: message.params.sessionId });
+			if (message.params.sessionId === "untitled-1") pendingName = "Named on open";
 			// Like omp: replay the saved conversation, then answer.
 			const update = u => send({ method: "session/update", params: { sessionId: message.params.sessionId, update: u } });
 			update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Why does the parser " } });
@@ -138,8 +144,20 @@ async function handle(message) {
 			return send({ id: message.id, result: {} });
 		}
 		case "session/prompt": {
-			record({ event: "prompt", promptSessionId: message.params.sessionId });
 			const text = message.params.prompt[0].text;
+			// Naming attempts stay out of the log (except a real rename), so "the latest event" stays the turn's own.
+			if (text !== "/rename") record({ event: "prompt", promptSessionId: message.params.sessionId });
+			if (text === "/rename") {
+				// Like omp: name the chat (only when a test set a name), report it, and say so in the chat.
+				if (pendingName) {
+					record({ event: "rename", title: pendingName });
+					const update = u => send({ method: "session/update", params: { sessionId: message.params.sessionId, update: u } });
+					update({ sessionUpdate: "session_info_update", title: pendingName });
+					update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Session renamed to ${pendingName}.` } });
+					pendingName = undefined;
+				}
+				return send({ id: message.id, result: { stopReason: "end_turn" } });
+			}
 			if (text.startsWith("/")) {
 				record({ event: "command", text });
 				return send({ id: message.id, result: { stopReason: "end_turn" } });
