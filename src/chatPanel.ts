@@ -26,11 +26,13 @@ export class ChatPanel implements vscode.Disposable {
 		private readonly coversAnotherSession: () => boolean,
 	) {
 		const media = vscode.Uri.joinPath(extensionUri, "media");
-		const markdown = vscode.Uri.joinPath(extensionUri, "dist", "markdown.js");
+		const dist = vscode.Uri.joinPath(extensionUri, "dist");
+		const markdown = vscode.Uri.joinPath(dist, "markdown.js");
 		this.#panel = vscode.window.createWebviewPanel(CHAT_PANEL_TYPE, label, viewColumn, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
-			localResourceRoots: [media, markdown],
+			// Folders only: VS Code serves files under these, and a single file listed here is not served.
+			localResourceRoots: [media, dist],
 		});
 		this.#icon = vscode.Uri.joinPath(media, "omp.svg");
 		this.#markedIcon = vscode.Uri.joinPath(media, "omp-done.svg");
