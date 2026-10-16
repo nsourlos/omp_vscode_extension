@@ -801,6 +801,47 @@ exports.run = async function run() {
 			}
 		},
 
+		async "a saved chat is picked from the list and continued in its own tab, with the conversation so far"() {
+			const pickFirst = async () => {
+				const picking = vscode.commands.executeCommand("omp.openPreviousChat");
+				await waitFor(() => fakeLog().slice(logged).filter(e => e.event === "session/list").length > lists, "the saved chats to be listed");
+				lists++;
+				await sleep(500); // let the list appear
+				await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+				await picking;
+			};
+			const logged = fakeLog().length;
+			let lists = 0;
+			const before = api.sessions.all.length;
+			// The new tab's replay can arrive before the test sees the tab, so record every tab's posts from now on.
+			const ChatPanel = api.sessions.all[0].panel.constructor;
+			const post = ChatPanel.prototype.post;
+			const posted = [];
+			ChatPanel.prototype.post = function (message) {
+				posted.push({ panel: this, message });
+				return post.call(this, message);
+			};
+			try {
+				await pickFirst();
+				const resumed = await waitFor(() => api.sessions.all.find(s => s.panel.label.endsWith("Fix the parser")), "the saved chat's tab");
+				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "saved-1"), "omp to load the saved chat");
+				await waitFor(() => posted.some(p => p.panel === resumed.panel && p.message.type === "status" && p.message.state === "idle"), "the load to finish");
+				assert.equal(resumed.controller.sessionId, "saved-1");
+				const updates = posted.filter(p => p.panel === resumed.panel && p.message.type === "update").map(p => p.message.update.sessionUpdate);
+				assert.deepEqual(updates.slice(0, 4), ["user_message_chunk", "user_message_chunk", "agent_message_chunk", "tool_call"], "the conversation so far is replayed into the tab");
+
+				await resumed.controller.send(steps({ say: "continuing" }));
+				const prompt = fakeLog().slice(logged).filter(e => e.event === "prompt").at(-1);
+				assert.equal(prompt.promptSessionId, "saved-1", "the next message continues the saved chat");
+
+				await pickFirst();
+				assert.equal(api.sessions.all.length, before + 1, "picking it again brings its tab forward instead of opening another");
+				resumed.panel.dispose();
+			} finally {
+				ChatPanel.prototype.post = post;
+			}
+		},
+
 		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.
 		async "\"Always allow read-only commands\" auto-allows only read-only commands, for this chat only"() {
 			const panel = api.sessions.all[0].panel;

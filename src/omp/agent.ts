@@ -13,6 +13,7 @@ import {
 	PROTOCOL_VERSION,
 	type ConfigOption,
 	type McpServer,
+	type SavedSession,
 	type ElicitationParams,
 	type ElicitationResult,
 	type NewSessionResult,
@@ -77,6 +78,8 @@ export class OmpAgent {
 	#sessionId: string | undefined;
 	#configOptions: ConfigOption[] = [];
 	#mcpProblems: string[] = [];
+	/** Rejects when the process exits; raced against every startup step. */
+	#exited: Promise<never> | undefined;
 
 	constructor(private readonly options: OmpAgentOptions) {}
 
@@ -93,8 +96,27 @@ export class OmpAgent {
 		return this.#mcpProblems;
 	}
 
-	/** Start the process, run the ACP handshake and open a fresh session. */
-	async start(): Promise<NewSessionResult> {
+	/**
+	 * Start omp and open a session: a fresh one, or, with `loadSessionId`, a saved one (omp first
+	 * replays its messages as session updates, so the chat shows the conversation so far).
+	 */
+	async start(loadSessionId?: string): Promise<NewSessionResult> {
+		const rpc = await this.connect();
+		const opened = this.#openSession(rpc, this.options.cwd, this.options.mcpServers ?? [], loadSessionId);
+		const session = await Promise.race([opened, this.#exited!]);
+		this.#sessionId = session.sessionId;
+		this.#configOptions = session.configOptions ?? [];
+		return session;
+	}
+
+	/** The chats omp has saved for this folder, newest first (needs `connect()` or `start()`). */
+	async listSessions(): Promise<SavedSession[]> {
+		const result = await this.#requireRpc().request<{ sessions?: SavedSession[] }>("session/list", { cwd: this.options.cwd });
+		return result?.sessions ?? [];
+	}
+
+	/** Start the process and run the ACP handshake, without opening a session. */
+	async connect(): Promise<JsonRpcConnection> {
 		const { command, args, cwd, handlers } = this.options;
 		const env = { ...process.env, [pathKey(process.env)]: searchPath() };
 		const child = spawn(command, ["acp", ...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -139,23 +161,19 @@ export class OmpAgent {
 			child.on("exit", code => fail(`omp exited (code ${code}). ${stderrTail.trim()}`.trim()));
 		});
 		exited.catch(() => {});
+		this.#exited = exited;
 
-		const handshake = (async () => {
-			await rpc.request("initialize", {
-				protocolVersion: PROTOCOL_VERSION,
-				clientCapabilities: {
-					fs: { readTextFile: true, writeTextFile: true },
-					terminal: false,
-					elicitation: { form: {} },
-				},
-				clientInfo: { name: "omp-vscode", version: "0.1.0" },
-			});
-			const session = await this.#openSession(rpc, cwd, this.options.mcpServers ?? []);
-			this.#sessionId = session.sessionId;
-			this.#configOptions = session.configOptions ?? [];
-			return session;
-		})();
-		return Promise.race([handshake, exited]);
+		const handshake = rpc.request("initialize", {
+			protocolVersion: PROTOCOL_VERSION,
+			clientCapabilities: {
+				fs: { readTextFile: true, writeTextFile: true },
+				terminal: false,
+				elicitation: { form: {} },
+			},
+			clientInfo: { name: "omp-vscode", version: "0.1.0" },
+		});
+		await Promise.race([handshake, exited]);
+		return rpc;
 	}
 
 	prompt(text: string): Promise<PromptResult> {
@@ -190,15 +208,18 @@ export class OmpAgent {
 	 * omp refuses a whole session when any MCP server fails to connect, so the failing ones are
 	 * dropped and the session is opened again with the rest (or, if it can't tell which, none).
 	 */
-	async #openSession(rpc: JsonRpcConnection, cwd: string, servers: McpServer[]): Promise<NewSessionResult> {
+	async #openSession(rpc: JsonRpcConnection, cwd: string, servers: McpServer[], loadSessionId?: string): Promise<NewSessionResult> {
 		try {
-			return await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: servers });
+			if (!loadSessionId) return await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: servers });
+			const loaded = await rpc.request<Omit<NewSessionResult, "sessionId">>("session/load", { sessionId: loadSessionId, cwd, mcpServers: servers });
+			return { ...loaded, sessionId: loadSessionId };
 		} catch (error) {
 			if (servers.length === 0) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			const failed = failedMcpServers(servers, message);
 			this.#mcpProblems.push(`MCP servers not started: ${message}`);
-			return this.#openSession(rpc, cwd, failed.length > 0 ? servers.filter(server => !failed.includes(server)) : []);
+			const rest = failed.length > 0 ? servers.filter(server => !failed.includes(server)) : [];
+			return this.#openSession(rpc, cwd, rest, loadSessionId);
 		}
 	}
 

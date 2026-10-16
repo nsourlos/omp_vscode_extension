@@ -107,7 +107,29 @@ async function handle(message) {
 			}
 			return send({ id: message.id, result: { sessionId } });
 		}
+		case "session/list":
+			record({ event: "session/list", cwd: message.params.cwd });
+			return send({
+				id: message.id,
+				result: {
+					sessions: [
+						{ sessionId: "empty-1", cwd: message.params.cwd, title: "", updatedAt: "2026-10-02T09:00:00.000Z", _meta: { messageCount: 0 } },
+						{ sessionId: "saved-1", cwd: message.params.cwd, title: "Fix the parser", updatedAt: "2026-10-01T09:00:00.000Z", _meta: { messageCount: 3 } },
+					],
+				},
+			});
+		case "session/load": {
+			record({ event: "session/load", sessionId: message.params.sessionId });
+			// Like omp: replay the saved conversation, then answer.
+			const update = u => send({ method: "session/update", params: { sessionId: message.params.sessionId, update: u } });
+			update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "Why does the parser " } });
+			update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "fail?" } });
+			update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "It skips **empty** lines." } });
+			update({ sessionUpdate: "tool_call", toolCallId: "old-1", title: "Read parser.ts", kind: "read", status: "completed" });
+			return send({ id: message.id, result: {} });
+		}
 		case "session/prompt": {
+			record({ event: "prompt", promptSessionId: message.params.sessionId });
 			const text = message.params.prompt[0].text;
 			if (text.startsWith("/")) {
 				record({ event: "command", text });

@@ -1,6 +1,6 @@
 /** Folds a streamed text chunk into the previous chat message, so the replay history stays small. */
 
-const STREAMED = new Set(["agent_message_chunk", "agent_thought_chunk"]);
+const STREAMED = new Set(["agent_message_chunk", "agent_thought_chunk", "user_message_chunk"]);
 
 function streamedText(message: any): string | undefined {
 	if (message?.type !== "update" || !STREAMED.has(message.update?.sessionUpdate)) return undefined;

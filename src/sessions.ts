@@ -5,7 +5,8 @@
  */
 import * as vscode from "vscode";
 import { ChatPanel } from "./chatPanel";
-import { Controller } from "./controller";
+import type { SavedSession } from "./acp/types";
+import { Controller, listSavedChats } from "./controller";
 import type { ReviewManager } from "./review/reviewManager";
 
 export interface Session {
@@ -61,9 +62,47 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 		return session;
 	}
 
+	/** Pick one of omp's saved chats for this folder and continue it in a tab. */
+	async openSavedFromPicker(): Promise<void> {
+		const saved = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Window, title: "OMP: reading saved chats" },
+			() => listSavedChats(line => this.output.appendLine(`[history] ${line}`)),
+		);
+		const chats = saved.filter(chat => chat._meta?.messageCount !== 0); // nothing to continue in an empty chat
+		if (chats.length === 0) {
+			void vscode.window.showInformationMessage("omp has no saved chats for this folder yet.");
+			return;
+		}
+		const picked = await vscode.window.showQuickPick(
+			chats.map(chat => ({
+				label: chat.title || "(untitled chat)",
+				description: chat.updatedAt ? new Date(chat.updatedAt).toLocaleString() : undefined,
+				detail: chat._meta?.messageCount !== undefined ? `${chat._meta.messageCount} messages` : undefined,
+				chat,
+			})),
+			{ placeHolder: "Continue a previous omp chat", matchOnDescription: true },
+		);
+		if (picked) this.openSaved(picked.chat);
+	}
+
+	/** Continue a saved chat: bring its tab forward if it is open, else load it into a new tab. */
+	openSaved(chat: SavedSession): Session {
+		const open = this.#sessions.find(session => session.controller.sessionId === chat.sessionId);
+		if (open) {
+			open.panel.reveal();
+			return open;
+		}
+		const title = chat.title?.trim() || "previous chat";
+		const session = this.create({ sessionId: chat.sessionId, title: title.length > 30 ? `${title.slice(0, 29)}…` : title });
+		session.panel.reveal();
+		void session.controller.start();
+		return session;
+	}
+
 	/** Open a new session in its own tab, next to the current chat tab if there is one. */
-	create(): Session {
-		const label = `OMP ${this.#nextNumber++}`;
+	create(saved?: { sessionId: string; title: string }): Session {
+		const number = this.#nextNumber++;
+		const label = saved ? `OMP ${number}: ${saved.title}` : `OMP ${number}`;
 		const panel: ChatPanel = new ChatPanel(
 			this.extensionUri,
 			label,
@@ -71,7 +110,7 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 			(): boolean =>
 				this.#sessions.some(other => other.panel !== panel && other.panel.visible && other.panel.viewColumn === panel.viewColumn),
 		);
-		const controller = new Controller(panel, this.reviews, line => this.output.appendLine(`[${label}] ${line}`));
+		const controller = new Controller(panel, this.reviews, line => this.output.appendLine(`[${label}] ${line}`), saved?.sessionId);
 		const session: Session = { panel, controller };
 		this.#sessions.push(session);
 		this.#active = session;

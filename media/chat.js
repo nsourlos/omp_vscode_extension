@@ -20,6 +20,7 @@
 	const MAX_OUTPUT = 6000;
 
 	let assistant = null; // { el, text }
+	let replayedUser = null; // a user message omp is replaying from a saved chat
 	let thought = null; // { el, pre }
 	let planEl = null;
 	let commands = [];
@@ -63,6 +64,7 @@
 	function breakFlow() {
 		assistant = null;
 		thought = null;
+		replayedUser = null;
 	}
 
 	// GitHub-style markdown (tables, lists, code, links), sanitised by the bundled renderer (dist/markdown.js).
@@ -199,10 +201,24 @@
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
+			case "user_message_chunk": {
+				// Only sent when a saved chat is loaded: omp replays the conversation so far.
+				const text = update.content?.type === "text" ? update.content.text : "";
+				if (!text) return;
+				assistant = null;
+				thought = null;
+				if (!replayedUser) {
+					planEl = null;
+					replayedUser = append(el("div", "msg user"));
+				}
+				keepScrolled(() => (replayedUser.textContent += text));
+				return;
+			}
 			case "agent_message_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
 				thought = null;
+				replayedUser = null;
 				setDoing("Writing…");
 				if (!assistant) {
 					const node = append(el("div", "msg assistant"));
@@ -215,6 +231,7 @@
 			case "agent_thought_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
+				replayedUser = null;
 				setDoing("Thinking…");
 				if (!thought) {
 					assistant = null;

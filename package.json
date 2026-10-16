@@ -50,6 +50,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "omp.openPreviousChat",
+        "title": "Continue a Previous Chat…",
+        "category": "OMP",
+        "icon": "$(history)"
+      },
+      {
         "command": "omp.cancel",
         "title": "Stop",
         "category": "OMP",
@@ -157,14 +163,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "omp.openInWindow",
+          "command": "omp.openPreviousChat",
           "when": "activeWebviewPanelId == 'omp.chatPanel'",
           "group": "navigation@2"
         },
         {
-          "command": "omp.showLog",
+          "command": "omp.openInWindow",
           "when": "activeWebviewPanelId == 'omp.chatPanel'",
           "group": "navigation@3"
+        },
+        {
+          "command": "omp.showLog",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "navigation@4"
         },
         {
           "command": "omp.review.acceptAll",

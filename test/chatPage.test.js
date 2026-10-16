@@ -166,6 +166,20 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
 });
 
+test("a saved chat's replayed messages show as the user's and omp's messages", async () => {
+	const chat = openChat();
+	const user = text => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+	chat.deliver(user("Why does the parser "), user("fail?"), chunk("It skips **empty** lines."), user("Fix it"), chunk("Done."));
+	await chat.nextFrame();
+	const messages = [...chat.log.querySelectorAll(".msg")].map(node => [node.classList.contains("user") ? "user" : "omp", node.textContent.trim()]);
+	assert.deepEqual(messages, [
+		["user", "Why does the parser fail?"],
+		["omp", "It skips empty lines."],
+		["user", "Fix it"],
+		["omp", "Done."],
+	]);
+});
+
 test("a reply's markdown table, list, code and link render as such", async () => {
 	const chat = openChat();
 	chat.deliver(chunk("| # | Finding |\n|---|---|\n| 1 | **Real** bug |\n| 2 | `code` |\n\n- one\n- two\n\n```js\nconst x = 1;\n```\n\nSee [docs](https://example.com/docs)."));

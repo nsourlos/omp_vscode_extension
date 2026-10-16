@@ -13,6 +13,7 @@ import type {
 	ReadTextFileParams,
 	RequestPermissionParams,
 	RequestPermissionResult,
+	SavedSession,
 	SessionUpdate,
 	WriteTextFileParams,
 } from "./acp/types";
@@ -70,6 +71,8 @@ export class Controller implements vscode.Disposable {
 		private readonly chat: ChatPanel,
 		private readonly reviews: ReviewManager,
 		private readonly log: (line: string) => void,
+		/** A saved chat to load on first start; after that (e.g. a restart after a crash) a fresh one opens. */
+		private resumeSessionId?: string,
 	) {
 		this.#disposables.push(
 			chat.onMessage(message => this.#onChatMessage(message)),
@@ -122,6 +125,11 @@ export class Controller implements vscode.Disposable {
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
 			this.chat.notify({ type: "chime" });
 		}
+	}
+
+	/** The omp session this tab shows (the saved one it will load, before it starts). */
+	get sessionId(): string | undefined {
+		return this.#agent?.sessionId ?? this.resumeSessionId;
 	}
 
 	/** Stop the turn; queued messages go back into the input box rather than being sent. */
@@ -233,7 +241,8 @@ export class Controller implements vscode.Disposable {
 		});
 		this.#agent = agent;
 		try {
-			const session = await agent.start();
+			const session = await agent.start(this.resumeSessionId);
+			this.resumeSessionId = undefined;
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
 			if (mcp.servers.length > 0) this.log(`MCP servers passed to omp: ${mcp.servers.map(server => server.name).join(", ")}`);
 			for (const problem of agent.mcpProblems) this.#notice("warning", problem);
@@ -497,4 +506,34 @@ async function saveText(uri: vscode.Uri, text: string, exists: boolean): Promise
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** The chats omp has saved for the open folder, newest first, asked of a short-lived omp. */
+export async function listSavedChats(log: (line: string) => void): Promise<SavedSession[]> {
+	const folder = vscode.workspace.workspaceFolders?.[0];
+	if (!folder) throw new Error("Open a folder first: omp works inside a project folder.");
+	const config = vscode.workspace.getConfiguration("omp");
+	const refuse = async (): Promise<never> => {
+		throw new RpcError(-32601, "not available while listing chats");
+	};
+	const agent = new OmpAgent({
+		command: resolveOmpCommand(config.get<string>("path", "omp")),
+		args: [...config.get<string[]>("extraArgs", [])],
+		cwd: folder.uri.fsPath,
+		handlers: {
+			readTextFile: refuse,
+			writeTextFile: refuse,
+			requestPermission: refuse,
+			elicit: refuse,
+			onSessionUpdate: () => {},
+			onExit: () => {},
+			log,
+		},
+	});
+	try {
+		await agent.connect();
+		return await agent.listSessions();
+	} finally {
+		agent.dispose();
+	}
 }
