@@ -209,6 +209,38 @@ test("a reply's markdown table, list, code and link render as such", async () =>
 	assert.equal(reply.querySelector("a").getAttribute("href"), "https://example.com/docs");
 });
 
+test("a code block in a reply has a Copy button that copies just the code", async () => {
+	const copied = [];
+	const chat = openChat(window => {
+		Object.defineProperty(window.navigator, "clipboard", { value: { writeText: text => (copied.push(text), Promise.resolve()) } });
+	});
+	chat.deliver(chunk("Run:\n\n```sh\nnpm test\n```"));
+	await chat.nextFrame();
+	const button = chat.log.querySelector(".msg.assistant pre button.copy");
+	button.click();
+	await Promise.resolve();
+	assert.deepEqual(copied, ["npm test\n"]);
+	assert.equal(button.textContent, "Copied");
+});
+
+test("when the clipboard API refuses (page not focused), the code is copied with the copy command", async () => {
+	const commands = [];
+	const chat = openChat(window => {
+		Object.defineProperty(window.navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("Document is not focused")) } });
+		window.document.execCommand = command => {
+			commands.push([command, window.document.querySelector("body > textarea")?.value]);
+			return true;
+		};
+	});
+	chat.deliver(chunk("```\nls\n```"));
+	await chat.nextFrame();
+	const button = chat.log.querySelector("pre button.copy");
+	button.click();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(commands, [["copy", "ls\n"]]);
+	assert.equal(button.textContent, "Copied");
+});
+
 test("a reply's markdown cannot run script or inject handlers", async () => {
 	const chat = openChat();
 	chat.deliver(chunk('Hi <script>window.hacked = 1</script><img src=x onerror="window.hacked = 2"> [x](javascript:alert(1))'));

@@ -70,6 +70,29 @@
 	// GitHub-style markdown (tables, lists, code, links), sanitised by the bundled renderer (dist/markdown.js).
 	function renderMarkdown(container, text) {
 		container.innerHTML = ompMarkdown.toHtml(text);
+		for (const pre of container.querySelectorAll("pre")) addCopyButton(pre);
+	}
+
+	function addCopyButton(pre) {
+		const button = pre.appendChild(el("button", "copy secondary", "Copy"));
+		button.title = "Copy this code";
+		button.addEventListener("click", () => {
+			const code = pre.querySelector("code")?.textContent ?? pre.textContent;
+			navigator.clipboard.writeText(code).then(
+				() => (button.textContent = "Copied"),
+				// The clipboard API needs the page focused; the older copy command works without it.
+				() => (button.textContent = copyWithCommand(code) ? "Copied" : "Copy failed"),
+			);
+		});
+	}
+
+	function copyWithCommand(text) {
+		const area = document.body.appendChild(el("textarea"));
+		area.value = text;
+		area.select();
+		const copied = document.execCommand("copy");
+		area.remove();
+		return copied;
 	}
 
 	function textOf(blocks) {
