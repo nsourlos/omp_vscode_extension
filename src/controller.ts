@@ -536,6 +536,8 @@ export class Controller implements vscode.Disposable {
 				title: params.toolCall.title ?? "omp wants to run a tool",
 				kind: params.toolCall.kind,
 				command,
+				// omp's shell can run a command in another folder (its `cwd` option) instead of using `cd`.
+				cwd: typeof params.toolCall.rawInput?.cwd === "string" ? params.toolCall.rawInput.cwd : undefined,
 				warning: command && warn ? fileChangeWarning(command) : undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
 				options,

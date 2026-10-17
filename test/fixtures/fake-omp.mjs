@@ -78,7 +78,7 @@ async function runTurn(steps) {
 		} else if (step.permission) {
 			const reply = await request("session/request_permission", {
 				sessionId,
-				toolCall: { toolCallId: step.toolCallId ?? `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission } },
+				toolCall: { toolCallId: step.toolCallId ?? `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission, ...(step.cwd ? { cwd: step.cwd } : {}) } },
 				options: [
 					{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
 					{ optionId: "allow_always", name: "Always allow", kind: "allow_always" },

@@ -1105,6 +1105,17 @@ exports.run = async function run() {
 			old.panel.dispose();
 		},
 
+		async "a command omp runs in another folder says which folder on its permission card"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const turn = controller.send(steps({ permission: "ls -la", cwd: "vendor/lib" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			assert.equal(card.cwd, "vendor/lib");
+			respond(panel, card, "reject_once", "Reject");
+			await turn;
+		},
+
 		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.
 		async "\"Always allow read-only commands\" auto-allows only read-only commands, for this chat only"() {
 			const panel = api.sessions.all[0].panel;

@@ -64,7 +64,6 @@ test("judges which shell commands only read or navigate", () => {
 		"pwd",
 		"cat a.txt | wc -l",
 		"find . -name '*.ts' -not -path './node_modules/*'",
-		"git status && git log --oneline -5 && git diff HEAD~1 && git show HEAD:README.md",
 		"rg -n 'a|b' src",
 		"tail -n 20 log.txt 2>&1 | grep error",
 		"ls &>/dev/null",
@@ -88,6 +87,8 @@ test("judges which shell commands only read or navigate", () => {
 		"find . -name '*.tmp' -delete",
 		"find . -exec rm {} \\;",
 		"git push",
+		"git status", // reads the folder's repository settings, which can run programs
+		"git log --oneline -5 && git diff HEAD~1",
 		"cd vendor/lib && git status",
 		"cd vendor/lib; git log --oneline",
 		"git checkout main",

@@ -452,6 +452,7 @@
 		requests.set(msg.requestId, node);
 		waitingCards.add(msg.requestId);
 		showActivity();
+		if (msg.cwd) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));

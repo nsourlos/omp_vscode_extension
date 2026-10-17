@@ -33,11 +33,15 @@ export function fileChangeWarning(command: string): string | undefined {
 	return `This command may change files without a diff review (${[...new Set(hits)].join(", ")}).`;
 }
 
-/** Commands that only read or navigate; anything not listed here is never auto-allowed. */
-const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "git", "echo"]);
-const READ_ONLY_GIT = new Set(["status", "log", "diff", "show"]);
+/**
+ * Commands that only read or navigate; anything not listed here is never auto-allowed. Not git:
+ * even `git status` reads the repository settings of the folder it runs in (omp can pick that folder
+ * with its `cwd` option, and its shell keeps an earlier `cd`), and a planted repository's settings
+ * (core.fsmonitor, diff.external) run programs.
+ */
+const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "echo"]);
 /** Options that make an otherwise read-only command write files or run another program. */
-const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls|--output(=.*)?)$/;
+const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls)$/;
 /** ripgrep options that start other programs: a preprocessor, a hostname helper, decompressors (-z). */
 const RG_RUNS_PROGRAMS = /^(--pre|--hostname-bin|--search-zip)(=.*)?$|^-[a-zA-Z]*z/;
 /** Redirections that only discard output or merge it into the pipe. */
@@ -137,12 +141,8 @@ function splitCommand(command: string): string[][] | undefined {
 export function isReadOnlyCommand(command: string): boolean {
 	const commands = splitCommand(command);
 	if (!commands || commands.length === 0) return false;
-	// After a `cd`, git reads that folder's own repository settings, and a planted repository's
-	// settings (core.fsmonitor, diff.external) run programs.
-	if (commands.some(([name]) => name === "cd") && commands.some(([name]) => name === "git")) return false;
 	return commands.every(([name, ...args]) => {
 		if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
-		if (name === "git" && !READ_ONLY_GIT.has(args[0])) return false;
 		if (name === "rg" && args.some(arg => RG_RUNS_PROGRAMS.test(arg))) return false;
 		return !args.some(arg => WRITING_FLAGS.test(arg));
 	});

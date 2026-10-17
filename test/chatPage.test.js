@@ -82,6 +82,12 @@ test("an answered permission stays answered when the chat is replayed", () => {
 	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
 });
 
+test("a permission for a command run in another folder names that folder", () => {
+	const chat = openChat();
+	chat.deliver({ ...permission, cwd: "vendor/lib" });
+	assert.ok([...chat.log.querySelectorAll(".tool-ask .location")].some(node => node.textContent === "in folder: vendor/lib"));
+});
+
 test("a command's permission goes inside its tool row, and the command is shown once", () => {
 	const chat = openChat();
 	const command = "cd /repo && grep -rn foo src | head";
