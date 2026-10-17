@@ -137,6 +137,9 @@ function splitCommand(command: string): string[][] | undefined {
 export function isReadOnlyCommand(command: string): boolean {
 	const commands = splitCommand(command);
 	if (!commands || commands.length === 0) return false;
+	// After a `cd`, git reads that folder's own repository settings, and a planted repository's
+	// settings (core.fsmonitor, diff.external) run programs.
+	if (commands.some(([name]) => name === "cd") && commands.some(([name]) => name === "git")) return false;
 	return commands.every(([name, ...args]) => {
 		if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
 		if (name === "git" && !READ_ONLY_GIT.has(args[0])) return false;

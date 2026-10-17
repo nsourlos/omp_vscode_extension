@@ -88,6 +88,8 @@ test("judges which shell commands only read or navigate", () => {
 		"find . -name '*.tmp' -delete",
 		"find . -exec rm {} \\;",
 		"git push",
+		"cd vendor/lib && git status",
+		"cd vendor/lib; git log --oneline",
 		"git checkout main",
 		"git diff --output=patch.txt",
 		"rg --pre ./run.sh foo",
