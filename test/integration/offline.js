@@ -989,6 +989,22 @@ exports.run = async function run() {
 			gone.panel.dispose();
 		},
 
+		async "omp exiting while it names a new chat puts a queued message back in the input, not into a fresh chat"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const notified = notificationsOf(session.panel);
+			const turn = session.controller.send(steps({ say: "hi" }, { crashOnRename: true, renameDelay: 1500 }));
+			await waitFor(() => posts.some(m => m.type === "status" && m.state === "naming"), "the chat to be named");
+			const naming = fakeLog().length;
+			await session.controller.send("now delete the old files");
+			await turn;
+			await sleep(500); // a fresh omp would have started by now
+			assert.ok(notified.some(m => m.type === "restoreInput" && m.text === "now delete the old files"), "the message is back in the input");
+			assert.ok(!fakeLog().slice(naming).some(e => e.event === "session/new"), "no fresh omp was started for it");
+			assert.equal(posts.filter(m => m.type === "status").at(-1).state, "stopped");
+			session.panel.dispose();
+		},
+
 		async "omp exiting while it names a saved chat on opening leaves the tab stopped, and the chat still to load"() {
 			const crashing = api.sessions.openSaved({ sessionId: "untitled-crash", cwd: root, title: "", _meta: { messageCount: 2 } });
 			const posts = postsOf(crashing.panel);

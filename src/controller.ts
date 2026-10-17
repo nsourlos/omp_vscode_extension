@@ -154,6 +154,10 @@ export class Controller implements vscode.Disposable {
 		this.chat.post({ type: "status", state: "naming" });
 		await this.#nameIfUntitled(this.#agent);
 		this.#busy = false;
+		if (!this.#agent) {
+			this.#returnQueueToInput(); // omp exited while naming: queued messages must not start a fresh, empty chat
+			return;
+		}
 		if (this.#queue.length > 0) return this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
 		this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 	}

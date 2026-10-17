@@ -10,6 +10,7 @@
 //   {"say": "<text>"}               stream a message chunk
 //   {"update": {...}}               send this session/update as is (e.g. a tool_call)
 //   {"nameOnRename": "<title>"}     the next "/rename" names the chat this
+//   {"crashOnRename": true}         the next "/rename" exits instead (after "renameDelay" ms, if given)
 //   {"hang": true}                  wait until session/cancel
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
@@ -98,6 +99,9 @@ async function runTurn(steps) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: step.say } } } });
 		} else if (step.nameOnRename) {
 			pendingName = step.nameOnRename;
+			if (step.renameDelay) renameDelay = step.renameDelay;
+		} else if (step.crashOnRename) {
+			crashOnRename = true;
 			if (step.renameDelay) renameDelay = step.renameDelay;
 		} else if (step.update) {
 			send({ method: "session/update", params: { sessionId, update: step.update } });
