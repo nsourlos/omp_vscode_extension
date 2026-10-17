@@ -21,6 +21,7 @@
 
 	let assistant = null; // { el, text }
 	let replayedUser = null; // a user message omp is replaying from a saved chat
+	let replayedUserId; // its messageId: a chunk with another one starts the next message
 	let thought = null; // { el, pre }
 	let planEl = null;
 	let commands = [];
@@ -257,6 +258,12 @@
 		lastContextUsed = used;
 	}
 
+	// A new omp process opens a new session (or reloads a saved one): its context is not compared with the last one's.
+	function forgetContextUsage() {
+		lastContextUsed = 0;
+		warnedContextFull = false;
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
@@ -266,9 +273,11 @@
 				if (!text) return;
 				assistant = null;
 				thought = null;
+				if (replayedUser && update.messageId !== replayedUserId) replayedUser = null; // two messages in a row (the same rule as the stored history)
 				if (!replayedUser) {
 					planEl = null;
 					replayedUser = append(userMessage("")).firstChild;
+					replayedUserId = update.messageId;
 				}
 				keepScrolled(() => (replayedUser.textContent += text));
 				return;
@@ -348,7 +357,7 @@
 				tool.card.dataset.status = update.status;
 			}
 			if (tool.card.dataset.status === "completed" || tool.card.dataset.status === "failed") {
-				if (runningTools.delete(update.toolCallId) && !runningTools.size) doing = "Working…";
+				notRunning(update.toolCallId);
 			} else {
 				runningTools.set(update.toolCallId, tool.title.textContent || "a tool");
 			}
@@ -450,9 +459,17 @@
 			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "secondary", option.name));
 			const hint = option.description || OPTION_HINTS[option.kind];
 			if (hint) button.title = hint;
-			button.addEventListener("click", () => respond(msg.requestId, option.optionId, option.name));
+			button.addEventListener("click", () => {
+				respond(msg.requestId, option.optionId, option.name);
+				if (!option.kind.startsWith("allow")) notRunning(id); // a rejected tool never runs, and omp may not say so
+			});
 		}
 		finishCard(node);
+	}
+
+	function notRunning(toolCallId) {
+		if (runningTools.delete(toolCallId) && !runningTools.size) doing = "Working…";
+		showActivity();
 	}
 
 	function onAutoAllowed(toolCallId) {
@@ -620,11 +637,12 @@
 	}
 
 	function setStatus(state) {
-		const labels = { starting: "Starting omp…", busy: "Working…", idle: "Ready", stopped: "Stopped" };
+		const labels = { starting: "Starting omp…", busy: "Working…", naming: "Naming the chat…", idle: "Ready", stopped: "Stopped" };
 		statusEl.textContent = labels[state] || state;
+		if (state === "starting") forgetContextUsage();
 		statusEl.dataset.state = state;
 		// A message can be what starts omp, and Stop must still work while it starts.
-		stopButton.hidden = !(state === "busy" || (state === "starting" && busySince));
+		stopButton.hidden = !(state === "busy" || state === "naming" || (state === "starting" && busySince));
 		if (state === "busy") startActivity();
 		else if (state !== "starting") stopActivity();
 	}

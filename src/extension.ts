@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { registerMcpCommands } from "./mcpServers";
 import { ReviewManager } from "./review/reviewManager";
 import { Sessions } from "./sessions";
 
@@ -30,6 +31,7 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 		),
 		vscode.commands.registerCommand("omp.showLog", () => output.show()),
 		vscode.commands.registerCommand("omp.openInWindow", () => sessions.openInWindow()),
+		registerMcpCommands(),
 	);
 	return { sessions, reviews };
 }

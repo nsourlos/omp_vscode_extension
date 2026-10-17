@@ -1,6 +1,16 @@
 /** VS Code-free modules, bundled separately so they can be tested with plain Node. */
 export { OmpAgent, ompSavedToken, resolveOmpCommand } from "./omp/agent";
-export { addSavedLogins, failedMcpServers, loadMcpServers } from "./omp/mcp";
+export {
+	addMcpServerToFile,
+	addSavedLogins,
+	ensureMcpConfigFile,
+	failedMcpServers,
+	loadMcpServers,
+	mcpConfigFiles,
+	mcpServerNameProblem,
+	splitCommandLine,
+	suggestMcpServerName,
+} from "./omp/mcp";
 export {
 	codeOfToolInput,
 	fileChangeWarning,

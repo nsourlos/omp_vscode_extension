@@ -5,7 +5,7 @@
  */
 import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
-import { RpcError } from "./acp/rpc";
+import { AgentError, RpcError } from "./acp/rpc";
 import type {
 	ConfigOption,
 	ElicitationParams,
@@ -65,10 +65,11 @@ export class Controller implements vscode.Disposable {
 	#stopRequested = false;
 	/** Set by "Always allow read-only commands"; lasts as long as this chat tab. */
 	#allowReadOnly = false;
-	#disposed = false;
-	/** The chat's name from omp, once it has one. */
-	#title: string | undefined;
 	#namingAttempts = 0;
+	/** The omp session whose conversation the chat already shows, so loading it again replays nothing. */
+	#shownSessionId: string | undefined;
+	/** A message waits in the queue for a saved chat to finish loading. */
+	#waitingForLoad = false;
 	/** True while omp is naming the chat, so its reply is not shown. */
 	#naming = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
@@ -100,10 +101,15 @@ export class Controller implements vscode.Disposable {
 	 * the next turn, and the chime waits for that one.
 	 */
 	async send(text: string): Promise<void> {
-		if (this.#busy) {
+		// Until a saved chat has loaded (or while it loads again after omp stopped), a message shows as
+		// queued at once and is sent after the replayed conversation; if the chat can't load, it goes back to the input.
+		// One typed while a queued message still waits (e.g. while the loaded chat is named) queues behind it, in order.
+		const loading = this.resumeSessionId !== undefined || this.#waitingForLoad;
+		if (this.#busy || loading) {
 			const id = String(nextQueuedId++);
 			this.#queue.push({ id, text });
 			this.chat.post({ type: "queued", id, text });
+			if (!this.#busy) void this.#sendWhenLoaded();
 			return;
 		}
 		this.#busy = true;
@@ -143,11 +149,35 @@ export class Controller implements vscode.Disposable {
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
 			this.chat.notify({ type: "chime" });
 		}
-		if (!finished || !this.#agent) return;
+		if (!finished || !this.#agent || !this.#needsName()) return;
 		this.#busy = true; // a message sent while the chat is being named waits in the queue
+		this.chat.post({ type: "status", state: "naming" });
 		await this.#nameIfUntitled(this.#agent);
 		this.#busy = false;
 		if (this.#queue.length > 0) return this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+		this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
+	}
+
+	/** Send what was queued while a saved chat loaded, once it has; if it can't load, the messages go back to the input. */
+	async #sendWhenLoaded(): Promise<void> {
+		if (this.#waitingForLoad) return;
+		this.#waitingForLoad = true;
+		this.#lastNotice = undefined; // a failure on this attempt is news, even if it reads like the last one
+		try {
+			await this.#ensureAgent();
+		} catch (error) {
+			this.#notice("error", errorText(error));
+			this.#returnQueueToInput();
+			return;
+		} finally {
+			this.#waitingForLoad = false;
+		}
+		if (!this.#busy && this.#queue.length > 0) await this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+	}
+
+	/** The chat has no name yet (from omp, or the saved chat's), and omp may still be asked for one. */
+	#needsName(): boolean {
+		return !this.chat.chatTitle && this.#namingAttempts < MAX_NAMING_ATTEMPTS;
 	}
 
 	/**
@@ -157,11 +187,12 @@ export class Controller implements vscode.Disposable {
 	 */
 	async #nameIfUntitled(agent: OmpAgent): Promise<void> {
 		// omp gives no name to a chat with nothing to name yet ("hi"), so it is asked again after later replies.
-		if (this.#title || this.#namingAttempts >= MAX_NAMING_ATTEMPTS) return;
+		if (!this.#needsName()) return;
 		this.#namingAttempts++;
 		this.#naming = true;
 		try {
-			await agent.prompt("/rename");
+			const result = await agent.prompt("/rename");
+			if (result.stopReason === "cancelled") this.#namingAttempts--; // stopped by the user: asked again after a later reply
 		} catch (error) {
 			this.log(`naming the chat failed: ${errorText(error)}`);
 		} finally {
@@ -237,7 +268,6 @@ export class Controller implements vscode.Disposable {
 	}
 
 	dispose(): void {
-		this.#disposed = true;
 		this.#queue = [];
 		this.#stopAgent("Chat closed");
 		for (const disposable of this.#disposables) disposable.dispose();
@@ -246,8 +276,9 @@ export class Controller implements vscode.Disposable {
 	// ---- agent lifecycle -------------------------------------------------------
 
 	#ensureAgent(): Promise<OmpAgent> {
-		if (this.#agent?.sessionId) return Promise.resolve(this.#agent);
+		// Startup is over only once a loaded chat has been named, so a message never races the naming.
 		if (this.#starting) return this.#starting;
+		if (this.#agent?.sessionId) return Promise.resolve(this.#agent);
 		const starting = this.#startAgent().finally(() => {
 			if (this.#starting === starting) this.#starting = undefined;
 		});
@@ -262,19 +293,17 @@ export class Controller implements vscode.Disposable {
 		const args = [...config.get<string[]>("extraArgs", [])];
 		if (config.get<boolean>("preferEditTool", true)) args.push("--append-system-prompt", PREFER_EDIT_TOOL_PROMPT);
 		const mcp = config.get<boolean>("useMcpServers", true)
-			? loadMcpServers(mcpConfigFiles(folder.uri.fsPath))
+			? loadMcpServers(mcpConfigFiles(folder.uri.fsPath, vscode.workspace.isTrusted))
 			: { servers: [], problems: [] };
 		for (const problem of mcp.problems) this.#notice("warning", problem);
 
 		this.chat.post({ type: "status", state: "starting" });
 		const command = resolveOmpCommand(config.get<string>("path", "omp"));
-		const mcpServers = await addSavedLogins(mcp.servers, ompSavedToken(command));
-		if (this.#disposed) throw new Error("Chat closed"); // closed while looking up sign-ins: start no omp
 		const agent = new OmpAgent({
 			command,
 			args,
 			cwd: folder.uri.fsPath,
-			mcpServers,
+			mcpServers: addSavedLogins(mcp.servers, ompSavedToken(command)), // looked up while omp starts
 			handlers: {
 				readTextFile: params => this.#readTextFile(params),
 				writeTextFile: params => this.#writeTextFile(params),
@@ -286,9 +315,12 @@ export class Controller implements vscode.Disposable {
 			},
 		});
 		this.#agent = agent;
+		const loadSessionId = this.resumeSessionId;
+		if (!loadSessionId) this.#forgetTitle(); // a fresh session (e.g. after omp exited) is a new, unnamed chat
 		try {
-			const session = await agent.start(this.resumeSessionId);
+			const session = await agent.start(loadSessionId, { replay: loadSessionId !== this.#shownSessionId });
 			this.resumeSessionId = undefined;
+			this.#shownSessionId = session.sessionId;
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
 			if (mcp.servers.length > 0) this.log(`MCP servers passed to omp: ${mcp.servers.map(server => server.name).join(", ")}`);
 			for (const problem of agent.mcpProblems) {
@@ -296,7 +328,12 @@ export class Controller implements vscode.Disposable {
 				this.#notice("warning", problem + signIn);
 			}
 			this.chat.post({ type: "config", options: agent.configOptions });
-			if (this.nameOnLoad) await this.#nameIfUntitled(agent); // an old chat that never got a name
+			if (loadSessionId && this.nameOnLoad) await this.#nameIfUntitled(agent); // an old chat that never got a name
+			if (this.#agent !== agent) {
+				// omp exited (and said so) while naming the chat: the next start loads the saved chat again.
+				this.resumeSessionId = loadSessionId;
+				throw new Error("omp stopped while opening this chat. Send your message again to retry.");
+			}
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
 		} catch (error) {
@@ -305,8 +342,18 @@ export class Controller implements vscode.Disposable {
 				this.#agent = undefined;
 				this.chat.post({ type: "status", state: "stopped" });
 			}
+			if (loadSessionId && error instanceof AgentError && /session not found/i.test(error.message)) {
+				// omp no longer has the saved chat (e.g. deleted since it was listed): trying it again would fail the same way.
+				this.resumeSessionId = undefined;
+				throw new Error(`omp could not open this saved chat (${errorText(error)}). Your next message starts a new chat.`);
+			}
 			throw error;
 		}
+	}
+
+	#forgetTitle(): void {
+		this.#namingAttempts = 0;
+		if (this.chat.chatTitle !== undefined) this.chat.setChatTitle(undefined); // also a saved chat's name, set by the tab
 	}
 
 	#stopAgent(reason: string): void {
@@ -393,8 +440,7 @@ export class Controller implements vscode.Disposable {
 		}
 		if (update.sessionUpdate === "session_info_update") {
 			if (typeof update.title === "string" && update.title.trim()) {
-				this.#title = update.title.trim();
-				this.chat.setChatTitle(this.#title);
+				this.chat.setChatTitle(update.title.trim());
 			}
 			return;
 		}

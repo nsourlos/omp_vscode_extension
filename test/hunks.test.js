@@ -69,6 +69,10 @@ test("judges which shell commands only read or navigate", () => {
 		"tail -n 20 log.txt 2>&1 | grep error",
 		"ls &>/dev/null",
 		"echo 'a > b'",
+		"ls src/*.ts",
+		"cat ./{a,b}.txt",
+		"grep -n 'x$' a.txt",
+		"find . -name '*.ts' -print",
 	];
 	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
 
@@ -96,6 +100,23 @@ test("judges which shell commands only read or navigate", () => {
 		"cat <<EOF\nx\nEOF",
 		"echo 'unclosed",
 		"",
+		// bash expands these into options after the check: a brace, a variable, or a glob that may match "-delete"
+		"find . {-delete,-print}",
+		"find . -{delete,print}",
+		"find .${IFS}-delete",
+		"find . $X",
+		'find . "$X"',
+		"find . *",
+		"find . '-de'*",
+		"rg ?pre=x foo",
+		"find . +(-delete)",
+		"(rm x)",
+		"echo hi >",
+		"ls >  ",
+		// a line continuation, which bash deletes, joining "-ex" and "ec" into -exec
+		"find . -maxdepth 0 -ex\\\nec sh -c 'rm -rf ~' \\;",
+		"find . -de\\\nlete",
+		'find . "-de\\\nlete"',
 	];
 	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
 });

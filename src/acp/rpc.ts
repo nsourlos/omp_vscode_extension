@@ -18,6 +18,26 @@ export class RpcError extends Error {
 	}
 }
 
+/** The agent answered a request with an error (as opposed to the connection closing). */
+export class AgentError extends Error {}
+
+/**
+ * A session request's line for the log, with each MCP server reduced to its name and type: tokens
+ * and keys can be anywhere in a server's env, headers, args or url (`?api_key=…`).
+ */
+function loggable(message: Record<string, unknown>): string {
+	return JSON.stringify({ jsonrpc: "2.0", ...message }, (key, value) =>
+		key === "mcpServers" && Array.isArray(value)
+			? value.map(server => ({ name: server?.name, type: server?.type ?? (server?.command ? "stdio" : undefined) }))
+			: value,
+	);
+}
+
+/** A log line with the query of every web address hidden: MCP keys often ride in it (`?api_key=…`), and omp's errors can repeat it. */
+export function withoutUrlQueries(line: string): string {
+	return line.replace(/(https?:\/\/[^\s"'?#]*)\?[^\s"'#]*/g, "$1?…");
+}
+
 interface Pending {
 	resolve: (value: any) => void;
 	reject: (error: Error) => void;
@@ -62,13 +82,15 @@ export class JsonRpcConnection {
 	#send(message: Record<string, unknown>): void {
 		if (this.#closed) return;
 		const line = JSON.stringify({ jsonrpc: "2.0", ...message });
-		this.log(`→ ${line}`);
+		// Only these carry MCP secrets; everything else (like a large file read) is logged as sent.
+		const secret = message.method === "session/new" || message.method === "session/load";
+		this.log(`→ ${secret ? loggable(message) : withoutUrlQueries(line)}`);
 		this.output.write(`${line}\n`);
 	}
 
 	#handleLine(line: string): void {
 		if (!line.trim()) return;
-		this.log(`← ${line}`);
+		this.log(`← ${withoutUrlQueries(line)}`);
 		let message: any;
 		try {
 			message = JSON.parse(line);
@@ -85,7 +107,7 @@ export class JsonRpcConnection {
 				// omp often says only "Internal error" and puts the cause in data.details.
 				const details = message.error.data?.details;
 				const text = message.error.message ?? "Agent error";
-				pending.reject(new Error(typeof details === "string" && details ? `${text}: ${details}` : text));
+				pending.reject(new AgentError(typeof details === "string" && details ? `${text}: ${details}` : text));
 			} else {
 				pending.resolve(message.result);
 			}

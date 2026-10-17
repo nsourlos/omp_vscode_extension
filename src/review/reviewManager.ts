@@ -246,10 +246,17 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		return undefined;
 	}
 
-	#decide(id: string, index: number, decision: Decision): void {
+	/**
+	 * Decide one hunk. A note only stays with a rejection: accepting drops it, a new note (even an
+	 * empty one) replaces it, and rejecting an already rejected hunk again without a note keeps it.
+	 */
+	#decide(id: string, index: number, decision: Decision, note?: string): void {
 		const session = this.#byId.get(id);
 		if (!session || !this.#isPending(session)) return;
+		const before = session.decisions[index];
 		session.decisions[index] = decision;
+		if (decision !== "rejected") session.notes.hunks[index] = undefined;
+		else if (note !== undefined || before !== "rejected") session.notes.hunks[index] = note || undefined;
 		this.#lensesChanged.fire();
 		this.#decorate();
 		if (session.decisions.every(d => d !== "pending")) void this.#complete(session);
@@ -285,8 +292,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 		if (!session || !this.#isPending(session)) return;
 		const text = note ?? (await askNote(`Change ${index + 1} to ${session.displayPath}: what should omp do instead?`));
 		if (text === undefined) return; // cancelled: nothing decided
-		session.notes.hunks[index] = text || undefined;
-		this.#decide(id, index, "rejected");
+		this.#decide(id, index, "rejected", text); // ignored if the review finished meanwhile
 	}
 
 	async #rejectAllWithNote(target?: unknown, note?: string): Promise<void> {

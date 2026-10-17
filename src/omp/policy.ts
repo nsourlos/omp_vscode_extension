@@ -41,39 +41,60 @@ const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls|--pre
 /** Redirections that only discard output or merge it into the pipe. */
 const HARMLESS_REDIRECT = /^(\d|&)?>>?\s*\/dev\/null$|^\d>&\d$/;
 
+/** Unquoted characters that make bash expand a word into other words (globs and braces). */
+const EXPANDING = new Set(["*", "?", "[", "{"]);
+
 /**
  * Splits a shell command into its simple commands (by ;, &&, ||, |, newlines), each as a list of
  * words, honouring quotes and backslashes. Returns undefined for anything it will not judge:
- * command substitution, backgrounding, here-docs, or a redirection other than to /dev/null.
+ * command substitution, variables, subshells, backgrounding, here-docs, a redirection other than
+ * to /dev/null, or a glob or brace that could expand into an option (one not anchored by a
+ * leading path or name, like `*.ts` or `{-delete,-print}`, rather than `src/*.ts`).
  */
 function splitCommand(command: string): string[][] | undefined {
 	const commands: string[][] = [[]];
 	let word = "";
 	let inWord = false;
 	let quote: "'" | '"' | undefined;
+	/** The word may expand, and what it starts with could become an option after expansion. */
+	let expands = false;
+	let unanchored = false;
+	let refused = false;
+	const addToWord = (c: string, expanding = false) => {
+		if (word === "") unanchored = expanding || c === "-";
+		if (expanding) expands = true;
+		word += c;
+		inWord = true;
+	};
 	const endWord = () => {
+		if (expands && unanchored) refused = true;
 		if (inWord) commands.at(-1)!.push(word);
 		word = "";
 		inWord = false;
+		expands = false;
+		unanchored = false;
 	};
 	for (let i = 0; i < command.length; i++) {
 		const c = command[i];
 		if (quote === "'") {
 			if (c === "'") quote = undefined;
-			else word += c;
+			else addToWord(c);
 			continue;
 		}
-		if (c === "`" || (c === "$" && command[i + 1] === "(")) return undefined; // runs another command
+		// Command substitution runs another command; a variable's value (even ${IFS}) is not known here.
+		if (c === "`" || c === "$") return undefined;
 		if (c === "\\") {
-			word += command[++i] ?? "";
-			inWord = true;
+			// A line continuation: bash deletes it and joins the word ("-ex\<newline>ec" is -exec).
+			if (command[i + 1] === "\n" || command[i + 1] === "\r") return undefined;
+			addToWord(command[++i] ?? "");
 			continue;
 		}
 		if (quote === '"') {
 			if (c === '"') quote = undefined;
-			else word += c;
+			else addToWord(c);
 			continue;
 		}
+		if (c === "(" || c === ")") return undefined; // subshells and extended globs
 		if (c === "'" || c === '"') {
 			quote = c;
 			inWord = true;
@@ -83,8 +104,7 @@ function splitCommand(command: string): string[][] | undefined {
 			const pair = command.slice(i, i + 2);
 			if (c === "&" && pair !== "&&" && !/^&>/.test(pair)) return undefined; // backgrounding
 			if (c === "&" && pair !== "&&") {
-				word += c; // part of "&>/dev/null"
-				inWord = true;
+				addToWord(c); // part of "&>/dev/null"
 				continue;
 			}
 			endWord();
@@ -92,19 +112,22 @@ function splitCommand(command: string): string[][] | undefined {
 			commands.push([]);
 		} else if (c === ">" || c === "<") {
 			if (c === "<") return undefined; // input redirection and here-docs: not judged
-			const target = /^>>?\s*\S+/.exec(command.slice(i))![0];
+			const target = /^>>?\s*\S+/.exec(command.slice(i))?.[0];
+			if (!target) return undefined; // nothing to redirect to: not valid shell
 			const redirect = (inWord ? word : "") + target;
 			if (!HARMLESS_REDIRECT.test(redirect.replace(/\s+/g, ""))) return undefined;
 			word = "";
 			inWord = false;
+			expands = false;
+			unanchored = false;
 			i += target.length - 1;
 		} else {
-			word += c;
-			inWord = true;
+			addToWord(c, EXPANDING.has(c));
 		}
 	}
 	if (quote) return undefined;
 	endWord();
+	if (refused) return undefined;
 	return commands.filter(words => words.length > 0);
 }
 

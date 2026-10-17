@@ -17,6 +17,12 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "omp runs commands, edits files and starts the project's MCP servers in the open folder."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -72,6 +78,18 @@
         "title": "Open Chat in New Window",
         "category": "OMP",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "omp.addMcpServer",
+        "title": "Add MCP Server…",
+        "category": "OMP",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "omp.openMcpConfig",
+        "title": "Open MCP Servers File…",
+        "category": "OMP",
+        "icon": "$(json)"
       },
       {
         "command": "omp.review.acceptHunk",
@@ -178,6 +196,16 @@
           "group": "navigation@4"
         },
         {
+          "command": "omp.addMcpServer",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "1_mcp@1"
+        },
+        {
+          "command": "omp.openMcpConfig",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "1_mcp@2"
+        },
+        {
           "command": "omp.review.acceptAll",
           "when": "resourceScheme == omp-review",
           "group": "navigation@1"
@@ -247,7 +275,7 @@
         "omp.useMcpServers": {
           "type": "boolean",
           "default": true,
-          "description": "Give omp the MCP servers from ~/.omp/agent/mcp.json, the project's .omp/mcp.json and the project's .mcp.json (omp ignores its own config inside an editor). Servers that fail to start are left out, with a warning in the chat."
+          "description": "Give omp the MCP servers from ~/.omp/agent/mcp.json, the project's .omp/mcp.json and the project's .mcp.json (omp ignores its own config inside an editor). Add servers of omp's own with \"OMP: Add MCP Server…\". Servers that fail to start are left out, with a warning in the chat."
         },
         "omp.soundOnFinish": {
           "type": "boolean",

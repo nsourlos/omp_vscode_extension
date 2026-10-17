@@ -123,7 +123,8 @@ export class ChatPanel implements vscode.Disposable {
 		return this.#chatTitle;
 	}
 
-	setChatTitle(title: string): void {
+	/** Show the chat's name on the tab, or with undefined, only the tab's label. */
+	setChatTitle(title: string | undefined): void {
 		if (this.#disposed) return;
 		this.#chatTitle = title;
 		this.#panel.title = this.#marked ? `● ${this.#tabTitle()}` : this.#tabTitle();
