@@ -208,7 +208,8 @@ export class OmpAgent {
 				reject(new Error(message));
 			};
 			child.on("error", error => fail(`Could not start omp (${command}): ${error.message}`));
-			child.on("exit", code => fail(`omp exited (code ${code}). ${stderrTail.trim()}`.trim()));
+			// Shown in the chat: web address queries hidden, as MCP keys can ride in them (`?api_key=…`).
+			child.on("exit", code => fail(`omp exited (code ${code}). ${withoutUrlQueries(stderrTail.trim())}`.trim()));
 		});
 		exited.catch(() => {});
 		this.#exited = exited;
@@ -270,7 +271,7 @@ export class OmpAgent {
 			const message = error instanceof Error ? error.message : String(error);
 			const failed = failedMcpServers(servers, message);
 			if (failed.length === 0 && !/\bmcp\b/i.test(message)) throw error;
-			this.#mcpProblems.push(`MCP servers not started: ${message}`);
+			this.#mcpProblems.push(`MCP servers not started: ${withoutUrlQueries(message)}`); // shown in the chat
 			const rest = failed.length > 0 ? servers.filter(server => !failed.includes(server)) : [];
 			return this.#openSession(rpc, cwd, rest, loadSessionId);
 		}

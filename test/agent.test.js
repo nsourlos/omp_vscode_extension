@@ -183,7 +183,7 @@ test("an MCP server that won't start is left out instead of failing the whole se
 		cwd: dir,
 		mcpServers: [
 			{ name: "files", command: "npx", args: [], env: [] },
-			{ name: "broken-api", type: "http", url: "https://nowhere.example", headers: [] },
+			{ name: "broken-api", type: "http", url: "https://nowhere.example/mcp?api_key=SECRET-KEY", headers: [] },
 		],
 		handlers: {
 			readTextFile: async () => "",
@@ -198,7 +198,8 @@ test("an MCP server that won't start is left out instead of failing the whole se
 	try {
 		const session = await agent.start();
 		assert.ok(session.sessionId, "the session started");
-		assert.match(agent.mcpProblems.join("\n"), /broken-api: connection refused/);
+		assert.match(agent.mcpProblems.join("\n"), /broken-api: connection refused \(https:\/\/nowhere\.example\/mcp\?…/);
+		assert.doesNotMatch(agent.mcpProblems.join("\n"), /SECRET-KEY/, "a key in the server's address is not shown in the chat");
 		const attempts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line).mcpServers);
 		assert.deepEqual(attempts, [["files", "broken-api"], ["files"]], "retried with only the server that works");
 	} finally {

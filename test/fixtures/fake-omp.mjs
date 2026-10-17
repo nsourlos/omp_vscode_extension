@@ -138,7 +138,7 @@ async function handle(message) {
 			// Like omp: one MCP server that won't connect fails the whole request.
 			const broken = servers.filter(server => server.name.startsWith("broken"));
 			if (broken.length > 0) {
-				const details = broken.map(server => `${server.name}: connection refused`).join("; ");
+				const details = broken.map(server => `${server.name}: connection refused${server.url ? ` (${server.url})` : ""}`).join("; ");
 				return send({ id: message.id, error: { code: -32603, message: "Internal error", data: { details } } });
 			}
 			return send({ id: message.id, result: { sessionId } });
