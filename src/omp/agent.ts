@@ -103,7 +103,7 @@ export function resolveOmpCommand(configured: string): string {
 }
 
 /** The session updates omp replays a saved chat's conversation with. */
-const REPLAYED_UPDATES = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
+export const REPLAYED_UPDATES = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
 
 export class OmpAgent {
 	#process: ChildProcess | undefined;

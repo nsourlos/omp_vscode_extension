@@ -1105,6 +1105,21 @@ exports.run = async function run() {
 			old.panel.dispose();
 		},
 
+		async "a saved chat whose loading crashed partway is not shown twice when it loads again"() {
+			const session = api.sessions.openSaved({ sessionId: "crash-midload", cwd: root, title: "Half loaded", _meta: { messageCount: 2 } });
+			const posts = postsOf(session.panel);
+			const replayed = () => posts.filter(m => m.type === "update" && m.update.sessionUpdate === "user_message_chunk").length;
+			await waitFor(() => posts.filter(m => m.type === "status").at(-1)?.state === "stopped", "omp to exit while loading");
+			const shown = replayed();
+			assert.ok(shown > 0, "part of the conversation was shown before omp exited");
+			const logged = fakeLog().length;
+			await session.controller.send(steps({ say: "after" })); // waits in the queue while the chat loads again
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "crash-midload"), "the chat to load again");
+			await waitFor(() => posts.some(m => m.type === "turnEnd"), "the message to run in the reloaded chat");
+			assert.equal(replayed(), shown, "its conversation was not added a second time");
+			session.panel.dispose();
+		},
+
 		async "a command omp runs in another folder says which folder on its permission card"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);

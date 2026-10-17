@@ -21,7 +21,7 @@
 // Loading a session whose id starts with "missing" fails, like omp's "ACP session not found";
 // one starting with "flaky" fails with another error ("rate limited"), every time.
 // Loading "untitled-crash" makes the "/rename" that names it exit omp.
-import { appendFileSync, closeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
@@ -175,6 +175,12 @@ async function handle(message) {
 			update({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "fail?" } });
 			update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "It skips **empty** lines." } });
 			update({ sessionUpdate: "tool_call", toolCallId: "old-1", title: "Read parser.ts", kind: "read", status: "completed" });
+			// "crash-midload": the first load exits after replaying (a marker file remembers it); later loads finish.
+			if (message.params.sessionId === "crash-midload" && logFile && !existsSync(`${logFile}.midload`)) {
+				writeFileSync(`${logFile}.midload`, "");
+				setTimeout(() => process.exit(1), 50);
+				return;
+			}
 			// Like omp's updates after a load (commands, context use, title), here sent before the answer.
 			if (message.params.sessionId === "with-updates") {
 				update({ sessionUpdate: "available_commands_update", availableCommands: [{ name: "compact", description: "Compact" }] });

@@ -19,7 +19,7 @@ import type {
 	WriteTextFileParams,
 } from "./acp/types";
 import type { ChatPanel } from "./chatPanel";
-import { OmpAgent, ompSavedToken, resolveOmpCommand } from "./omp/agent";
+import { OmpAgent, REPLAYED_UPDATES, ompSavedToken, resolveOmpCommand } from "./omp/agent";
 import { addSavedLogins, loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
@@ -68,6 +68,8 @@ export class Controller implements vscode.Disposable {
 	#namingAttempts = 0;
 	/** The omp session whose conversation the chat already shows, so loading it again replays nothing. */
 	#shownSessionId: string | undefined;
+	/** The saved chat being loaded right now, if any. */
+	#loadingSessionId: string | undefined;
 	/** A message waits in the queue for a saved chat to finish loading. */
 	#waitingForLoad = false;
 	/** True while omp is naming the chat, so its reply is not shown. */
@@ -321,8 +323,10 @@ export class Controller implements vscode.Disposable {
 		this.#agent = agent;
 		const loadSessionId = this.resumeSessionId;
 		if (!loadSessionId) this.#forgetTitle(); // a fresh session (e.g. after omp exited) is a new, unnamed chat
+		this.#loadingSessionId = loadSessionId;
 		try {
 			const session = await agent.start(loadSessionId, { replay: loadSessionId !== this.#shownSessionId });
+			this.#loadingSessionId = undefined;
 			this.resumeSessionId = undefined;
 			this.#shownSessionId = session.sessionId;
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
@@ -341,6 +345,7 @@ export class Controller implements vscode.Disposable {
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
 		} catch (error) {
+			this.#loadingSessionId = undefined;
 			agent.dispose();
 			if (this.#agent === agent) {
 				this.#agent = undefined;
@@ -438,6 +443,9 @@ export class Controller implements vscode.Disposable {
 	// ---- ACP client handlers --------------------------------------------------
 
 	#onSessionUpdate(update: SessionUpdate): void {
+		// Part of the saved chat is on screen from its first replayed message, so a load that fails
+		// partway and is retried must not replay it again below the part already shown.
+		if (this.#loadingSessionId && REPLAYED_UPDATES.has(update.sessionUpdate)) this.#shownSessionId = this.#loadingSessionId;
 		if (update.sessionUpdate === "config_option_update") {
 			this.chat.post({ type: "config", options: update.configOptions });
 			return;
