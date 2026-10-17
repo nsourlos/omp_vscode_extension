@@ -1116,13 +1116,13 @@ exports.run = async function run() {
 
 			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
 			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
-			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject", "Always reject"], "no 'allow every command' and no read-only option");
+			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way, and no read-only option");
 			respond(panel, writeCard, "reject_once", "Reject");
 			await writeCommand;
 
 			const first = controller.send(steps({ permission: "ls -la" }));
 			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
-			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow read-only commands", "Reject", "Always reject"]);
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow read-only commands", "Reject"]);
 			respond(panel, readCard, readCard.options[1].optionId, "Always allow read-only commands");
 			await first;
 			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");

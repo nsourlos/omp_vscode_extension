@@ -512,11 +512,12 @@ export class Controller implements vscode.Disposable {
 			return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
 		}
 
-		// omp's own "always" for a shell command allows every later command in the session, writes
-		// included, so it is replaced by an "always" that covers read-only commands only.
+		// omp's own "always" answers cover every later shell command in the session: "always allow"
+		// would let writes through and "always reject" would silently refuse even `ls`. Neither is
+		// offered for commands; an "always" that covers read-only commands only is added instead.
 		const options: (PermissionOption & { description?: string })[] = [];
 		for (const option of params.options) {
-			if (command !== undefined && option.kind === "allow_always") continue;
+			if (command !== undefined && (option.kind === "allow_always" || option.kind === "reject_always")) continue;
 			options.push(option);
 			if (readOnly && option === allowOnce) {
 				options.push({
