@@ -4,7 +4,7 @@
  * tab and hands the sidebar back to the Explorer.
  */
 import * as vscode from "vscode";
-import { ChatPanel } from "./chatPanel";
+import { ChatPanel, nonce } from "./chatPanel";
 import type { SavedSession } from "./acp/types";
 import { Controller, listSavedChats } from "./controller";
 import type { ReviewManager } from "./review/reviewManager";
@@ -140,9 +140,6 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 	}
 }
 
-function nonce(): string {
-	return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-}
 
 function launcherHtml(): string {
 	const n = nonce();

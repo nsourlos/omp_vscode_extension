@@ -1,4 +1,5 @@
 /** One chat session's tab. Its messages are replayed whenever the webview (re)loads, e.g. after a window move. */
+import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { mergeChunk } from "./chatHistory";
 
@@ -141,8 +142,9 @@ export class ChatPanel implements vscode.Disposable {
 	}
 }
 
-function nonce(): string {
-	return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+/** A one-use value that lets only the page's own scripts run (its Content Security Policy). */
+export function nonce(): string {
+	return randomBytes(16).toString("hex");
 }
 
 function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.Uri): string {
