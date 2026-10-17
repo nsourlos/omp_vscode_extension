@@ -37,7 +37,9 @@ export function fileChangeWarning(command: string): string | undefined {
 const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "git", "echo"]);
 const READ_ONLY_GIT = new Set(["status", "log", "diff", "show"]);
 /** Options that make an otherwise read-only command write files or run another program. */
-const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls|--pre(=.*)?|--output(=.*)?)$/;
+const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls|--output(=.*)?)$/;
+/** ripgrep options that start other programs: a preprocessor, a hostname helper, decompressors (-z). */
+const RG_RUNS_PROGRAMS = /^(--pre|--hostname-bin|--search-zip)(=.*)?$|^-[a-zA-Z]*z/;
 /** Redirections that only discard output or merge it into the pipe. */
 const HARMLESS_REDIRECT = /^(\d|&)?>>?\s*\/dev\/null$|^\d>&\d$/;
 
@@ -138,6 +140,7 @@ export function isReadOnlyCommand(command: string): boolean {
 	return commands.every(([name, ...args]) => {
 		if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
 		if (name === "git" && !READ_ONLY_GIT.has(args[0])) return false;
+		if (name === "rg" && args.some(arg => RG_RUNS_PROGRAMS.test(arg))) return false;
 		return !args.some(arg => WRITING_FLAGS.test(arg));
 	});
 }
