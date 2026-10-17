@@ -39,6 +39,11 @@ const flag = name => {
 	return index === -1 ? undefined : args[index + 1];
 };
 const initDelay = Number(flag("--init-delay") ?? 0);
+// --stderr-split: write an error line whose web address (and its key) is split across two chunks.
+if (args.includes("--stderr-split")) {
+	process.stderr.write("could not reach https://mcp.example/v1?api_k");
+	setTimeout(() => process.stderr.write("ey=SPLIT-SECRET (timeout)\n"), 30);
+}
 const logFile = flag("--log");
 const failNew = flag("--fail-new");
 const pageSize = Number(flag("--page-size") ?? 0);

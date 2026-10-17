@@ -464,3 +464,30 @@ test("only the user's own omp config can turn MCP servers off, not a project's f
 	writeFileSync(project, JSON.stringify({ mcpServers: {}, disabledServers: ["github"] }));
 	assert.deepEqual(loadMcpServers([user, project]).servers.map(server => server.name), ["github"]);
 });
+
+test("a key in a web address omp prints in two pieces is still hidden in the log", async () => {
+	const logged = [];
+	const agent = new OmpAgent({
+		command: join(__dirname, "fixtures", "fake-omp.mjs"),
+		args: ["--stderr-split"],
+		cwd: mkdtempSync(join(tmpdir(), "omp-agent-test-")),
+		handlers: {
+			readTextFile: async () => "",
+			writeTextFile: async () => {},
+			requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+			elicit: async () => ({ action: "cancel" }),
+			onSessionUpdate: () => {},
+			onExit: () => {},
+			log: line => logged.push(line),
+		},
+	});
+	try {
+		await agent.start();
+		await sleep(200); // the second piece arrives 30 ms after the first
+	} finally {
+		agent.dispose();
+	}
+	const stderr = logged.filter(line => line.startsWith("[omp stderr]"));
+	assert.deepEqual(stderr, ["[omp stderr] could not reach https://mcp.example/v1?… (timeout)"]);
+	assert.ok(!logged.some(line => line.includes("SPLIT-SECRET")));
+});

@@ -172,11 +172,19 @@ export class OmpAgent {
 		this.#process = child;
 
 		let stderrTail = "";
+		// Logged by whole lines: a web address split across two chunks still has its query (keys) hidden.
+		let stderrLine = "";
+		const logStderr = (line: string) => {
+			if (line.trim()) handlers.log(`[omp stderr] ${withoutUrlQueries(line.trimEnd())}`);
+		};
 		child.stderr!.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
 			stderrTail = (stderrTail + text).slice(-2000);
-			handlers.log(`[omp stderr] ${withoutUrlQueries(text.trimEnd())}`);
+			const lines = (stderrLine + text).split("\n");
+			stderrLine = lines.pop() ?? "";
+			for (const line of lines) logStderr(line);
 		});
+		child.stderr!.on("end", () => logStderr(stderrLine));
 		// A write racing omp's exit fails with EPIPE; the exit handler below reports the exit itself.
 		child.stdin!.on("error", error => handlers.log(`[omp stdin] ${error.message}`));
 
