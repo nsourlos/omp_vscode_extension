@@ -4,3 +4,5 @@ dist/
 .vscode/hunkwise/
 .vscode-test/
 .DS_Store
+manual_tests/
+.claude/

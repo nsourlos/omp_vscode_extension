@@ -87,6 +87,20 @@ export interface SessionUpdate {
 	[key: string]: any;
 }
 
+/** An MCP server passed in session/new: run as a local command, or reached over http/sse. */
+export type McpServer =
+	| { name: string; command: string; args: string[]; env: { name: string; value: string }[] }
+	| { name: string; type: "http" | "sse"; url: string; headers: { name: string; value: string }[] };
+
+/** A chat omp has saved on disk (from session/list). */
+export interface SavedSession {
+	sessionId: string;
+	cwd: string;
+	title?: string;
+	updatedAt?: string;
+	_meta?: { messageCount?: number };
+}
+
 export interface NewSessionResult {
 	sessionId: string;
 	configOptions?: ConfigOption[];

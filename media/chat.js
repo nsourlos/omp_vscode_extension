@@ -1,4 +1,5 @@
-// OMP chat panel. Everything from the agent is inserted as text (never as HTML).
+// OMP chat panel. Everything from the agent is inserted as text, except replies, which are rendered
+// as markdown and sanitised (dist/markdown.js) before they reach the page.
 (function () {
 	const vscode = acquireVsCodeApi();
 	const log = document.getElementById("log");
@@ -19,6 +20,8 @@
 	const MAX_OUTPUT = 6000;
 
 	let assistant = null; // { el, text }
+	let replayedUser = null; // a user message omp is replaying from a saved chat
+	let replayedUserId; // its messageId: a chunk with another one starts the next message
 	let thought = null; // { el, pre }
 	let planEl = null;
 	let commands = [];
@@ -62,72 +65,35 @@
 	function breakFlow() {
 		assistant = null;
 		thought = null;
+		replayedUser = null;
 	}
 
-	function inline(parent, text) {
-		const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/);
-		for (const part of parts) {
-			if (!part) continue;
-			if (part.startsWith("`") && part.endsWith("`") && part.length > 1) parent.appendChild(el("code", "", part.slice(1, -1)));
-			else if (part.startsWith("**") && part.endsWith("**") && part.length > 3) parent.appendChild(el("strong", "", part.slice(2, -2)));
-			else parent.appendChild(document.createTextNode(part));
-		}
-	}
-
-	// Small, safe markdown subset: code fences, headings, lists, paragraphs, inline code and bold.
+	// GitHub-style markdown (tables, lists, code, links), sanitised by the bundled renderer (dist/markdown.js).
 	function renderMarkdown(container, text) {
-		container.textContent = "";
-		const fence = /```[^\n]*\n?([\s\S]*?)(```|$)/g;
-		let last = 0;
-		let match;
-		while ((match = fence.exec(text))) {
-			renderBlocks(container, text.slice(last, match.index));
-			const pre = el("pre", "code");
-			pre.appendChild(el("code", "", match[1].replace(/\n$/, "")));
-			container.appendChild(pre);
-			last = fence.lastIndex;
-			if (match[0].length === 0) break;
-		}
-		renderBlocks(container, text.slice(last));
+		container.innerHTML = ompMarkdown.toHtml(text);
+		for (const pre of container.querySelectorAll("pre")) addCopyButton(pre);
 	}
 
-	function renderBlocks(container, text) {
-		let paragraph = null;
-		let list = null;
-		for (const line of text.split("\n")) {
-			const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-			const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-			const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-			if (!line.trim()) {
-				paragraph = null;
-				list = null;
-			} else if (heading) {
-				paragraph = null;
-				list = null;
-				const h = el("div", "heading");
-				inline(h, heading[2]);
-				container.appendChild(h);
-			} else if (bullet || numbered) {
-				paragraph = null;
-				const tag = bullet ? "ul" : "ol";
-				if (!list || list.tagName.toLowerCase() !== tag) {
-					list = el(tag);
-					container.appendChild(list);
-				}
-				const li = el("li");
-				inline(li, (bullet || numbered)[1]);
-				list.appendChild(li);
-			} else {
-				list = null;
-				if (!paragraph) {
-					paragraph = el("p");
-					container.appendChild(paragraph);
-				} else {
-					paragraph.appendChild(el("br"));
-				}
-				inline(paragraph, line);
-			}
-		}
+	function addCopyButton(pre) {
+		const button = pre.appendChild(el("button", "copy secondary", "Copy"));
+		button.title = "Copy this code";
+		button.addEventListener("click", () => {
+			const code = pre.querySelector("code")?.textContent ?? pre.textContent;
+			navigator.clipboard.writeText(code).then(
+				() => (button.textContent = "Copied"),
+				// The clipboard API needs the page focused; the older copy command works without it.
+				() => (button.textContent = copyWithCommand(code) ? "Copied" : "Copy failed"),
+			);
+		});
+	}
+
+	function copyWithCommand(text) {
+		const area = document.body.appendChild(el("textarea"));
+		area.value = text;
+		area.select();
+		const copied = document.execCommand("copy");
+		area.remove();
+		return copied;
 	}
 
 	function textOf(blocks) {
@@ -140,6 +106,22 @@
 			})
 			.filter(Boolean)
 			.join("\n");
+	}
+
+	/** One of the user's messages, with an edit button that puts its text back in the input. */
+	function userMessage(text) {
+		const node = el("div", "msg user");
+		const body = node.appendChild(el("span", "", text));
+		const edit = node.appendChild(el("button", "edit secondary"));
+		edit.title = "Edit: put this message back in the input to change and send again";
+		edit.setAttribute("aria-label", "Edit this message");
+		edit.addEventListener("click", () => restoreInput(body.textContent));
+		return node;
+	}
+
+	function duration(seconds) {
+		if (seconds < 60) return `${seconds}s`;
+		return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 	}
 
 	function truncate(text) {
@@ -256,13 +238,55 @@
 		});
 	}
 
+	// ---------- context window ----------
+	// omp compacts the conversation by itself when the context fills up, but doesn't tell the editor,
+	// so a sharp drop in the context used between turns is reported as a compaction.
+	const CONTEXT_WARNING_PERCENT = 80;
+	let lastContextUsed = 0;
+	let warnedContextFull = false;
+
+	function onContextUsage(used, size) {
+		const percent = Math.round((used / size) * 100);
+		if (lastContextUsed && used < lastContextUsed * 0.6) {
+			breakFlow();
+			append(el("div", "notice info", `omp compacted the conversation to fit its context window (now ${percent}% full).`));
+		} else if (percent >= CONTEXT_WARNING_PERCENT && !warnedContextFull) {
+			breakFlow();
+			append(el("div", "notice warning", `Context ${percent}% full. omp compacts the conversation by itself when it has to; type /compact to do it now.`));
+		}
+		warnedContextFull = percent >= CONTEXT_WARNING_PERCENT;
+		lastContextUsed = used;
+	}
+
+	// A new omp process opens a new session (or reloads a saved one): its context is not compared with the last one's.
+	function forgetContextUsage() {
+		lastContextUsed = 0;
+		warnedContextFull = false;
+	}
+
 	// ---------- agent output ----------
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
+			case "user_message_chunk": {
+				// Only sent when a saved chat is loaded: omp replays the conversation so far.
+				const text = update.content?.type === "text" ? update.content.text : "";
+				if (!text) return;
+				assistant = null;
+				thought = null;
+				if (replayedUser && update.messageId !== replayedUserId) replayedUser = null; // two messages in a row (the same rule as the stored history)
+				if (!replayedUser) {
+					planEl = null;
+					replayedUser = append(userMessage("")).firstChild;
+					replayedUserId = update.messageId;
+				}
+				keepScrolled(() => (replayedUser.textContent += text));
+				return;
+			}
 			case "agent_message_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
 				thought = null;
+				replayedUser = null;
 				setDoing("Writing…");
 				if (!assistant) {
 					const node = append(el("div", "msg assistant"));
@@ -275,6 +299,7 @@
 			case "agent_thought_chunk": {
 				const text = update.content?.type === "text" ? update.content.text : "";
 				if (!text) return;
+				replayedUser = null;
 				setDoing("Thinking…");
 				if (!thought) {
 					assistant = null;
@@ -296,6 +321,7 @@
 				if (update.used && update.size) parts.push(`${Math.round((update.used / update.size) * 100)}% context`);
 				if (update.cost?.amount !== undefined) parts.push(`$${update.cost.amount.toFixed(3)}`);
 				usageEl.textContent = parts.join(" · ");
+				if (update.used && update.size) onContextUsage(update.used, update.size);
 				return;
 			}
 			case "available_commands_update":
@@ -331,7 +357,7 @@
 				tool.card.dataset.status = update.status;
 			}
 			if (tool.card.dataset.status === "completed" || tool.card.dataset.status === "failed") {
-				if (runningTools.delete(update.toolCallId) && !runningTools.size) doing = "Working…";
+				notRunning(update.toolCallId);
 			} else {
 				runningTools.set(update.toolCallId, tool.title.textContent || "a tool");
 			}
@@ -341,6 +367,8 @@
 				tool.command.textContent = "$ " + command;
 				tool.command.hidden = false;
 			}
+			// A shell tool's title is its command, already shown in the command box: show it once.
+			tool.title.hidden = !tool.command.hidden && tool.title.textContent.trim() === tool.command.textContent.slice(2).trim();
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -403,23 +431,51 @@
 	}
 
 	const OPTION_HINTS = {
-		allow_always: "Allow this kind of tool for the rest of the session (for shell commands: every command)",
-		reject_always: "Reject this kind of tool for the rest of the session",
+		allow_always: "Allow this kind of action for the rest of this chat",
+		reject_always: "Reject this kind of action for the rest of this chat",
 	};
 
+	// The question goes inside the tool's own row (omp gives both the same toolCallId), so the
+	// command is shown once; afterwards the same row shows ✓ / ✗ and the output.
 	function onPermission(msg) {
 		const isCommand = typeof msg.command === "string";
-		const node = card(msg.requestId, isCommand ? "Run this command?" : msg.title);
-		if (isCommand) node.appendChild(el("pre", "tool-command", "$ " + msg.command));
+		let id = msg.toolCallId;
+		if (!id || !tools.has(id)) {
+			id = id || `permission-${msg.requestId}`;
+			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command } : undefined });
+			if (!msg.toolCallId) runningTools.delete(id); // no tool updates will follow for a made-up row
+		}
+		const tool = tools.get(id);
+		breakFlow();
+		const node = tool.card.insertBefore(el("div", "tool-ask"), tool.details);
+		node.appendChild(el("div", "card-heading", isCommand ? "Run this command?" : "Allow this?"));
+		requests.set(msg.requestId, node);
+		waitingCards.add(msg.requestId);
+		showActivity();
+		if (msg.cwd) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));
 		for (const option of msg.options || []) {
 			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "secondary", option.name));
-			if (OPTION_HINTS[option.kind]) button.title = OPTION_HINTS[option.kind];
-			button.addEventListener("click", () => respond(msg.requestId, option.optionId, option.name));
+			const hint = option.description || OPTION_HINTS[option.kind];
+			if (hint) button.title = hint;
+			button.addEventListener("click", () => {
+				respond(msg.requestId, option.optionId, option.name);
+				if (!option.kind.startsWith("allow")) notRunning(id); // a rejected tool never runs, and omp may not say so
+			});
 		}
 		finishCard(node);
+	}
+
+	function notRunning(toolCallId) {
+		if (runningTools.delete(toolCallId) && !runningTools.size) doing = "Working…";
+		showActivity();
+	}
+
+	function onAutoAllowed(toolCallId) {
+		const tool = tools.get(toolCallId);
+		if (tool) tool.card.insertBefore(el("div", "tool-note", "Allowed automatically: read-only command"), tool.details);
 	}
 
 	function onApproval(msg) {
@@ -582,11 +638,12 @@
 	}
 
 	function setStatus(state) {
-		const labels = { starting: "Starting omp…", busy: "Working…", idle: "Ready", stopped: "Stopped" };
+		const labels = { starting: "Starting omp…", busy: "Working…", naming: "Naming the chat…", idle: "Ready", stopped: "Stopped" };
 		statusEl.textContent = labels[state] || state;
+		if (state === "starting") forgetContextUsage();
 		statusEl.dataset.state = state;
 		// A message can be what starts omp, and Stop must still work while it starts.
-		stopButton.hidden = !(state === "busy" || (state === "starting" && busySince));
+		stopButton.hidden = !(state === "busy" || state === "naming" || (state === "starting" && busySince));
 		if (state === "busy") startActivity();
 		else if (state !== "starting") stopActivity();
 	}
@@ -597,10 +654,11 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				append(el("div", "msg user", msg.text));
+				append(userMessage(msg.text));
 				return;
 			case "update": return onUpdate(msg.update);
 			case "permission": return onPermission(msg);
+			case "autoAllowed": return onAutoAllowed(msg.toolCallId);
 			case "approval": return onApproval(msg);
 			case "question": return onQuestion(msg);
 			case "resolved": return markResolved(msg.requestId, msg.label);
@@ -617,8 +675,13 @@
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));
 				return;
 			case "turnEnd":
+				flushRender(); // a page in the background gets no frames: draw the finished reply now
 				breakFlow();
 				if (msg.stopReason && msg.stopReason !== "end_turn") append(el("div", "notice warning", `Stopped: ${msg.stopReason}`));
+				if (typeof msg.seconds === "number") {
+					const meta = msg.model ? `${msg.model} · ${duration(msg.seconds)}` : duration(msg.seconds);
+					append(el("div", "reply-meta", meta));
+				}
 				return;
 		}
 	});

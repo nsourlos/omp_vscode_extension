@@ -164,6 +164,51 @@ exports.run = async function run() {
 			await waitFor(() => reviewTabs().length === 0, "the diff that finished opening after its review ended to close");
 		},
 
+		async "a change or a whole file rejected with a note sends the note to omp in the same turn"() {
+			fs.writeFileSync(file("n1.txt"), "1\n2\n3\n");
+			let seen = reviews.length;
+			let turn = controller.send(steps({ write: { path: file("n1.txt"), content: "one\n2\nthree\n" } }));
+			const info = await nextOpenReview(seen);
+			await vscode.commands.executeCommand("omp.review.acceptHunk", info.id, 0);
+			await vscode.commands.executeCommand("omp.review.rejectHunkWithNote", info.id, 1, "write it as THREE");
+			await turn;
+			assert.equal(fs.readFileSync(file("n1.txt"), "utf8"), "one\n2\n3\n", "the rejected change was not saved");
+			assert.match(fakeLog().at(-1).error, /\+three\nThe user's note on this change: write it as THREE/);
+			assert.match(fakeLog().at(-1).error, /Do what the user's notes ask/);
+
+			fs.writeFileSync(file("n2.txt"), "a\n");
+			seen = reviews.length;
+			turn = controller.send(steps({ write: { path: file("n2.txt"), content: "b\n" } }));
+			const whole = await nextOpenReview(seen);
+			const diff = vscode.Uri.from({ scheme: "omp-review", path: `/${whole.id}/proposed/n2.txt` });
+			await vscode.commands.executeCommand("omp.review.rejectAllWithNote", diff, "split this into two files");
+			await turn;
+			assert.equal(fs.readFileSync(file("n2.txt"), "utf8"), "a\n");
+			assert.match(fakeLog().at(-1).error, /The user's note on this file: split this into two files/);
+
+			fs.writeFileSync(file("n3.txt"), "1\n2\n3\n");
+			seen = reviews.length;
+			turn = controller.send(steps({ write: { path: file("n3.txt"), content: "one\n2\nthree\n" } }));
+			const changed = await nextOpenReview(seen);
+			await vscode.commands.executeCommand("omp.review.rejectHunkWithNote", changed.id, 0, "withdrawn note");
+			await vscode.commands.executeCommand("omp.review.acceptHunk", changed.id, 0); // changed their mind
+			await vscode.commands.executeCommand("omp.review.rejectHunk", changed.id, 0); // then a plain reject
+			await vscode.commands.executeCommand("omp.review.rejectHunk", changed.id, 1);
+			await turn;
+			assert.doesNotMatch(fakeLog().at(-1).error, /withdrawn note/, "a note the user took back is not sent");
+			assert.match(fakeLog().at(-1).error, /gave no further explanation/);
+
+			fs.writeFileSync(file("n4.txt"), "1\n2\n3\n");
+			seen = reviews.length;
+			turn = controller.send(steps({ write: { path: file("n4.txt"), content: "one\n2\nthree\n" } }));
+			const again = await nextOpenReview(seen);
+			await vscode.commands.executeCommand("omp.review.rejectHunkWithNote", again.id, 0, "use a Map instead");
+			await vscode.commands.executeCommand("omp.review.rejectHunk", again.id, 0); // rejected again, e.g. with the keyboard
+			await vscode.commands.executeCommand("omp.review.rejectHunk", again.id, 1);
+			await turn;
+			assert.match(fakeLog().at(-1).error, /The user's note on this change: use a Map instead/, "rejecting again keeps the note");
+		},
+
 		async "New Session opens another tab with its own omp"() {
 			const before = fakeLog().length;
 			const second = await newSession();
@@ -459,6 +504,8 @@ exports.run = async function run() {
 			try {
 				await controller.send(steps({ say: "done" }));
 				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
+				const ended = postsOf(panel).filter(m => m.type === "turnEnd").at(-1);
+				assert.equal(typeof ended.seconds, "number", "the turn's length goes to the reply's footer");
 				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
 
 				const hung = fakeLog().length;
@@ -776,6 +823,354 @@ exports.run = async function run() {
 			} finally {
 				await config.update("extraArgs", args, vscode.ConfigurationTarget.Workspace);
 			}
+		},
+
+		async "a saved chat is picked from the list and continued in its own tab, with the conversation so far"() {
+			const pickFirst = async () => {
+				const picking = vscode.commands.executeCommand("omp.openPreviousChat");
+				await waitFor(() => fakeLog().slice(logged).filter(e => e.event === "session/list").length > lists, "the saved chats to be listed");
+				lists++;
+				await sleep(500); // let the list appear
+				await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+				await picking;
+			};
+			const logged = fakeLog().length;
+			let lists = 0;
+			const before = api.sessions.all.length;
+			// The new tab's replay can arrive before the test sees the tab, so record every tab's posts from now on.
+			const ChatPanel = api.sessions.all[0].panel.constructor;
+			const post = ChatPanel.prototype.post;
+			const posted = [];
+			ChatPanel.prototype.post = function (message) {
+				posted.push({ panel: this, message });
+				return post.call(this, message);
+			};
+			try {
+				await pickFirst();
+				const resumed = await waitFor(() => api.sessions.all.find(s => s.panel.chatTitle === "Fix the parser"), "the saved chat's tab");
+				await waitFor(() => allTabs().some(tab => tab.label === `${resumed.panel.label}: Fix the parser`), "its tab to show its name");
+				await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "saved-1"), "omp to load the saved chat");
+				await waitFor(() => posted.some(p => p.panel === resumed.panel && p.message.type === "status" && p.message.state === "idle"), "the load to finish");
+				assert.equal(resumed.controller.sessionId, "saved-1");
+				const updates = posted.filter(p => p.panel === resumed.panel && p.message.type === "update").map(p => p.message.update.sessionUpdate);
+				assert.deepEqual(updates.slice(0, 4), ["user_message_chunk", "user_message_chunk", "agent_message_chunk", "tool_call"], "the conversation so far is replayed into the tab");
+
+				await resumed.controller.send(steps({ say: "continuing" }));
+				const prompt = fakeLog().slice(logged).filter(e => e.event === "prompt").at(-1);
+				assert.equal(prompt.promptSessionId, "saved-1", "the next message continues the saved chat");
+
+				await pickFirst();
+				assert.equal(api.sessions.all.length, before + 1, "picking it again brings its tab forward instead of opening another");
+				resumed.panel.dispose();
+			} finally {
+				ChatPanel.prototype.post = post;
+			}
+		},
+
+		async "omp names a new chat after its first reply, and an untitled saved chat when it is opened"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const logged = fakeLog().length;
+			await session.controller.send(steps({ say: "hi" })); // omp finds nothing to name yet
+			assert.equal(session.panel.chatTitle, undefined);
+			await session.controller.send(steps({ say: "hello" }, { nameOnRename: "Parser fix" })); // asked again after this reply
+			assert.equal(session.panel.chatTitle, "Parser fix");
+			const states = posts.filter(m => m.type === "status").map(m => m.state);
+			assert.deepEqual(states.slice(-4), ["busy", "idle", "naming", "idle"], "the chat says it is being named, then Ready");
+			await waitFor(() => allTabs().some(tab => tab.label === `${session.panel.label}: Parser fix`), "the tab to show the name");
+			assert.ok(
+				!posts.some(m => m.type === "update" && String(m.update.content?.text ?? "").includes("Session renamed")),
+				"omp's 'Session renamed to …' reply stays out of the chat",
+			);
+			await session.controller.send(steps({ say: "again", nameOnRename: "Should not be used" }));
+			assert.equal(fakeLog().slice(logged).filter(e => e.event === "rename").length, 1, "a chat is named once");
+			assert.equal(session.panel.chatTitle, "Parser fix");
+			session.panel.dispose();
+
+			const old = api.sessions.openSaved({ sessionId: "untitled-1", cwd: root, title: "", _meta: { messageCount: 2 } });
+			await waitFor(() => old.panel.chatTitle === "Named on open", "the untitled chat to be named when opened");
+			old.panel.dispose();
+		},
+
+		async "Stop works while omp names a chat: queued messages go back to the input, and it is named after a later reply"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const notified = [];
+			const notify = session.panel.notify.bind(session.panel);
+			session.panel.notify = message => (notified.push(message), notify(message));
+			const turn = session.controller.send(steps({ say: "hi" }, { nameOnRename: "Named later", renameDelay: 5000 }));
+			await waitFor(() => posts.some(m => m.type === "status" && m.state === "naming"), "omp to start naming the chat");
+			await session.controller.send("typed while naming");
+			assert.ok(posts.some(m => m.type === "queued" && m.text === "typed while naming"));
+			session.controller.cancel();
+			await turn;
+			assert.equal(posts.filter(m => m.type === "status").at(-1).state, "idle", "Ready again");
+			assert.ok(notified.some(m => m.type === "restoreInput" && m.text === "typed while naming"), "the queued message is back in the input");
+			assert.equal(session.panel.chatTitle, undefined, "not named: it was stopped");
+			await session.controller.send(steps({ say: "more" }, { nameOnRename: "Named later", renameDelay: 1 }));
+			assert.equal(session.panel.chatTitle, "Named later", "asked again after the next reply");
+			session.panel.dispose();
+		},
+
+		async "messages typed while a saved chat loads and then while it is named go to omp in the order typed"() {
+			const logged = fakeLog().length;
+			const chat = api.sessions.openSaved({ sessionId: "untitled-slow-2", cwd: root, title: "", _meta: { messageCount: 2 } });
+			const posts = postsOf(chat.panel);
+			await chat.controller.send(steps({ say: "reply to A" })); // A: while it loads
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load"), "omp to load the saved chat");
+			await sleep(300); // loaded, and the (slow) naming is under way
+			await chat.controller.send(steps({ say: "reply to B" })); // B: while it is named
+			assert.equal(posts.filter(m => m.type === "queued").length, 2, "B waits behind A");
+			await waitFor(() => posts.some(m => m.type === "turnEnd"), "the turn");
+			const prompts = fakeLog().slice(logged).filter(e => e.event === "prompt");
+			assert.equal(prompts.length, 1, "A and B go together, as one turn");
+			const sent = posts.find(m => m.type === "user").text;
+			assert.ok(sent.indexOf("reply to A") < sent.indexOf("reply to B"), `in the order typed (${sent})`);
+			const replies = posts.filter(m => m.type === "update" && /reply to/.test(m.update.content?.text ?? "")).map(m => m.update.content.text);
+			assert.deepEqual(replies, ["reply to A", "reply to B"]);
+			chat.panel.dispose();
+		},
+
+		async "a saved chat that keeps failing to load says so on every try"() {
+			const flaky = api.sessions.openSaved({ sessionId: "flaky-1", cwd: root, title: "Flaky chat", _meta: { messageCount: 2 } });
+			const posts = postsOf(flaky.panel);
+			const errors = () => posts.filter(m => m.type === "notice" && /rate limited/.test(m.text)).length;
+			await waitFor(() => errors() === 1, "the first failure");
+			await flaky.controller.send(steps({ say: "try" }));
+			await waitFor(() => errors() === 2, "the retry's failure to be reported too, not dropped as a repeat");
+			assert.equal(flaky.panel.chatTitle, "Flaky chat", "a chat that failed for another reason than 'not found' is kept");
+			assert.equal(flaky.controller.sessionId, "flaky-1");
+			flaky.panel.dispose();
+		},
+
+		async "a message sent while a saved chat loads and is named goes after its conversation, and its reply is shown"() {
+			const logged = fakeLog().length;
+			const old = api.sessions.openSaved({ sessionId: "untitled-slow", cwd: root, title: "", _meta: { messageCount: 2 } });
+			const posts = postsOf(old.panel);
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load"), "omp to load the saved chat");
+			await sleep(300); // the load has finished and the (slow) naming is under way
+			await old.controller.send(steps({ say: "answer to the new message" }));
+			await waitFor(() => posts.some(m => m.type === "turnEnd"), "the reply");
+
+			const events = fakeLog().slice(logged).map(e => e.event);
+			assert.ok(events.indexOf("rename") < events.indexOf("prompt"), `the message waits for the naming (${events.join(", ")})`);
+			assert.equal(old.panel.chatTitle, "Named slowly");
+			const shown = posts.filter(m => m.type === "user" || (m.type === "update" && m.update.content?.type === "text")).map(m => m.type === "user" ? "user" : m.update.content.text);
+			assert.ok(shown.indexOf("user") > shown.indexOf("It skips **empty** lines."), `the new message comes after the replayed conversation (${shown.join(" | ")})`);
+			assert.ok(shown.includes("answer to the new message"), "the reply is not hidden as omp's naming reply");
+			old.panel.dispose();
+
+			const typedAtOnce = api.sessions.openSaved({ sessionId: "saved-2", cwd: root, title: "Old chat", _meta: { messageCount: 2 } });
+			const typedPosts = postsOf(typedAtOnce.panel);
+			await typedAtOnce.controller.send(steps({ say: "ok", nameOnRename: "Should not replace Old chat" })); // before omp has even started
+			assert.equal(typedPosts.find(m => m.type === "queued" || m.type === "user")?.type, "queued", "shown as queued at once, while the chat loads");
+			await waitFor(() => typedPosts.some(m => m.type === "turnEnd"), "the message to be sent once the chat has loaded");
+			assert.equal(typedAtOnce.panel.chatTitle, "Old chat", "a saved chat's name is kept");
+			assert.ok(!typedPosts.some(m => m.type === "status" && m.state === "naming"), "omp is not asked to name a chat that has a name");
+			const order = typedPosts.filter(m => m.type === "user" || m.type === "update").map(m => m.type === "user" ? "user" : m.update.sessionUpdate);
+			assert.ok(order.indexOf("user") > order.indexOf("tool_call"), `the new message follows the whole replay (${order.join(", ")})`);
+			typedAtOnce.panel.dispose();
+		},
+
+		async "a saved chat omp can no longer open does not block the tab: the next message starts a new chat"() {
+			const logged = fakeLog().length;
+			const gone = api.sessions.openSaved({ sessionId: "missing-1", cwd: root, title: "Deleted chat", _meta: { messageCount: 2 } });
+			const posts = postsOf(gone.panel);
+			await gone.controller.send(steps({ say: "first" }));
+			await waitFor(
+				() => posts.some(m => m.type === "notice" && /could not open this saved chat.*ACP session not found.*next message starts a new chat/s.test(m.text)),
+				"the notice that the chat can't be opened",
+			);
+			await gone.controller.send(steps({ say: "second" }));
+			const events = fakeLog().slice(logged).map(e => e.event);
+			assert.deepEqual(events.filter(e => e === "session/load"), ["session/load"], "the missing chat is tried once");
+			assert.ok(events.includes("session/new") && events.at(-1) === "prompt", "the second message runs in a new chat");
+			assert.equal(gone.panel.chatTitle, undefined);
+			gone.panel.dispose();
+		},
+
+		async "omp exiting while it names a new chat puts a queued message back in the input, not into a fresh chat"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const notified = notificationsOf(session.panel);
+			const turn = session.controller.send(steps({ say: "hi" }, { crashOnRename: true, renameDelay: 1500 }));
+			await waitFor(() => posts.some(m => m.type === "status" && m.state === "naming"), "the chat to be named");
+			const naming = fakeLog().length;
+			await session.controller.send("now delete the old files");
+			await turn;
+			await sleep(500); // a fresh omp would have started by now
+			assert.ok(notified.some(m => m.type === "restoreInput" && m.text === "now delete the old files"), "the message is back in the input");
+			assert.ok(!fakeLog().slice(naming).some(e => e.event === "session/new"), "no fresh omp was started for it");
+			assert.equal(posts.filter(m => m.type === "status").at(-1).state, "stopped");
+			session.panel.dispose();
+		},
+
+		async "omp exiting while it names a saved chat on opening leaves the tab stopped, and the chat still to load"() {
+			const crashing = api.sessions.openSaved({ sessionId: "untitled-crash", cwd: root, title: "", _meta: { messageCount: 2 } });
+			const posts = postsOf(crashing.panel);
+			const replayed = () => posts.filter(m => m.type === "update" && m.update.sessionUpdate === "user_message_chunk").length;
+			const crashNotices = () => posts.filter(m => m.type === "notice" && /omp stopped while opening this chat/.test(m.text)).length;
+			await crashing.controller.send(steps({ say: "hello" }));
+			await waitFor(() => crashNotices() >= 1, "the notice that omp stopped");
+			await waitFor(() => posts.filter(m => m.type === "status").at(-1).state === "stopped", "the tab to show Stopped, not Working…");
+			assert.equal(crashing.controller.sessionId, "untitled-crash", "the next message loads the saved chat again");
+			const shown = replayed();
+			assert.ok(shown > 0);
+			const logged = fakeLog().length;
+			const notified = [];
+			const notify = crashing.panel.notify.bind(crashing.panel);
+			crashing.panel.notify = message => (notified.push(message), notify(message));
+			await crashing.controller.send(steps({ say: "hello again" })); // this fake crashes again while naming
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load"), "the saved chat to be loaded again");
+			await waitFor(() => posts.filter(m => m.type === "status").at(-1).state === "stopped", "the second attempt to end");
+			assert.equal(replayed(), shown, "the conversation already shown is not replayed a second time");
+			assert.ok(!posts.some(m => m.type === "user" && m.text.includes("hello again")), "a message that was never sent is not shown as sent");
+			assert.ok(posts.some(m => m.type === "queued" && m.text.includes("hello again")), "it showed as queued while the chat loaded again");
+			assert.ok(notified.some(m => m.type === "restoreInput" && m.text.includes("hello again")), "it goes back to the input, to send again");
+			crashing.panel.dispose();
+		},
+
+		async "an MCP server added from the extension goes into the project's omp config, and new chats give it to omp"() {
+			const config = file(path.join(".omp", "mcp.json"));
+			try {
+				const written = await vscode.commands.executeCommand("omp.addMcpServer", {
+					scope: "project",
+					name: "added-here",
+					server: { type: "stdio", command: "npx", args: ["-y", "some-mcp-server"], env: {} },
+				});
+				assert.equal(written, config);
+				assert.deepEqual(JSON.parse(fs.readFileSync(config, "utf8")).mcpServers["added-here"], { command: "npx", args: ["-y", "some-mcp-server"] });
+				assert.ok(!fs.existsSync(file(".mcp.json")), "Claude Code's .mcp.json is left alone");
+				const logged = fakeLog().length;
+				const session = await newSession();
+				const started = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "session/new"), "the new chat's omp to start");
+				assert.ok(started.mcpServers.includes("added-here"), `omp gets the new server (${started.mcpServers.join(", ")})`);
+				session.panel.dispose();
+
+				// The guided way: what kind, the web address, where, the name (suggested), one header, then done.
+				const picks = [items => items.find(item => item.type === "http"), items => items.find(item => item.scope === "project")];
+				const inputs = ["https://mcp.example-tools.com/mcp", undefined, "Authorization: Bearer ${TOOLS_TOKEN}", ""];
+				const asked = [];
+				const { showQuickPick, showInputBox, showInformationMessage, showErrorMessage } = vscode.window;
+				vscode.window.showQuickPick = async items => picks.shift()(await items);
+				vscode.window.showInputBox = async options => {
+					asked.push(options);
+					const answer = inputs.shift();
+					const value = answer === undefined ? options.value : answer; // undefined: keep the suggestion
+					assert.equal(await options.validateInput?.(value), undefined, `"${value}" is accepted`);
+					return value;
+				};
+				vscode.window.showInformationMessage = async () => undefined;
+				try {
+					await vscode.commands.executeCommand("omp.addMcpServer");
+				} finally {
+					Object.assign(vscode.window, { showQuickPick, showInputBox, showInformationMessage });
+				}
+				assert.equal(asked[1].value, "example-tools", "the name is suggested from the address");
+				assert.ok(asked[0].validateInput("not a url"), "a web address is required");
+				// From the chat tab's menu, VS Code passes the tab's address: the questions are still asked.
+				let opened = false;
+				vscode.window.showQuickPick = async () => ((opened = true), undefined); // then cancelled
+				const errors = [];
+				vscode.window.showErrorMessage = async message => (errors.push(message), undefined);
+				try {
+					await vscode.commands.executeCommand("omp.addMcpServer", vscode.Uri.parse("webview-panel://omp.chatPanel"));
+				} finally {
+					Object.assign(vscode.window, { showQuickPick, showErrorMessage });
+				}
+				assert.ok(opened, "the questions open");
+				assert.deepEqual(errors, [], "no error");
+
+				assert.deepEqual(JSON.parse(fs.readFileSync(config, "utf8")).mcpServers["example-tools"], {
+					type: "http",
+					url: "https://mcp.example-tools.com/mcp",
+					headers: { Authorization: "Bearer ${TOOLS_TOKEN}" },
+				});
+			} finally {
+				fs.rmSync(file(".omp"), { recursive: true, force: true });
+			}
+		},
+
+		async "after omp exits in a saved chat, the fresh session that replaces it drops the old name"() {
+			const logged = fakeLog().length;
+			const old = api.sessions.openSaved({ sessionId: "saved-3", cwd: root, title: "Crashed chat", _meta: { messageCount: 2 } });
+			const posts = postsOf(old.panel);
+			await old.controller.send(steps({ exit: 1 })); // queued while the chat loads, then sent
+			await waitFor(() => posts.some(m => m.type === "notice" && /omp exited/.test(m.text)), "omp to exit");
+			await waitFor(() => posts.filter(m => m.type === "status").at(-1)?.state === "stopped", "the tab to show Stopped");
+			assert.equal(old.panel.chatTitle, "Crashed chat");
+			await old.controller.send(steps({ say: "fresh start" }));
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "session/new"), "a new session was opened");
+			assert.equal(old.panel.chatTitle, undefined, "the old chat's name is not kept for the new one");
+			old.panel.dispose();
+		},
+
+		async "a saved chat whose loading crashed partway is not shown twice when it loads again"() {
+			const session = api.sessions.openSaved({ sessionId: "crash-midload", cwd: root, title: "Half loaded", _meta: { messageCount: 2 } });
+			const posts = postsOf(session.panel);
+			const replayed = () => posts.filter(m => m.type === "update" && m.update.sessionUpdate === "user_message_chunk").length;
+			await waitFor(() => posts.filter(m => m.type === "status").at(-1)?.state === "stopped", "omp to exit while loading");
+			const shown = replayed();
+			assert.ok(shown > 0, "part of the conversation was shown before omp exited");
+			const logged = fakeLog().length;
+			await session.controller.send(steps({ say: "after" })); // waits in the queue while the chat loads again
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "crash-midload"), "the chat to load again");
+			await waitFor(() => posts.some(m => m.type === "turnEnd"), "the message to run in the reloaded chat");
+			assert.equal(replayed(), shown, "its conversation was not added a second time");
+			session.panel.dispose();
+		},
+
+		async "a command omp runs in another folder says which folder on its permission card"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const seen = posts.length;
+			const turn = controller.send(steps({ permission: "ls -la", cwd: "vendor/lib" }));
+			const card = await waitFor(() => posts.slice(seen).find(m => m.type === "permission"), "the card");
+			assert.equal(card.cwd, "vendor/lib");
+			respond(panel, card, "reject_once", "Reject");
+			await turn;
+		},
+
+		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.
+		async "\"Always allow read-only commands\" auto-allows only read-only commands, for this chat only"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const cards = () => posts.slice(seen).filter(m => m.type === "permission");
+			const answered = () => fakeLog().slice(logged).filter(e => e.event === "permission").map(e => e.result.outcome.optionId);
+			const seen = posts.length;
+			const logged = fakeLog().length;
+
+			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
+			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
+			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way, and no read-only option");
+			respond(panel, writeCard, "reject_once", "Reject");
+			await writeCommand;
+
+			const first = controller.send(steps({ permission: "ls -la" }));
+			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow read-only commands", "Reject"]);
+			respond(panel, readCard, readCard.options[1].optionId, "Always allow read-only commands");
+			await first;
+			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");
+
+			await controller.send(steps({ permission: "cd src && grep -rn \"a\\|b\" . | head" }));
+			assert.equal(cards().length, 2, "a later read-only command asks nothing");
+			assert.equal(answered().at(-1), "allow_once");
+			assert.ok(posts.slice(seen).some(m => m.type === "autoAllowed"), "and its row says it was allowed automatically");
+
+			const write = controller.send(steps({ permission: "echo hi > notes.md" }));
+			const asked = await waitFor(() => cards()[2], "a command that writes still asks");
+			respond(panel, asked, "reject_once", "Reject");
+			await write;
+
+			const second = await newSession();
+			const secondPosts = postsOf(second.panel);
+			const before = secondPosts.length;
+			const other = second.controller.send(steps({ permission: "ls" }));
+			const otherCard = await waitFor(() => secondPosts.slice(before).find(m => m.type === "permission"), "another chat still asks");
+			respond(second.panel, otherCard, "allow_once", "Allow once");
+			await other;
+			second.panel.dispose();
 		},
 
 		async "moving a chat into its own window keeps the session working"() {

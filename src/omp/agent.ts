@@ -7,10 +7,13 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import spawn from "cross-spawn";
 import which from "which";
-import { JsonRpcConnection, RpcError } from "../acp/rpc";
+import { AgentError, JsonRpcConnection, RpcError, withoutUrlQueries } from "../acp/rpc";
+import { failedMcpServers } from "./mcp";
 import {
 	PROTOCOL_VERSION,
 	type ConfigOption,
+	type McpServer,
+	type SavedSession,
 	type ElicitationParams,
 	type ElicitationResult,
 	type NewSessionResult,
@@ -39,6 +42,8 @@ export interface OmpAgentOptions {
 	args: string[];
 	cwd: string;
 	handlers: ClientHandlers;
+	/** MCP servers for the session (omp in ACP mode uses only these); may still be resolving while omp starts. */
+	mcpServers?: McpServer[] | Promise<McpServer[]>;
 }
 
 /**
@@ -62,16 +67,54 @@ function searchPath(): string {
 	return [process.env[pathKey(process.env)] ?? "", ...EXTRA_PATHS].join(delimiter);
 }
 
+/** The environment omp runs in: ours, with the usual install locations added to PATH. */
+export function ompEnvironment(): NodeJS.ProcessEnv {
+	return { ...process.env, [pathKey(process.env)]: searchPath() };
+}
+
+/**
+ * omp's saved, refreshed sign-in token for an MCP server URL (`omp token`), or undefined if there is none.
+ * Run through cross-spawn like omp itself, since on Windows omp is usually an omp.cmd script.
+ */
+export function ompSavedToken(ompCommand: string): (url: string) => Promise<string | undefined> {
+	return url =>
+		new Promise(resolve => {
+			const child = spawn(ompCommand, ["token", `mcp_oauth:profile:default:${url}`], { env: ompEnvironment(), stdio: ["ignore", "pipe", "ignore"] });
+			let stdout = "";
+			const timer = setTimeout(() => {
+				child.kill();
+				resolve(undefined); // a killed omp.cmd can leave its omp holding the pipe open, so 'close' may never come
+			}, 20_000);
+			child.stdout!.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+			child.on("error", () => {
+				clearTimeout(timer);
+				resolve(undefined);
+			});
+			child.on("close", code => {
+				clearTimeout(timer);
+				resolve(code === 0 ? stdout.trim() || undefined : undefined);
+			});
+		});
+}
+
 /** Full path to omp (finds omp, omp.exe, omp.cmd…), or the name itself if not found. */
 export function resolveOmpCommand(configured: string): string {
 	return which.sync(configured, { nothrow: true, path: searchPath() }) ?? configured;
 }
+
+/** The session updates omp replays a saved chat's conversation with. */
+export const REPLAYED_UPDATES = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
 
 export class OmpAgent {
 	#process: ChildProcess | undefined;
 	#rpc: JsonRpcConnection | undefined;
 	#sessionId: string | undefined;
 	#configOptions: ConfigOption[] = [];
+	#mcpProblems: string[] = [];
+	/** Rejects when the process exits; raced against every startup step. */
+	#exited: Promise<never> | undefined;
+	/** True while a saved chat loads whose conversation the editor already shows: omp's replay is dropped. */
+	#hideReplay = false;
 
 	constructor(private readonly options: OmpAgentOptions) {}
 
@@ -83,19 +126,65 @@ export class OmpAgent {
 		return this.#configOptions;
 	}
 
-	/** Start the process, run the ACP handshake and open a fresh session. */
-	async start(): Promise<NewSessionResult> {
+	/** MCP servers that would not start, so the session runs without them. */
+	get mcpProblems(): string[] {
+		return this.#mcpProblems;
+	}
+
+	/**
+	 * Start omp and open a session: a fresh one, or, with `loadSessionId`, a saved one (omp first
+	 * replays its messages as session updates, so the chat shows the conversation so far, unless
+	 * `replay` is false because the chat already shows it).
+	 */
+	async start(loadSessionId?: string, { replay = true }: { replay?: boolean } = {}): Promise<NewSessionResult> {
+		const rpc = await this.connect();
+		const servers = await Promise.race([Promise.resolve(this.options.mcpServers ?? []), this.#exited!]);
+		this.#hideReplay = loadSessionId !== undefined && !replay;
+		const opened = this.#openSession(rpc, this.options.cwd, servers, loadSessionId).finally(() => (this.#hideReplay = false));
+		const session = await Promise.race([opened, this.#exited!]);
+		this.#sessionId = session.sessionId;
+		this.#configOptions = session.configOptions ?? [];
+		return session;
+	}
+
+	/** The chats omp has saved for this folder, newest first, every page of them (needs `connect()` or `start()`). */
+	async listSessions(): Promise<SavedSession[]> {
+		const sessions: SavedSession[] = [];
+		const seen = new Set<string>();
+		let cursor: string | undefined;
+		do {
+			const result = await this.#requireRpc().request<{ sessions?: SavedSession[]; nextCursor?: string | null }>("session/list", {
+				cwd: this.options.cwd,
+				...(cursor ? { cursor } : {}),
+			});
+			sessions.push(...(result?.sessions ?? []));
+			if (cursor) seen.add(cursor);
+			cursor = result?.nextCursor ?? undefined;
+		} while (cursor && !seen.has(cursor)); // a repeated cursor would loop forever
+		return sessions;
+	}
+
+	/** Start the process and run the ACP handshake, without opening a session. */
+	async connect(): Promise<JsonRpcConnection> {
 		const { command, args, cwd, handlers } = this.options;
-		const env = { ...process.env, [pathKey(process.env)]: searchPath() };
+		const env = ompEnvironment();
 		const child = spawn(command, ["acp", ...args], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
 		this.#process = child;
 
 		let stderrTail = "";
+		// Logged by whole lines: a web address split across two chunks still has its query (keys) hidden.
+		let stderrLine = "";
+		const logStderr = (line: string) => {
+			if (line.trim()) handlers.log(`[omp stderr] ${withoutUrlQueries(line.trimEnd())}`);
+		};
 		child.stderr!.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
 			stderrTail = (stderrTail + text).slice(-2000);
-			handlers.log(`[omp stderr] ${text.trimEnd()}`);
+			const lines = (stderrLine + text).split("\n");
+			stderrLine = lines.pop() ?? "";
+			for (const line of lines) logStderr(line);
 		});
+		child.stderr!.on("end", () => logStderr(stderrLine));
 		// A write racing omp's exit fails with EPIPE; the exit handler below reports the exit itself.
 		child.stdin!.on("error", error => handlers.log(`[omp stdin] ${error.message}`));
 
@@ -108,7 +197,8 @@ export class OmpAgent {
 					if (params.update.sessionUpdate === "config_option_update" && params.update.configOptions) {
 						this.#configOptions = params.update.configOptions;
 					}
-					handlers.onSessionUpdate(params.update);
+					// Only the replayed conversation is dropped; the commands, context use and title still count.
+					if (!(this.#hideReplay && REPLAYED_UPDATES.has(params.update.sessionUpdate))) handlers.onSessionUpdate(params.update);
 				}
 			},
 			handlers.log,
@@ -126,26 +216,23 @@ export class OmpAgent {
 				reject(new Error(message));
 			};
 			child.on("error", error => fail(`Could not start omp (${command}): ${error.message}`));
-			child.on("exit", code => fail(`omp exited (code ${code}). ${stderrTail.trim()}`.trim()));
+			// Shown in the chat: web address queries hidden, as MCP keys can ride in them (`?api_key=…`).
+			child.on("exit", code => fail(`omp exited (code ${code}). ${withoutUrlQueries(stderrTail.trim())}`.trim()));
 		});
 		exited.catch(() => {});
+		this.#exited = exited;
 
-		const handshake = (async () => {
-			await rpc.request("initialize", {
-				protocolVersion: PROTOCOL_VERSION,
-				clientCapabilities: {
-					fs: { readTextFile: true, writeTextFile: true },
-					terminal: false,
-					elicitation: { form: {} },
-				},
-				clientInfo: { name: "omp-vscode", version: "0.1.0" },
-			});
-			const session = await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: [] });
-			this.#sessionId = session.sessionId;
-			this.#configOptions = session.configOptions ?? [];
-			return session;
-		})();
-		return Promise.race([handshake, exited]);
+		const handshake = rpc.request("initialize", {
+			protocolVersion: PROTOCOL_VERSION,
+			clientCapabilities: {
+				fs: { readTextFile: true, writeTextFile: true },
+				terminal: false,
+				elicitation: { form: {} },
+			},
+			clientInfo: { name: "omp-vscode", version: "0.1.0" },
+		});
+		await Promise.race([handshake, exited]);
+		return rpc;
 	}
 
 	prompt(text: string): Promise<PromptResult> {
@@ -174,6 +261,28 @@ export class OmpAgent {
 		this.#sessionId = undefined;
 		this.#rpc?.close("Session closed");
 		child?.kill();
+	}
+
+	/**
+	 * omp refuses a whole session when any MCP server fails to connect, so the failing ones are
+	 * dropped and the session is opened again with the rest (or, if the error is about MCP but
+	 * names none of them, with none). Any other error is the session's own and is passed on.
+	 */
+	async #openSession(rpc: JsonRpcConnection, cwd: string, servers: McpServer[], loadSessionId?: string): Promise<NewSessionResult> {
+		try {
+			if (!loadSessionId) return await rpc.request<NewSessionResult>("session/new", { cwd, mcpServers: servers });
+			const loaded = await rpc.request<Omit<NewSessionResult, "sessionId">>("session/load", { sessionId: loadSessionId, cwd, mcpServers: servers });
+			return { ...loaded, sessionId: loadSessionId };
+		} catch (error) {
+			// Only omp's own answer can be about MCP; omp exiting (even with "mcp" in its output) is not.
+			if (servers.length === 0 || !(error instanceof AgentError)) throw error;
+			const message = error instanceof Error ? error.message : String(error);
+			const failed = failedMcpServers(servers, message);
+			if (failed.length === 0 && !/\bmcp\b/i.test(message)) throw error;
+			this.#mcpProblems.push(`MCP servers not started: ${withoutUrlQueries(message)}`); // shown in the chat
+			const rest = failed.length > 0 ? servers.filter(server => !failed.includes(server)) : [];
+			return this.#openSession(rpc, cwd, rest, loadSessionId);
+		}
 	}
 
 	#requireRpc(): JsonRpcConnection {

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { registerMcpCommands } from "./mcpServers";
 import { ReviewManager } from "./review/reviewManager";
 import { Sessions } from "./sessions";
 
@@ -25,8 +26,12 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 			void session.controller.start();
 		}),
 		vscode.commands.registerCommand("omp.cancel", () => sessions.active?.controller.cancel()),
+		vscode.commands.registerCommand("omp.openPreviousChat", () =>
+			sessions.openSavedFromPicker().catch(error => void vscode.window.showErrorMessage(`OMP: ${error instanceof Error ? error.message : error}`)),
+		),
 		vscode.commands.registerCommand("omp.showLog", () => output.show()),
 		vscode.commands.registerCommand("omp.openInWindow", () => sessions.openInWindow()),
+		registerMcpCommands(),
 	);
 	return { sessions, reviews };
 }

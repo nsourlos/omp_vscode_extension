@@ -6,6 +6,8 @@ const path = require("node:path");
 const { JSDOM } = require("jsdom");
 
 const script = fs.readFileSync(path.join(__dirname, "..", "media", "chat.js"), "utf8");
+// Loaded first, as on the real page (needs `npm run build`, like the other tests' dist/core.js).
+const markdown = fs.readFileSync(path.join(__dirname, "..", "dist", "markdown.js"), "utf8");
 
 const CHIME_SRC = "media/staplebops-01.mp3";
 
@@ -33,6 +35,8 @@ function openChat(setup = () => {}) {
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
 	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
 	window.Element.prototype.scrollIntoView = () => {};
+	// The bundle is strict, so its top-level `var` stays inside an eval (on the page, a <script>, it is global).
+	window.eval(`${markdown}\nwindow.ompMarkdown = ompMarkdown;`);
 	window.eval(script);
 	return {
 		posted,
@@ -58,24 +62,52 @@ const permission = {
 };
 const chunk = text => ({ type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
 
-test("clicking a card sends the answer with its label and locks the card", () => {
+test("clicking a permission button sends the answer with its label and locks the question", () => {
 	const chat = openChat();
 	chat.deliver(permission);
-	const card = chat.log.querySelector(".card");
-	card.querySelector("button").click();
+	const ask = chat.log.querySelector(".tool-ask");
+	ask.querySelector("button").click();
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "7", value: "allow_once", label: "Allow once" });
-	assert.ok(card.classList.contains("resolved"));
-	assert.ok([...card.querySelectorAll("button")].every(button => button.disabled));
-	assert.equal(card.querySelector(".card-result").textContent, "Allow once");
+	assert.ok(ask.classList.contains("resolved"));
+	assert.ok([...ask.querySelectorAll("button")].every(button => button.disabled));
+	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
 });
 
-test("an answered card stays answered when the chat is replayed", () => {
+test("an answered permission stays answered when the chat is replayed", () => {
 	const chat = openChat();
 	chat.deliver(permission, { type: "resolved", requestId: "7", label: "Allow once" });
-	const card = chat.log.querySelector(".card");
-	assert.ok(card.classList.contains("resolved"));
-	assert.ok([...card.querySelectorAll("button")].every(button => button.disabled));
-	assert.equal(card.querySelector(".card-result").textContent, "Allow once");
+	const ask = chat.log.querySelector(".tool-ask");
+	assert.ok(ask.classList.contains("resolved"));
+	assert.ok([...ask.querySelectorAll("button")].every(button => button.disabled));
+	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
+});
+
+test("a permission for a command run in another folder names that folder", () => {
+	const chat = openChat();
+	chat.deliver({ ...permission, cwd: "vendor/lib" });
+	assert.ok([...chat.log.querySelectorAll(".tool-ask .location")].some(node => node.textContent === "in folder: vendor/lib"));
+});
+
+test("a command's permission goes inside its tool row, and the command is shown once", () => {
+	const chat = openChat();
+	const command = "cd /repo && grep -rn foo src | head";
+	const tool = status => ({
+		type: "update",
+		update: { sessionUpdate: status ? "tool_call_update" : "tool_call", toolCallId: "t9", title: command, kind: "execute", status: status ?? "pending", rawInput: { command } },
+	});
+	chat.deliver(tool(), { ...permission, toolCallId: "t9", command });
+	const rows = chat.log.querySelectorAll(".tool");
+	assert.equal(rows.length, 1, "one row, no separate card");
+	assert.equal(chat.log.querySelectorAll(".card").length, 0);
+	const shown = [...rows[0].querySelectorAll(".tool-title, .tool-command, .tool-ask pre")].filter(node => !node.hidden && node.textContent.includes(command));
+	assert.equal(shown.length, 1, "the command appears once");
+	assert.equal(rows[0].querySelector(".tool-ask .card-heading").textContent, "Run this command?");
+
+	rows[0].querySelector(".tool-ask button").click();
+	chat.deliver({ ...tool("completed"), update: { ...tool("completed").update, rawOutput: { content: [{ type: "text", text: "src/a.ts:1:foo" }] } } });
+	assert.equal(rows[0].querySelector(".tool-status").textContent, "✓");
+	assert.equal(rows[0].querySelector(".tool-output pre").textContent, "src/a.ts:1:foo");
+	assert.equal(rows[0].querySelector(".tool-ask .card-result").textContent, "Allow once", "the answer stays visible in the row");
 });
 
 test("approval cards send Approve or Deny with a label", () => {
@@ -126,7 +158,7 @@ test("a streamed reply renders once per frame, with nothing lost", async () => {
 	assert.equal(reply.length, 1);
 	assert.equal(reply[0].textContent, "", "500 chunks caused no render before the frame");
 	await chat.nextFrame();
-	assert.equal(reply[0].textContent, words.join(""));
+	assert.equal(reply[0].textContent.trim(), words.join("").trim());
 });
 
 test("a reply cut by a tool call is rendered in full before the next one starts", async () => {
@@ -135,9 +167,175 @@ test("a reply cut by a tool call is rendered in full before the next one starts"
 	chat.deliver({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a file", kind: "read" } });
 	chat.deliver(chunk("Done"));
 	const replies = chat.log.querySelectorAll(".msg.assistant");
-	assert.equal(replies[0].textContent, "Hello there", "the first reply rendered as soon as the second began");
+	assert.equal(replies[0].textContent.trim(), "Hello there", "the first reply rendered as soon as the second began");
 	await chat.nextFrame();
-	assert.deepEqual([...replies].map(reply => reply.textContent), ["Hello there", "Done"]);
+	assert.deepEqual([...replies].map(reply => reply.textContent.trim()), ["Hello there", "Done"]);
+});
+
+test("a sent or replayed message of the user's can be put back in the input to edit and resend", () => {
+	const chat = openChat();
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "user", text: "Fix the parser" });
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "Earlier question" } } });
+	const [sent, replayed] = chat.log.querySelectorAll(".msg.user");
+	assert.equal(sent.textContent, "Fix the parser", "the button adds no text to the message");
+	sent.querySelector("button.edit").click();
+	assert.equal(input.value, "Fix the parser");
+	input.value = "";
+	replayed.querySelector("button.edit").click();
+	assert.equal(input.value, "Earlier question");
+	assert.deepEqual(chat.posted.filter(m => m.type === "send"), [], "nothing is sent until the user presses Enter");
+});
+
+test("a reply is drawn in full when its turn ends, without waiting for a screen frame", () => {
+	const chat = openChat(window => (window.requestAnimationFrame = () => 0)); // a page in the background gets no frames
+	chat.deliver(chunk("| a |\n|---|\n| b |"), { type: "turnEnd", stopReason: "end_turn", seconds: 1 });
+	assert.equal(chat.log.querySelectorAll(".msg.assistant table tr").length, 2);
+});
+
+test("each reply ends with the model and how long the turn took", () => {
+	const chat = openChat();
+	chat.deliver(chunk("Done."), { type: "turnEnd", stopReason: "end_turn", seconds: 12, model: "GLM 5.3 (Nebul)" });
+	chat.deliver(chunk("Done again."), { type: "turnEnd", stopReason: "end_turn", seconds: 135 });
+	assert.deepEqual([...chat.log.querySelectorAll(".reply-meta")].map(node => node.textContent), ["GLM 5.3 (Nebul) · 12s", "2m 15s"]);
+});
+
+test("context notices: a warning when it gets full, and a note when omp compacts it", () => {
+	const chat = openChat();
+	const usage = used => ({ type: "update", update: { sessionUpdate: "usage_update", used, size: 100_000 } });
+	const notices = () => [...chat.log.querySelectorAll(".notice")].map(node => node.textContent);
+	chat.deliver(usage(30_000), usage(60_000));
+	assert.deepEqual(notices(), [], "nothing while there is room");
+	chat.deliver(usage(85_000), usage(90_000));
+	assert.equal(notices().length, 1, "warned once when crossing 80%, not every turn");
+	assert.match(notices()[0], /Context 85% full.*\/compact/);
+	chat.deliver(usage(20_000));
+	assert.match(notices()[1], /omp compacted the conversation .*now 20% full/);
+	chat.deliver(usage(83_000));
+	assert.match(notices()[2], /Context 83% full/, "warned again after filling up again");
+	assert.equal(chat.window.document.getElementById("usage").textContent, "83% context");
+});
+
+test("a new omp session's lower context use is not taken for a compaction", () => {
+	const chat = openChat();
+	const usage = used => ({ type: "update", update: { sessionUpdate: "usage_update", used, size: 100_000 } });
+	const notices = () => [...chat.log.querySelectorAll(".notice")].map(node => node.textContent);
+	chat.deliver(usage(70_000), { type: "status", state: "stopped" }, { type: "status", state: "starting" }, usage(3_000));
+	assert.deepEqual(notices(), [], "omp restarted with a fresh session: nothing was compacted");
+	chat.deliver(usage(85_000), { type: "status", state: "starting" }, usage(90_000));
+	assert.equal(notices().length, 2, "the 'nearly full' warning is given again for the new session");
+});
+
+test("a saved chat's replayed messages show as the user's and omp's messages", async () => {
+	const chat = openChat();
+	const user = text => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+	chat.deliver(user("Why does the parser "), user("fail?"), chunk("It skips **empty** lines."), user("Fix it"), chunk("Done."));
+	await chat.nextFrame();
+	const messages = [...chat.log.querySelectorAll(".msg")].map(node => [node.classList.contains("user") ? "user" : "omp", node.textContent.trim()]);
+	assert.deepEqual(messages, [
+		["user", "Why does the parser fail?"],
+		["omp", "It skips empty lines."],
+		["user", "Fix it"],
+		["omp", "Done."],
+	]);
+});
+
+test("two replayed user messages in a row stay two messages", async () => {
+	const chat = openChat();
+	const user = (text, messageId) => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text }, messageId } });
+	chat.deliver(user("fix the ", "m1"), user("bug", "m1"), user("also add tests", "m2"), user("and docs"), chunk("Done."));
+	await chat.nextFrame();
+	const messages = [...chat.log.querySelectorAll(".msg")].map(node => node.textContent.trim());
+	assert.deepEqual(messages, ["fix the bug", "also add tests", "and docs", "Done."], "a chunk without a messageId is another message too, as in the stored history");
+});
+
+test("the chat shows when omp is naming it", () => {
+	const chat = openChat();
+	chat.deliver({ type: "status", state: "naming" });
+	assert.equal(chat.window.document.getElementById("status").textContent, "Naming the chat…");
+	assert.equal(chat.window.document.getElementById("stop").hidden, false, "naming can be stopped");
+	chat.deliver({ type: "status", state: "idle" });
+	assert.equal(chat.window.document.getElementById("stop").hidden, true);
+});
+
+test("HTML written in a reply is shown as text, and the markdown around it still renders", async () => {
+	const chat = openChat();
+	chat.deliver(
+		chunk("Wrap it in a <form> with an <input>, never a <script>alert(1)</script>, and **bold** this.\n\n<div>\n*still markdown*\n</div>\n\n| a | b |\n|---|---|\n| x<br>y | `<b>` |"),
+	);
+	await chat.nextFrame();
+	const reply = chat.log.querySelector(".msg.assistant");
+	assert.equal(reply.querySelector("form, input, script, div"), null, "no real form, input, script or div");
+	assert.match(reply.textContent, /Wrap it in a <form> with an <input>, never a <script>alert\(1\)<\/script>, and bold this\./);
+	assert.equal(reply.querySelector("strong").textContent, "bold");
+	assert.equal(reply.querySelector("em").textContent, "still markdown", "a line starting with a tag is still markdown");
+	assert.match(reply.textContent, /<div>/);
+	assert.equal(reply.querySelector("td").innerHTML, "x<br>y", "<br> in a table cell is a line break");
+	assert.equal(reply.querySelectorAll("td")[1].textContent, "<b>");
+});
+
+test("single newlines in a reply are line breaks", async () => {
+	const chat = openChat();
+	chat.deliver(chunk("Step one: build\nStep two: test\nStep three: ship"));
+	await chat.nextFrame();
+	const paragraph = chat.log.querySelector(".msg.assistant p");
+	assert.equal(paragraph.querySelectorAll("br").length, 2);
+});
+
+test("a reply's markdown table, list, code and link render as such", async () => {
+	const chat = openChat();
+	chat.deliver(chunk("| # | Finding |\n|---|---|\n| 1 | **Real** bug |\n| 2 | `code` |\n\n- one\n- two\n\n```js\nconst x = 1;\n```\n\nSee [docs](https://example.com/docs)."));
+	await chat.nextFrame();
+	const reply = chat.log.querySelector(".msg.assistant");
+	const cells = [...reply.querySelectorAll("table tr")].map(row => [...row.children].map(cell => cell.textContent));
+	assert.deepEqual(cells, [["#", "Finding"], ["1", "Real bug"], ["2", "code"]]);
+	assert.equal(reply.querySelector("td strong").textContent, "Real");
+	assert.deepEqual([...reply.querySelectorAll("ul li")].map(li => li.textContent), ["one", "two"]);
+	assert.equal(reply.querySelector("pre code").textContent, "const x = 1;\n");
+	assert.equal(reply.querySelector("a").getAttribute("href"), "https://example.com/docs");
+});
+
+test("a code block in a reply has a Copy button that copies just the code", async () => {
+	const copied = [];
+	const chat = openChat(window => {
+		Object.defineProperty(window.navigator, "clipboard", { value: { writeText: text => (copied.push(text), Promise.resolve()) } });
+	});
+	chat.deliver(chunk("Run:\n\n```sh\nnpm test\n```"));
+	await chat.nextFrame();
+	const button = chat.log.querySelector(".msg.assistant pre button.copy");
+	button.click();
+	await Promise.resolve();
+	assert.deepEqual(copied, ["npm test\n"]);
+	assert.equal(button.textContent, "Copied");
+});
+
+test("when the clipboard API refuses (page not focused), the code is copied with the copy command", async () => {
+	const commands = [];
+	const chat = openChat(window => {
+		Object.defineProperty(window.navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("Document is not focused")) } });
+		window.document.execCommand = command => {
+			commands.push([command, window.document.querySelector("body > textarea")?.value]);
+			return true;
+		};
+	});
+	chat.deliver(chunk("```\nls\n```"));
+	await chat.nextFrame();
+	const button = chat.log.querySelector("pre button.copy");
+	button.click();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(commands, [["copy", "ls\n"]]);
+	assert.equal(button.textContent, "Copied");
+});
+
+test("a reply's markdown cannot run script or inject handlers", async () => {
+	const chat = openChat();
+	chat.deliver(chunk('Hi <script>window.hacked = 1</script><img src=x onerror="window.hacked = 2"> [x](javascript:alert(1))'));
+	await chat.nextFrame();
+	const reply = chat.log.querySelector(".msg.assistant");
+	assert.equal(reply.querySelector("script"), null);
+	assert.equal(reply.querySelector("[onerror]"), null);
+	assert.ok(![...reply.querySelectorAll("a")].some(a => (a.getAttribute("href") || "").startsWith("javascript:")));
+	assert.equal(chat.window.hacked, undefined);
 });
 
 test("the activity line says what omp is doing during a turn, and hides when it ends", () => {
@@ -171,6 +369,15 @@ test("the activity line says what omp is doing during a turn, and hides when it 
 	assert.equal(chat.activity.textContent, "Writing… · 12s", "with the seconds since the turn began");
 	chat.deliver({ type: "status", state: "idle" });
 	assert.equal(shown(), null);
+});
+
+test("a command rejected from its question card no longer shows as running", () => {
+	const chat = openChat();
+	const shown = () => chat.activity.textContent.replace(/ · \d+s$/, "");
+	chat.deliver({ type: "status", state: "busy" }, { ...permission, toolCallId: "call-1" });
+	assert.equal(shown(), "Waiting for your answer");
+	[...chat.log.querySelectorAll(".tool-ask button")].find(button => button.textContent === "Reject").click();
+	assert.equal(shown(), "Working…", "not 'Running: Run ls' for the rest of the turn");
 });
 
 test("Stop shows while omp starts for a sent message, but not while it starts on its own", () => {

@@ -6,3 +6,7 @@ node_modules/**
 esbuild.mjs
 tsconfig.json
 .gitignore
+manual_tests/**
+.claude/**
+.vscode-test/**
+.DS_Store

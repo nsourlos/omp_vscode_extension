@@ -17,6 +17,12 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "omp runs commands, edits files and starts the project's MCP servers in the open folder."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -50,6 +56,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "omp.openPreviousChat",
+        "title": "Continue a Previous Chat…",
+        "category": "OMP",
+        "icon": "$(history)"
+      },
+      {
         "command": "omp.cancel",
         "title": "Stop",
         "category": "OMP",
@@ -66,6 +78,18 @@
         "title": "Open Chat in New Window",
         "category": "OMP",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "omp.addMcpServer",
+        "title": "Add MCP Server…",
+        "category": "OMP",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "omp.openMcpConfig",
+        "title": "Open MCP Servers File…",
+        "category": "OMP",
+        "icon": "$(json)"
       },
       {
         "command": "omp.review.acceptHunk",
@@ -88,6 +112,17 @@
         "title": "Reject All Changes",
         "category": "OMP",
         "icon": "$(close-all)"
+      },
+      {
+        "command": "omp.review.rejectAllWithNote",
+        "title": "Reject All Changes with a Note…",
+        "category": "OMP",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "omp.review.rejectHunkWithNote",
+        "title": "Reject Change with a Note…",
+        "category": "OMP"
       },
       {
         "command": "omp.review.submit",
@@ -146,14 +181,29 @@
           "group": "navigation@1"
         },
         {
-          "command": "omp.openInWindow",
+          "command": "omp.openPreviousChat",
           "when": "activeWebviewPanelId == 'omp.chatPanel'",
           "group": "navigation@2"
         },
         {
-          "command": "omp.showLog",
+          "command": "omp.openInWindow",
           "when": "activeWebviewPanelId == 'omp.chatPanel'",
           "group": "navigation@3"
+        },
+        {
+          "command": "omp.showLog",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "navigation@4"
+        },
+        {
+          "command": "omp.addMcpServer",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "1_mcp@1"
+        },
+        {
+          "command": "omp.openMcpConfig",
+          "when": "activeWebviewPanelId == 'omp.chatPanel'",
+          "group": "1_mcp@2"
         },
         {
           "command": "omp.review.acceptAll",
@@ -166,9 +216,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "omp.review.submit",
+          "command": "omp.review.rejectAllWithNote",
           "when": "resourceScheme == omp-review",
           "group": "navigation@3"
+        },
+        {
+          "command": "omp.review.submit",
+          "when": "resourceScheme == omp-review",
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -178,6 +233,10 @@
         },
         {
           "command": "omp.review.rejectHunk",
+          "when": "false"
+        },
+        {
+          "command": "omp.review.rejectHunkWithNote",
           "when": "false"
         }
       ]
@@ -213,6 +272,11 @@
           "default": true,
           "description": "Flag shell commands that look like they change files, since those changes skip the diff review."
         },
+        "omp.useMcpServers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give omp the MCP servers from ~/.omp/agent/mcp.json, the project's .omp/mcp.json and the project's .mcp.json (omp ignores its own config inside an editor). Add servers of omp's own with \"OMP: Add MCP Server…\". Servers that fail to start are left out, with a warning in the chat."
+        },
         "omp.soundOnFinish": {
           "type": "boolean",
           "default": true,
@@ -226,13 +290,15 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.js",
-    "package": "npm run build && npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository",
+    "package": "npm run build && npx --yes @vscode/vsce@4.0.0 package --no-dependencies --allow-missing-repository",
     "test:vscode": "npm run build && node test/integration/run.mjs",
     "test:offline": "npm run build && node test/integration/run.mjs offline"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",
     "diff": "^8.0.2",
+    "dompurify": "3.4.16",
+    "marked": "18.0.14",
     "which": "^5.0.0"
   },
   "devDependencies": {

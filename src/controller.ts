@@ -5,23 +5,28 @@
  */
 import { readFile } from "node:fs/promises";
 import * as vscode from "vscode";
-import { RpcError } from "./acp/rpc";
+import { AgentError, RpcError } from "./acp/rpc";
 import type {
+	ConfigOption,
 	ElicitationParams,
 	ElicitationResult,
+	PermissionOption,
 	ReadTextFileParams,
 	RequestPermissionParams,
 	RequestPermissionResult,
+	SavedSession,
 	SessionUpdate,
 	WriteTextFileParams,
 } from "./acp/types";
 import type { ChatPanel } from "./chatPanel";
-import { OmpAgent, resolveOmpCommand } from "./omp/agent";
+import { OmpAgent, REPLAYED_UPDATES, ompSavedToken, resolveOmpCommand } from "./omp/agent";
+import { addSavedLogins, loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
 	PREFER_EDIT_TOOL_PROMPT,
 	codeOfToolInput,
 	fileChangeWarning,
+	isReadOnlyCommand,
 	parseApprovalMessage,
 	rejectionMessage,
 	staleFileMessage,
@@ -40,6 +45,12 @@ interface QueuedMessage {
 	text: string;
 }
 
+/** How many replies may be followed by an attempt to name an untitled chat. */
+const MAX_NAMING_ATTEMPTS = 3;
+
+/** The extension's own permission option; answered to omp as "allow once". */
+const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
+
 let nextRequestId = 1;
 let nextQueuedId = 1;
 let nextControllerId = 1;
@@ -52,6 +63,17 @@ export class Controller implements vscode.Disposable {
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
 	#stopRequested = false;
+	/** Set by "Always allow read-only commands"; lasts as long as this chat tab. */
+	#allowReadOnly = false;
+	#namingAttempts = 0;
+	/** The omp session whose conversation the chat already shows, so loading it again replays nothing. */
+	#shownSessionId: string | undefined;
+	/** The saved chat being loaded right now, if any. */
+	#loadingSessionId: string | undefined;
+	/** A message waits in the queue for a saved chat to finish loading. */
+	#waitingForLoad = false;
+	/** True while omp is naming the chat, so its reply is not shown. */
+	#naming = false;
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
 	#queue: QueuedMessage[] = [];
@@ -62,6 +84,10 @@ export class Controller implements vscode.Disposable {
 		private readonly chat: ChatPanel,
 		private readonly reviews: ReviewManager,
 		private readonly log: (line: string) => void,
+		/** A saved chat to load on first start; after that (e.g. a restart after a crash) a fresh one opens. */
+		private resumeSessionId?: string,
+		/** The saved chat has no name yet: name it once it has loaded. */
+		private readonly nameOnLoad = false,
 	) {
 		this.#disposables.push(
 			chat.onMessage(message => this.#onChatMessage(message)),
@@ -77,10 +103,15 @@ export class Controller implements vscode.Disposable {
 	 * the next turn, and the chime waits for that one.
 	 */
 	async send(text: string): Promise<void> {
-		if (this.#busy) {
+		// Until a saved chat has loaded (or while it loads again after omp stopped), a message shows as
+		// queued at once and is sent after the replayed conversation; if the chat can't load, it goes back to the input.
+		// One typed while a queued message still waits (e.g. while the loaded chat is named) queues behind it, in order.
+		const loading = this.resumeSessionId !== undefined || this.#waitingForLoad;
+		if (this.#busy || loading) {
 			const id = String(nextQueuedId++);
 			this.#queue.push({ id, text });
 			this.chat.post({ type: "queued", id, text });
+			if (!this.#busy) void this.#sendWhenLoaded();
 			return;
 		}
 		this.#busy = true;
@@ -93,9 +124,15 @@ export class Controller implements vscode.Disposable {
 		let finished = false;
 		try {
 			agent = await this.#ensureAgent();
+			const started = Date.now();
 			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
 			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
-			this.chat.post({ type: "turnEnd", stopReason: result.stopReason });
+			this.chat.post({
+				type: "turnEnd",
+				stopReason: result.stopReason,
+				seconds: Math.round((Date.now() - started) / 1000),
+				model: currentModelName(agent.configOptions),
+			});
 			finished = result.stopReason !== "cancelled" && !this.#stopRequested;
 		} catch (error) {
 			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
@@ -114,6 +151,64 @@ export class Controller implements vscode.Disposable {
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
 			this.chat.notify({ type: "chime" });
 		}
+		if (!finished || !this.#agent || !this.#needsName()) return;
+		this.#busy = true; // a message sent while the chat is being named waits in the queue
+		this.chat.post({ type: "status", state: "naming" });
+		await this.#nameIfUntitled(this.#agent);
+		this.#busy = false;
+		if (!this.#agent) {
+			this.#returnQueueToInput(); // omp exited while naming: queued messages must not start a fresh, empty chat
+			return;
+		}
+		if (this.#queue.length > 0) return this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+		this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
+	}
+
+	/** Send what was queued while a saved chat loaded, once it has; if it can't load, the messages go back to the input. */
+	async #sendWhenLoaded(): Promise<void> {
+		if (this.#waitingForLoad) return;
+		this.#waitingForLoad = true;
+		this.#lastNotice = undefined; // a failure on this attempt is news, even if it reads like the last one
+		try {
+			await this.#ensureAgent();
+		} catch (error) {
+			this.#notice("error", errorText(error));
+			this.#returnQueueToInput();
+			return;
+		} finally {
+			this.#waitingForLoad = false;
+		}
+		if (!this.#busy && this.#queue.length > 0) await this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+	}
+
+	/** The chat has no name yet (from omp, or the saved chat's), and omp may still be asked for one. */
+	#needsName(): boolean {
+		return !this.chat.chatTitle && this.#namingAttempts < MAX_NAMING_ATTEMPTS;
+	}
+
+	/**
+	 * omp names chats only in its terminal app, so the extension asks it to after a reply, until it has a name:
+	 * `/rename` with no title makes omp name the chat from the conversation. Its reply
+	 * ("Session renamed to …") is kept out of the chat.
+	 */
+	async #nameIfUntitled(agent: OmpAgent): Promise<void> {
+		// omp gives no name to a chat with nothing to name yet ("hi"), so it is asked again after later replies.
+		if (!this.#needsName()) return;
+		this.#namingAttempts++;
+		this.#naming = true;
+		try {
+			const result = await agent.prompt("/rename");
+			if (result.stopReason === "cancelled") this.#namingAttempts--; // stopped by the user: asked again after a later reply
+		} catch (error) {
+			this.log(`naming the chat failed: ${errorText(error)}`);
+		} finally {
+			this.#naming = false;
+		}
+	}
+
+	/** The omp session this tab shows (the saved one it will load, before it starts). */
+	get sessionId(): string | undefined {
+		return this.#agent?.sessionId ?? this.resumeSessionId;
 	}
 
 	/** Stop the turn; queued messages go back into the input box rather than being sent. */
@@ -187,8 +282,9 @@ export class Controller implements vscode.Disposable {
 	// ---- agent lifecycle -------------------------------------------------------
 
 	#ensureAgent(): Promise<OmpAgent> {
-		if (this.#agent?.sessionId) return Promise.resolve(this.#agent);
+		// Startup is over only once a loaded chat has been named, so a message never races the naming.
 		if (this.#starting) return this.#starting;
+		if (this.#agent?.sessionId) return Promise.resolve(this.#agent);
 		const starting = this.#startAgent().finally(() => {
 			if (this.#starting === starting) this.#starting = undefined;
 		});
@@ -202,12 +298,18 @@ export class Controller implements vscode.Disposable {
 		const config = vscode.workspace.getConfiguration("omp");
 		const args = [...config.get<string[]>("extraArgs", [])];
 		if (config.get<boolean>("preferEditTool", true)) args.push("--append-system-prompt", PREFER_EDIT_TOOL_PROMPT);
+		const mcp = config.get<boolean>("useMcpServers", true)
+			? loadMcpServers(mcpConfigFiles(folder.uri.fsPath, vscode.workspace.isTrusted))
+			: { servers: [], problems: [] };
+		for (const problem of mcp.problems) this.#notice("warning", problem);
 
 		this.chat.post({ type: "status", state: "starting" });
+		const command = resolveOmpCommand(config.get<string>("path", "omp"));
 		const agent = new OmpAgent({
-			command: resolveOmpCommand(config.get<string>("path", "omp")),
+			command,
 			args,
 			cwd: folder.uri.fsPath,
+			mcpServers: addSavedLogins(mcp.servers, ompSavedToken(command)), // looked up while omp starts
 			handlers: {
 				readTextFile: params => this.#readTextFile(params),
 				writeTextFile: params => this.#writeTextFile(params),
@@ -219,20 +321,48 @@ export class Controller implements vscode.Disposable {
 			},
 		});
 		this.#agent = agent;
+		const loadSessionId = this.resumeSessionId;
+		if (!loadSessionId) this.#forgetTitle(); // a fresh session (e.g. after omp exited) is a new, unnamed chat
+		this.#loadingSessionId = loadSessionId;
 		try {
-			const session = await agent.start();
+			const session = await agent.start(loadSessionId, { replay: loadSessionId !== this.#shownSessionId });
+			this.#loadingSessionId = undefined;
+			this.resumeSessionId = undefined;
+			this.#shownSessionId = session.sessionId;
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
+			if (mcp.servers.length > 0) this.log(`MCP servers passed to omp: ${mcp.servers.map(server => server.name).join(", ")}`);
+			for (const problem of agent.mcpProblems) {
+				const signIn = /\b401\b/.test(problem) ? " To sign in once, run `omp` in a terminal, then `/mcp reauth <server name>`." : "";
+				this.#notice("warning", problem + signIn);
+			}
 			this.chat.post({ type: "config", options: agent.configOptions });
+			if (loadSessionId && this.nameOnLoad) await this.#nameIfUntitled(agent); // an old chat that never got a name
+			if (this.#agent !== agent) {
+				// omp exited (and said so) while naming the chat: the next start loads the saved chat again.
+				this.resumeSessionId = loadSessionId;
+				throw new Error("omp stopped while opening this chat. Send your message again to retry.");
+			}
 			this.chat.post({ type: "status", state: this.#busy ? "busy" : "idle" });
 			return agent;
 		} catch (error) {
+			this.#loadingSessionId = undefined;
 			agent.dispose();
 			if (this.#agent === agent) {
 				this.#agent = undefined;
 				this.chat.post({ type: "status", state: "stopped" });
 			}
+			if (loadSessionId && error instanceof AgentError && /session not found/i.test(error.message)) {
+				// omp no longer has the saved chat (e.g. deleted since it was listed): trying it again would fail the same way.
+				this.resumeSessionId = undefined;
+				throw new Error(`omp could not open this saved chat (${errorText(error)}). Your next message starts a new chat.`);
+			}
 			throw error;
 		}
+	}
+
+	#forgetTitle(): void {
+		this.#namingAttempts = 0;
+		if (this.chat.chatTitle !== undefined) this.chat.setChatTitle(undefined); // also a saved chat's name, set by the tab
 	}
 
 	#stopAgent(reason: string): void {
@@ -313,10 +443,20 @@ export class Controller implements vscode.Disposable {
 	// ---- ACP client handlers --------------------------------------------------
 
 	#onSessionUpdate(update: SessionUpdate): void {
+		// Part of the saved chat is on screen from its first replayed message, so a load that fails
+		// partway and is retried must not replay it again below the part already shown.
+		if (this.#loadingSessionId && REPLAYED_UPDATES.has(update.sessionUpdate)) this.#shownSessionId = this.#loadingSessionId;
 		if (update.sessionUpdate === "config_option_update") {
 			this.chat.post({ type: "config", options: update.configOptions });
 			return;
 		}
+		if (update.sessionUpdate === "session_info_update") {
+			if (typeof update.title === "string" && update.title.trim()) {
+				this.chat.setChatTitle(update.title.trim());
+			}
+			return;
+		}
+		if (this.#naming && update.sessionUpdate === "agent_message_chunk") return; // omp's "Session renamed to …"
 		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
 			const code = codeOfToolInput(update.rawInput);
 			if (update.status === "completed" || update.status === "failed") this.#runningCode.delete(update.toolCallId);
@@ -355,7 +495,7 @@ export class Controller implements vscode.Disposable {
 			await saveText(uri, applyDecisions(outcome.diff, outcome.accepted), current !== undefined);
 		}
 		if (outcome.accepted.every(Boolean)) return;
-		throw new RpcError(-32000, rejectionMessage(displayPath, outcome.diff.hunks, outcome.accepted));
+		throw new RpcError(-32000, rejectionMessage(displayPath, outcome.diff.hunks, outcome.accepted, outcome.notes));
 	}
 
 	/** Current file text, preferring unsaved editor content; undefined if the file does not exist. */
@@ -372,19 +512,50 @@ export class Controller implements vscode.Disposable {
 	async #requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {
 		const command: string | undefined =
 			typeof params.toolCall.rawInput?.command === "string" ? params.toolCall.rawInput.command : undefined;
+		const allowOnce = params.options.find(option => option.kind === "allow_once");
+		const readOnly = command !== undefined && allowOnce !== undefined && isReadOnlyCommand(command);
+		if (readOnly && this.#allowReadOnly) {
+			this.log(`auto-allowed a read-only command: ${command}`);
+			this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId });
+			return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
+		}
+
+		// omp's own "always" answers cover every later shell command in the session: "always allow"
+		// would let writes through and "always reject" would silently refuse even `ls`. Neither is
+		// offered for commands; an "always" that covers read-only commands only is added instead.
+		const options: (PermissionOption & { description?: string })[] = [];
+		for (const option of params.options) {
+			if (command !== undefined && (option.kind === "allow_always" || option.kind === "reject_always")) continue;
+			options.push(option);
+			if (readOnly && option === allowOnce) {
+				options.push({
+					optionId: ALLOW_READ_ONLY,
+					name: "Always allow read-only commands",
+					kind: "allow_always",
+					description: "Allow this and later commands that only read or navigate (cd, ls, cat, grep, find, git log…) in this chat. Anything else still asks.",
+				});
+			}
+		}
 		const warn = vscode.workspace.getConfiguration("omp").get<boolean>("warnOnShellFileChanges", true);
 		const optionId = await this.#ask<string | undefined>(
 			{
 				type: "permission",
+				toolCallId: params.toolCall.toolCallId,
 				title: params.toolCall.title ?? "omp wants to run a tool",
 				kind: params.toolCall.kind,
 				command,
+				// omp's shell can run a command in another folder (its `cwd` option) instead of using `cd`.
+				cwd: typeof params.toolCall.rawInput?.cwd === "string" ? params.toolCall.rawInput.cwd : undefined,
 				warning: command && warn ? fileChangeWarning(command) : undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
-				options: params.options,
+				options,
 			},
 			undefined,
 		);
+		if (optionId === ALLOW_READ_ONLY) {
+			this.#allowReadOnly = true;
+			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
+		}
 		return optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
 	}
 
@@ -452,6 +623,42 @@ async function saveText(uri: vscode.Uri, text: string, exists: boolean): Promise
 	await document.save();
 }
 
+/** The display name of the model omp is using, from its "model" setting. */
+function currentModelName(options: ConfigOption[]): string | undefined {
+	const model = options.find(option => option.category === "model" || option.id === "model");
+	return model?.options.find(choice => choice.value === model.currentValue)?.name;
+}
+
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** The chats omp has saved for the open folder, newest first, asked of a short-lived omp. */
+export async function listSavedChats(log: (line: string) => void): Promise<SavedSession[]> {
+	const folder = vscode.workspace.workspaceFolders?.[0];
+	if (!folder) throw new Error("Open a folder first: omp works inside a project folder.");
+	const config = vscode.workspace.getConfiguration("omp");
+	const refuse = async (): Promise<never> => {
+		throw new RpcError(-32601, "not available while listing chats");
+	};
+	const agent = new OmpAgent({
+		command: resolveOmpCommand(config.get<string>("path", "omp")),
+		args: [...config.get<string[]>("extraArgs", [])],
+		cwd: folder.uri.fsPath,
+		handlers: {
+			readTextFile: refuse,
+			writeTextFile: refuse,
+			requestPermission: refuse,
+			elicit: refuse,
+			onSessionUpdate: () => {},
+			onExit: () => {},
+			log,
+		},
+	});
+	try {
+		await agent.connect();
+		return await agent.listSessions();
+	} finally {
+		agent.dispose();
+	}
 }

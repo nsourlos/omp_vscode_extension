@@ -1,4 +1,5 @@
 /** One chat session's tab. Its messages are replayed whenever the webview (re)loads, e.g. after a window move. */
+import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { mergeChunk } from "./chatHistory";
 
@@ -10,6 +11,8 @@ export class ChatPanel implements vscode.Disposable {
 	#markedIcon: vscode.Uri;
 	#ready = false;
 	#disposed = false;
+	#marked = false;
+	#chatTitle: string | undefined;
 	#history: unknown[] = [];
 	#messages = new vscode.EventEmitter<any>();
 	#activated = new vscode.EventEmitter<void>();
@@ -26,19 +29,23 @@ export class ChatPanel implements vscode.Disposable {
 		private readonly coversAnotherSession: () => boolean,
 	) {
 		const media = vscode.Uri.joinPath(extensionUri, "media");
+		const dist = vscode.Uri.joinPath(extensionUri, "dist");
+		const markdown = vscode.Uri.joinPath(dist, "markdown.js");
 		this.#panel = vscode.window.createWebviewPanel(CHAT_PANEL_TYPE, label, viewColumn, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
-			localResourceRoots: [media],
+			// Folders only: VS Code serves files under these, and a single file listed here is not served.
+			localResourceRoots: [media, dist],
 		});
 		this.#icon = vscode.Uri.joinPath(media, "omp.svg");
 		this.#markedIcon = vscode.Uri.joinPath(media, "omp-done.svg");
 		this.#panel.iconPath = this.#icon;
-		this.#panel.webview.html = chatHtml(this.#panel.webview, media);
+		this.#panel.webview.html = chatHtml(this.#panel.webview, media, markdown);
 		this.#panel.webview.onDidReceiveMessage(message => this.receive(message));
 		this.#panel.onDidChangeViewState(() => {
 			if (this.#panel.visible) {
-				this.#panel.title = label;
+				this.#marked = false;
+				this.#panel.title = this.#tabTitle();
 				this.#panel.iconPath = this.#icon;
 			}
 			if (this.#panel.active) this.#activated.fire();
@@ -107,8 +114,27 @@ export class ChatPanel implements vscode.Disposable {
 	}
 
 	#mark(): void {
-		this.#panel.title = `● ${this.label}`;
+		this.#marked = true;
+		this.#panel.title = `● ${this.#tabTitle()}`;
 		this.#panel.iconPath = this.#markedIcon;
+	}
+
+	/** The chat's name (from omp), shown on the tab after its label. */
+	get chatTitle(): string | undefined {
+		return this.#chatTitle;
+	}
+
+	/** Show the chat's name on the tab, or with undefined, only the tab's label. */
+	setChatTitle(title: string | undefined): void {
+		if (this.#disposed) return;
+		this.#chatTitle = title;
+		this.#panel.title = this.#marked ? `● ${this.#tabTitle()}` : this.#tabTitle();
+	}
+
+	#tabTitle(): string {
+		if (!this.#chatTitle) return this.label;
+		const name = this.#chatTitle.length > 32 ? `${this.#chatTitle.slice(0, 31)}…` : this.#chatTitle;
+		return `${this.label}: ${name}`;
 	}
 
 	dispose(): void {
@@ -116,13 +142,15 @@ export class ChatPanel implements vscode.Disposable {
 	}
 }
 
-function nonce(): string {
-	return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+/** A one-use value that lets only the page's own scripts run (its Content Security Policy). */
+export function nonce(): string {
+	return randomBytes(16).toString("hex");
 }
 
-function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
+function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.Uri): string {
 	const n = nonce();
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.js"));
+	const markdownScript = webview.asWebviewUri(markdown);
 	const style = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.css"));
 	const chime = webview.asWebviewUri(vscode.Uri.joinPath(media, "staplebops-01.mp3"));
 	return `<!DOCTYPE html>
@@ -148,6 +176,7 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri): string {
     <button id="send">Send</button>
   </div>
 </footer>
+<script nonce="${n}" src="${markdownScript}"></script>
 <script nonce="${n}" src="${script}"></script>
 </body>
 </html>`;
