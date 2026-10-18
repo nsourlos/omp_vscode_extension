@@ -7,6 +7,16 @@ export interface TextContent {
 	text: string;
 }
 
+export interface ImageContent {
+	type: "image";
+	/** base64 */
+	data: string;
+	mimeType: string;
+}
+
+/** A block of a prompt (omp advertises `image` among its promptCapabilities). */
+export type ContentBlock = TextContent | ImageContent;
+
 export interface PermissionOption {
 	optionId: string;
 	name: string;

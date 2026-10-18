@@ -633,7 +633,7 @@ exports.run = async function run() {
 			await controller.send(kept);
 			controller.cancel();
 			await turn;
-			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "restoreInput"), [{ type: "restoreInput", text: kept }]);
+			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "restoreInput"), [{ type: "restoreInput", text: kept, attachments: [] }]);
 			assert.ok(!fakeLog().slice(logged).some(e => e.event === "elicitUrl"), "neither queued message reached omp");
 		},
 
@@ -1171,6 +1171,184 @@ exports.run = async function run() {
 			respond(second.panel, otherCard, "allow_once", "Allow once");
 			await other;
 			second.panel.dispose();
+		},
+
+		async "attached files reach omp as text (unsaved changes included), images and paths"() {
+			const panel = api.sessions.all[0].panel;
+			const notes = notificationsOf(panel);
+			const seen = notes.length;
+			fs.writeFileSync(file("att.ts"), "saved\n");
+			fs.writeFileSync(file("shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]));
+			fs.mkdirSync(file("assets"), { recursive: true });
+			const document = await vscode.workspace.openTextDocument(file("att.ts"));
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(document.uri, new vscode.Range(0, 0, 1, 0), "unsaved\n");
+			await vscode.workspace.applyEdit(edit);
+
+			// As the page sends them: an address from the Explorer, a plain path, a folder; then a pasted file.
+			panel.receive({ type: "attachUris", uris: [document.uri.toString(), file("shot.png"), vscode.Uri.file(file("assets")).toString()] });
+			panel.receive({ type: "attachData", name: "notes.txt", data: Buffer.from("pasted text").toString("base64") });
+			const attached = await waitFor(() => {
+				const chips = notes.slice(seen).filter(m => m.type === "attached").map(m => m.attachment);
+				return chips.length === 4 && chips;
+			}, "four attachments");
+			assert.deepEqual(attached.map(chip => [chip.kind, chip.name, chip.path]), [
+				["text", "att.ts", "att.ts"],
+				["image", "shot.png", "shot.png"],
+				["path", "assets", "assets"],
+				["text", "notes.txt", undefined],
+			]);
+			assert.ok(attached[1].thumbnail.startsWith("data:image/png;base64,"));
+
+			const logged = fakeLog().length;
+			panel.receive({ type: "send", text: "look at these", attachments: attached.map(chip => chip.id) });
+			const entry = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "attachments"), "the prompt to reach omp");
+			assert.deepEqual(entry.prompt, [
+				{ type: "text", text: "look at these" },
+				{ type: "text", text: '<attached-file path="att.ts">\nunsaved\n</attached-file>' },
+				{ type: "text", text: '<attached-file path="shot.png" type="image">\nThe image is attached to this message.\n</attached-file>' },
+				{ type: "text", text: '<attached-file path="assets" type="path">\nOnly the path is attached: it is a folder. Read it from disk if you need it.\n</attached-file>' },
+				{ type: "text", text: '<attached-file name="notes.txt">\npasted text\n</attached-file>' },
+				{ type: "image", data: "iVBORw0KGgoH", mimeType: "image/png" },
+			]);
+			await document.save();
+		},
+
+		async "an Excel file dropped from outside VS Code is saved for omp and sent as a document; closing the chat removes the copy"() {
+			const second = await newSession();
+			const notes = notificationsOf(second.panel);
+			await second.panel.whenReady(); // a file can only be dropped on a page that has loaded
+			const bytes = Buffer.from("PK\u0003\u0004 not really a workbook");
+			second.panel.receive({ type: "attachData", name: "WBSO Urenregistratie 2026.xlsx", data: bytes.toString("base64") });
+			const chip = await waitFor(() => notes.find(m => m.type === "attached")?.attachment, "the workbook's chip");
+			assert.equal(chip.kind, "document");
+			assert.ok(path.isAbsolute(chip.path) && chip.path.endsWith(`${path.sep}WBSO Urenregistratie 2026.xlsx`), chip.path);
+			assert.deepEqual(fs.readFileSync(chip.path), bytes, "the copy omp reads is the dropped file");
+			assert.match(chip.note, /a copy is saved for omp/);
+			assert.ok(chip.path.startsWith(second.controller.copiesDir + path.sep), "in the extension's own storage, not a shared temp folder");
+			if (process.platform !== "win32") {
+				assert.equal(fs.statSync(path.dirname(chip.path)).mode & 0o077, 0, "only this user may open the folder");
+				assert.equal(fs.statSync(chip.path).mode & 0o077, 0, "or read the copy");
+			}
+
+			const logged = fakeLog().length;
+			second.panel.receive({ type: "send", text: "add up the hours", attachments: [chip.id] });
+			const entry = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "attachments"), "the prompt to reach omp");
+			assert.deepEqual(entry.prompt.map(block => block.text), [
+				"add up the hours",
+				`<attached-file path="${chip.path}" type="document">\nAn Excel workbook: its text is not included here. Read it with your read tool, which converts it to text, before you answer.\n</attached-file>`,
+			]);
+			second.panel.dispose();
+			await waitFor(() => !fs.existsSync(path.dirname(path.dirname(chip.path))), "the chat's copies to be removed");
+		},
+
+		async "Attach to OMP Chat in the Explorer's menu attaches every selected file"() {
+			const panel = api.sessions.active.panel;
+			const notes = notificationsOf(panel);
+			const seen = notes.length;
+			fs.writeFileSync(file("menu-a.ts"), "a\n");
+			fs.writeFileSync(file("menu-b.ts"), "b\n");
+			const [a, b] = ["menu-a.ts", "menu-b.ts"].map(name => vscode.Uri.file(file(name)));
+			await vscode.commands.executeCommand("omp.attachToChat", a, [a, b]); // as the Explorer calls it: the clicked file, then the selection
+			const chips = await waitFor(() => {
+				const attached = notes.slice(seen).filter(m => m.type === "attached");
+				return attached.length === 2 && attached.map(m => m.attachment);
+			}, "both selected files");
+			assert.deepEqual(chips.map(chip => [chip.kind, chip.path]), [["text", "menu-a.ts"], ["text", "menu-b.ts"]]);
+			for (const chip of chips) panel.receive({ type: "detach", id: chip.id });
+		},
+
+		async "a queued message keeps its attachments, and Stop puts them back on the input"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notes = notificationsOf(panel);
+			fs.writeFileSync(file("queued.md"), "# notes\n");
+			const turn = controller.send(steps({ hang: true }));
+			const seenNotes = notes.length;
+			panel.receive({ type: "attachUris", uris: [file("queued.md")] });
+			const chip = await waitFor(() => notes.slice(seenNotes).find(m => m.type === "attached")?.attachment, "the attachment");
+			const seenPosts = posts.length;
+			panel.receive({ type: "send", text: "then this", attachments: [chip.id] });
+			const queued = await waitFor(() => posts.slice(seenPosts).find(m => m.type === "queued"), "the message to queue");
+			assert.deepEqual(queued.attachments.map(c => c.name), ["queued.md"]);
+
+			controller.cancel();
+			await turn;
+			const restored = await waitFor(() => notes.slice(seenNotes).find(m => m.type === "restoreInput"), "the message to come back");
+			assert.equal(restored.text, "then this");
+			assert.deepEqual(restored.attachments.map(c => c.id), [chip.id]);
+
+			const logged = fakeLog().length;
+			panel.receive({ type: "send", text: "sent again", attachments: [chip.id] });
+			const entry = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "attachments"), "the resent prompt");
+			assert.deepEqual(entry.prompt.map(block => block.text), ["sent again", '<attached-file path="queued.md">\n# notes\n</attached-file>']);
+		},
+
+		async "files each within the budget but over it together: the text that no longer fits goes as its path"() {
+			const panel = api.sessions.all[0].panel;
+			const notes = notificationsOf(panel);
+			const config = vscode.workspace.getConfiguration("omp");
+			await config.update("attachments.maxTextTokens", 30, vscode.ConfigurationTarget.Workspace);
+			try {
+				fs.writeFileSync(file("budget-a.md"), `${"a".repeat(79)}\n`); // 20 tokens each
+				fs.writeFileSync(file("budget-b.md"), `${"b".repeat(79)}\n`);
+				const turn = controller.send(steps({ hang: true }));
+				const chips = [];
+				for (const [name, text] of [["budget-a.md", "first"], ["budget-b.md", "second"]]) {
+					const seen = notes.length;
+					panel.receive({ type: "attachUris", uris: [file(name)] });
+					const chip = await waitFor(() => notes.slice(seen).find(m => m.type === "attached")?.attachment, name);
+					assert.equal(chip.kind, "text", "on its own, each fits");
+					chips.push(chip);
+					panel.receive({ type: "send", text, attachments: [chip.id] }); // queued: the input is empty again
+				}
+				const seen = notes.length;
+				controller.cancel();
+				await turn;
+				const restored = await waitFor(() => notes.slice(seen).find(m => m.type === "restoreInput"), "the queued messages to come back");
+				assert.deepEqual(restored.attachments.map(c => c.id), chips.map(c => c.id));
+
+				const logged = fakeLog().length;
+				panel.receive({ type: "send", text: restored.text, attachments: chips.map(c => c.id) });
+				const entry = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "attachments"), "the prompt to reach omp");
+				assert.deepEqual(entry.prompt.map(block => block.text), [
+					"first\n\nsecond",
+					`<attached-file path="budget-a.md">\n${"a".repeat(79)}\n</attached-file>`,
+					'<attached-file path="budget-b.md" type="path">\nOnly the path is attached: it is too large to include (about 20 tokens). Read it from disk if you need it.\n</attached-file>',
+				]);
+			} finally {
+				await config.update("attachments.maxTextTokens", undefined, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
+		async "an untitled editor too large to include is saved as a copy and sent as its path"() {
+			const panel = api.sessions.all[0].panel;
+			const notes = notificationsOf(panel);
+			const config = vscode.workspace.getConfiguration("omp");
+			await config.update("attachments.maxTextTokens", 10, vscode.ConfigurationTarget.Workspace);
+			try {
+				const document = await vscode.workspace.openTextDocument({ content: "log line\n".repeat(20) });
+				const seen = notes.length;
+				panel.receive({ type: "attachUris", uris: [document.uri.toString()] });
+				const chip = await waitFor(() => notes.slice(seen).find(m => m.type === "attached")?.attachment, "the editor's chip");
+				assert.equal(chip.kind, "path");
+				assert.ok(path.isAbsolute(chip.path), chip.path);
+				assert.equal(fs.readFileSync(chip.path, "utf8"), document.getText(), "the copy holds the editor's text");
+				assert.match(chip.note, /a copy is saved for omp/);
+				panel.receive({ type: "detach", id: chip.id });
+			} finally {
+				await config.update("attachments.maxTextTokens", undefined, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
+		async "a file pasted just before the chat closes leaves no copy behind"() {
+			const second = await newSession();
+			await second.panel.whenReady();
+			const copies = second.controller.copiesDir;
+			second.panel.receive({ type: "attachData", name: "late.xlsx", data: Buffer.from("PK\u0003\u0004").toString("base64") });
+			second.panel.dispose();
+			await sleep(1000);
+			assert.equal(fs.existsSync(copies), false);
 		},
 
 		async "moving a chat into its own window keeps the session working"() {

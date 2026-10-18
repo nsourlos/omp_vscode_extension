@@ -23,3 +23,19 @@ export {
 export { applyDecisions, describeHunk, diffFile, splitLines } from "./review/hunks";
 export { RpcError } from "./acp/rpc";
 export { mergeChunk } from "./chatHistory";
+export {
+	attachedChipOf,
+	chipOf,
+	decodeText,
+	estimateTokens,
+	imageMimeType,
+	isChipThumbnail,
+	prepareAttachment,
+	promptBlocks,
+	removeStaleCopies,
+	textTokenBudget,
+	wrapAttachment,
+	DEFAULT_TEXT_TOKEN_BUDGET,
+	MAX_IMAGE_BYTES,
+	MAX_TEXT_BYTES,
+} from "./attachments";

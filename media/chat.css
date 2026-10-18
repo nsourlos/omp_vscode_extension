@@ -71,6 +71,78 @@ body {
 	padding: 0 6px;
 }
 
+.queued-files {
+	opacity: 0.8;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 40%;
+}
+
+/* Files attached to the message being typed, or to a sent one. */
+#attachments,
+.msg.user .attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+#attachments[hidden],
+.attachments[hidden] {
+	display: none;
+}
+
+.msg.user .attachments {
+	margin-top: 4px;
+	white-space: normal;
+}
+
+.attachment {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 100%;
+	padding: 2px 6px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 4px;
+	background: var(--vscode-input-background);
+	font-size: 0.9em;
+}
+
+.attachment img {
+	height: 28px;
+	max-width: 56px;
+	object-fit: cover;
+	border-radius: 2px;
+}
+
+.attachment-name {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.attachment-path .attachment-name {
+	font-style: italic;
+}
+
+.attachment button {
+	padding: 0 4px;
+	font-size: 0.85em;
+}
+
+#attach {
+	padding: 2px 8px;
+	font-weight: bold;
+}
+
+body.dropping footer {
+	outline: 2px dashed var(--vscode-focusBorder);
+	outline-offset: -4px;
+	background: var(--vscode-list-dropBackground, transparent);
+}
+
 footer {
 	border-top: 1px solid var(--vscode-panel-border);
 	padding: 8px 12px;
@@ -297,8 +369,16 @@ details.thought {
 }
 
 details.thought summary,
-.tool-output summary {
+.tool-output summary,
+.image-description summary {
 	cursor: pointer;
+}
+
+.image-description {
+	margin: 6px 0;
+	opacity: 0.7;
+	font-size: 0.9em;
+	white-space: pre-wrap;
 }
 
 .approval-code pre {

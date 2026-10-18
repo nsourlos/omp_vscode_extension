@@ -11,6 +11,8 @@
 	const settingsEl = document.getElementById("settings");
 	const activityEl = document.getElementById("activity");
 	const queueEl = document.getElementById("queue");
+	const attachmentsEl = document.getElementById("attachments");
+	const attachButton = document.getElementById("attach");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -20,9 +22,11 @@
 	const MAX_OUTPUT = 6000;
 
 	let assistant = null; // { el, text }
-	let replayedUser = null; // a user message omp is replaying from a saved chat
-	let replayedUserId; // its messageId: a chunk with another one starts the next message
+	// A user message omp is replaying from a saved chat: { node, raw, images, messageId }. A chunk with
+	// another messageId starts the next message.
+	let replayedUser = null;
 	let thought = null; // { el, pre }
+	let drafts = []; // chips of the files attached in the input, not sent yet
 	let planEl = null;
 	let commands = [];
 	const tools = new Map();
@@ -108,15 +112,237 @@
 			.join("\n");
 	}
 
-	/** One of the user's messages, with an edit button that puts its text back in the input. */
-	function userMessage(text) {
+	/** One of the user's messages, with its attachments and an edit button that puts its text back in the input. */
+	function userMessage(text, attachments = []) {
 		const node = el("div", "msg user");
-		const body = node.appendChild(el("span", "", text));
+		const body = node.appendChild(el("span", "user-text", text));
+		node.appendChild(el("div", "attachments"));
 		const edit = node.appendChild(el("button", "edit secondary"));
 		edit.title = "Edit: put this message back in the input to change and send again";
 		edit.setAttribute("aria-label", "Edit this message");
 		edit.addEventListener("click", () => restoreInput(body.textContent));
+		showAttachments(node, attachments);
 		return node;
+	}
+
+	// ---------- attachments ----------
+	const ATTACHMENT_ICONS = { image: "🖼️", text: "📄", document: "📑", path: "🔗" };
+	const IMAGE_TYPE = /^image\/[\w.+-]+$/;
+	/** omp shrinks images to about 500 KB, so a replayed one is small; this keeps a stray huge one off the page. */
+	const MAX_THUMBNAIL_CHARS = 3 * 1024 * 1024;
+
+	/** A file attached to a message: its thumbnail or icon and its name; its path and how it is sent show on hover. */
+	function attachmentChip(chip, onRemove) {
+		const node = el("span", `attachment attachment-${chip.kind}`);
+		node.title = [chip.path || chip.name, chip.note].filter(Boolean).join("\n");
+		if (typeof chip.thumbnail === "string" && chip.thumbnail.startsWith("data:image/")) {
+			const image = node.appendChild(el("img"));
+			image.src = chip.thumbnail;
+			image.alt = "";
+		} else {
+			node.appendChild(el("span", "attachment-icon", ATTACHMENT_ICONS[chip.kind] || "📎"));
+		}
+		node.appendChild(el("span", "attachment-name", chip.name));
+		if (onRemove) {
+			const remove = node.appendChild(el("button", "secondary", "✕"));
+			remove.title = "Remove this file";
+			remove.setAttribute("aria-label", `Remove ${chip.name}`);
+			remove.addEventListener("click", onRemove);
+		}
+		return node;
+	}
+
+	function showAttachments(message, chips) {
+		const files = message.querySelector(".attachments");
+		files.textContent = "";
+		for (const chip of chips) files.appendChild(attachmentChip(chip));
+		files.hidden = chips.length === 0;
+	}
+
+	/** An image omp replays from a saved chat, as a chip. */
+	function imageChip(content) {
+		if (typeof content.data !== "string" || !IMAGE_TYPE.test(content.mimeType || "")) return null;
+		const chip = { kind: "image", name: "image" };
+		if (content.data.length <= MAX_THUMBNAIL_CHARS) chip.thumbnail = `data:${content.mimeType};base64,${content.data}`;
+		return chip;
+	}
+
+	/**
+	 * A replayed message's own text, and the files the extension attached after it in
+	 * <attached-file> wrappers (written by wrapAttachment in src/attachments.ts). A wrapper ends
+	 * at a closing tag that ends the message or comes just before the next wrapper, so a file's
+	 * text can hold anything else.
+	 */
+	function splitAttachments(raw) {
+		const opening = /<attached-file (path|name)="([^"]*)"(?: type="(image|document|path)")?>\n/y;
+		const CLOSE = "\n</attached-file>";
+		const NEXT = "\n\n<attached-file ";
+		const files = [];
+		let start = 0;
+		if (!raw.startsWith("<attached-file ")) {
+			const found = raw.indexOf(NEXT);
+			if (found < 0) return { text: raw, files };
+			start = found + 2;
+		}
+		const end = raw.trimEnd().length;
+		let at = start;
+		while (at < end) {
+			opening.lastIndex = at;
+			const match = opening.exec(raw);
+			if (!match) break;
+			const value = unescapeAttribute(match[2]);
+			const path = match[1] === "path" ? value : undefined;
+			files.push({ kind: match[3] || "text", name: path ? path.split(/[\\/]/).pop() || path : value, path });
+			let next = -1;
+			for (let close = raw.indexOf(CLOSE, opening.lastIndex - 1); close >= 0; close = raw.indexOf(CLOSE, close + 1)) {
+				const after = close + CLOSE.length;
+				if (after >= end) next = end;
+				else if (raw.startsWith(NEXT, after)) next = after + 2;
+				if (next >= 0) break;
+			}
+			if (next < 0) break;
+			at = next;
+		}
+		return files.length ? { text: raw.slice(0, start).trimEnd(), files } : { text: raw, files };
+	}
+
+	function unescapeAttribute(value) {
+		return value.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+	}
+
+	/**
+	 * omp's description of an attached image, which it gives a model that can't read images (and keeps
+	 * hidden in its own app), replayed like a message of the user's.
+	 */
+	const IMAGE_DESCRIPTION = /^(?:\s*<image path="local:\/\/[^"]*">\n[\s\S]*?\n<\/image>)+\s*$/;
+
+	/** Draw a replayed message again from everything received of it so far; each image goes on its file's chip. */
+	function fillReplayed(message) {
+		if (!message.images.length && IMAGE_DESCRIPTION.test(message.raw)) {
+			message.node.className = "image-description";
+			message.node.textContent = "";
+			const details = message.node.appendChild(el("details"));
+			details.appendChild(el("summary", "", "omp described the image for the model, which can't read images"));
+			const descriptions = [...message.raw.matchAll(/<image path="[^"]*">\n([\s\S]*?)\n<\/image>/g)].map(match => match[1].trim());
+			details.appendChild(el("div", "", descriptions.join("\n\n")));
+			return;
+		}
+		if (!message.node.querySelector(".user-text")) {
+			// Taken for a description until more of it came: a message of the user's after all.
+			const node = userMessage("");
+			message.node.replaceWith(node);
+			message.node = node;
+		}
+		const { text, files } = splitAttachments(message.raw);
+		message.node.querySelector(".user-text").textContent = text;
+		let next = 0;
+		const chips = files.map(file => (file.kind === "image" && message.images[next] ? { ...file, thumbnail: message.images[next++].thumbnail } : file));
+		chips.push(...message.images.slice(next)); // images with no wrapper, e.g. pasted into omp's terminal app
+		showAttachments(message.node, chips);
+	}
+
+	function renderDrafts() {
+		attachmentsEl.textContent = "";
+		for (const chip of drafts) {
+			attachmentsEl.appendChild(
+				attachmentChip(chip, () => {
+					drafts = drafts.filter(draft => draft !== chip);
+					vscode.postMessage({ type: "detach", id: chip.id });
+					renderDrafts();
+				}),
+			);
+		}
+		attachmentsEl.hidden = drafts.length === 0;
+	}
+
+	/** Chips are 28 px high (and up to 56 wide): twice that keeps a thumbnail sharp on a high-density screen. */
+	const THUMBNAIL_HEIGHT = 56;
+	const THUMBNAIL_WIDTH = 112;
+
+	/**
+	 * A just-attached image comes whole: make a small copy for its chip and hand it to the extension,
+	 * which puts it on the sent or queued message, so the page's history keeps (and replays on every
+	 * reload) a few KB instead of the image.
+	 */
+	function shrinkThumbnail(chip) {
+		if (typeof chip.thumbnail !== "string" || !chip.thumbnail.startsWith("data:image/")) return;
+		const done = new Promise(resolve => {
+			const image = new Image();
+			image.onload = () => {
+				const scale = Math.min(1, THUMBNAIL_HEIGHT / image.naturalHeight, THUMBNAIL_WIDTH / image.naturalWidth);
+				const canvas = document.createElement("canvas");
+				canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+				canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+				const context = canvas.getContext("2d");
+				if (context) {
+					context.drawImage(image, 0, 0, canvas.width, canvas.height);
+					chip.thumbnail = canvas.toDataURL("image/png");
+					if (drafts.includes(chip)) renderDrafts();
+					vscode.postMessage({ type: "thumbnail", id: chip.id, data: chip.thumbnail });
+				}
+				resolve();
+			};
+			image.onerror = () => resolve();
+			image.src = chip.thumbnail;
+		});
+		pendingThumbnails.set(chip.id, done);
+		void done.then(() => pendingThumbnails.delete(chip.id));
+	}
+
+	/** Thumbnails still being made, by attachment id: a message waits for its images' (sendWhenThumbnailed). */
+	const pendingThumbnails = new Map();
+	/** The longest a message waits for them: past that, its chip shows an icon instead. */
+	const MAX_THUMBNAIL_WAIT_MS = 1000;
+	let waitingSends = null; // messages waiting for thumbnails (and a Stop pressed after them), posted in order
+
+	/** Send the message once its images' thumbnails have reached the extension, so the sent message's chips show them. */
+	function sendWhenThumbnailed(message) {
+		const pending = message.attachments.map(id => pendingThumbnails.get(id)).filter(Boolean);
+		if (pending.length === 0) return afterWaitingSends(message);
+		const timeout = new Promise(resolve => setTimeout(resolve, MAX_THUMBNAIL_WAIT_MS));
+		afterWaitingSends(message, Promise.race([Promise.all(pending), timeout]));
+	}
+
+	/**
+	 * Post the message once `ready` resolves, and after any messages still waiting for thumbnails, so
+	 * none overtakes another; at once when there is nothing to wait for.
+	 */
+	function afterWaitingSends(message, ready) {
+		if (!waitingSends && !ready) {
+			vscode.postMessage(message);
+			return;
+		}
+		const posted = (waitingSends || Promise.resolve()).then(() => ready).then(() => vscode.postMessage(message));
+		waitingSends = posted;
+		void posted.then(() => {
+			if (waitingSends === posted) waitingSends = null;
+		});
+	}
+
+	/** The largest file the page reads itself (as big as an image may be): its location is unknown, so it can't go as a path. */
+	const MAX_PAGE_FILE_BYTES = 20 * 1024 * 1024;
+
+	/** Pasted files, or ones dropped from outside VS Code: read here and handed to the extension. */
+	function attachFiles(files) {
+		for (const file of files) {
+			const name = file.name || "pasted file";
+			if (file.size > MAX_PAGE_FILE_BYTES) {
+				localNotice("warning", `${name} is too large to attach from here (over 20 MB). Drop it from VS Code's Explorer instead, or attach it with +, so omp gets its path.`);
+				continue;
+			}
+			const reader = new FileReader();
+			reader.onload = () => {
+				const url = String(reader.result);
+				vscode.postMessage({ type: "attachData", name, data: url.slice(url.indexOf(",") + 1) });
+			};
+			reader.onerror = () => localNotice("warning", `Could not read ${name} (a folder can only be attached from VS Code's Explorer).`);
+			reader.readAsDataURL(file);
+		}
+	}
+
+	function localNotice(level, text) {
+		breakFlow();
+		append(el("div", `notice ${level}`, text));
 	}
 
 	function duration(seconds) {
@@ -268,18 +494,22 @@
 	function onUpdate(update) {
 		switch (update.sessionUpdate) {
 			case "user_message_chunk": {
-				// Only sent when a saved chat is loaded: omp replays the conversation so far.
+				// Only sent when a saved chat is loaded: omp replays the conversation so far, a text or image block at a time.
 				const text = update.content?.type === "text" ? update.content.text : "";
-				if (!text) return;
+				const image = update.content?.type === "image" ? imageChip(update.content) : null;
+				if (!text && !image) return;
 				assistant = null;
 				thought = null;
-				if (replayedUser && update.messageId !== replayedUserId) replayedUser = null; // two messages in a row (the same rule as the stored history)
+				// Two messages in a row (the same rule as the stored history).
+				if (replayedUser && update.messageId !== replayedUser.messageId) replayedUser = null;
 				if (!replayedUser) {
 					planEl = null;
-					replayedUser = append(userMessage("")).firstChild;
-					replayedUserId = update.messageId;
+					replayedUser = { node: append(userMessage("")), raw: "", images: [], messageId: update.messageId };
 				}
-				keepScrolled(() => (replayedUser.textContent += text));
+				if (image) replayedUser.images.push(image);
+				else replayedUser.raw += text;
+				const message = replayedUser;
+				keepScrolled(() => fillReplayed(message));
 				return;
 			}
 			case "agent_message_chunk": {
@@ -623,6 +853,11 @@
 		item.dataset.id = msg.id;
 		item.appendChild(el("span", "queued-label", "Queued"));
 		item.appendChild(el("span", "queued-text", msg.text));
+		const files = msg.attachments || [];
+		if (files.length) {
+			const names = item.appendChild(el("span", "queued-files", `📎 ${files.map(file => file.name).join(", ")}`));
+			names.title = files.map(file => file.path || file.name).join("\n");
+		}
 		const remove = item.appendChild(el("button", "secondary", "✕"));
 		remove.title = "Remove from the queue";
 		remove.addEventListener("click", () => vscode.postMessage({ type: "unqueue", id: msg.id }));
@@ -632,8 +867,13 @@
 		for (const item of [...queueEl.children]) if (ids.includes(item.dataset.id)) item.remove();
 	}
 
-	function restoreInput(text) {
-		input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+	/** Put text (and its attachments) back in the input, ahead of what is there. */
+	function restoreInput(text, attachments = []) {
+		if (text) input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+		if (attachments.length) {
+			drafts = [...attachments, ...drafts];
+			renderDrafts();
+		}
 		input.focus();
 	}
 
@@ -654,7 +894,12 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				append(userMessage(msg.text));
+				append(userMessage(msg.text, msg.attachments));
+				return;
+			case "attached":
+				drafts.push(msg.attachment);
+				renderDrafts();
+				shrinkThumbnail(msg.attachment);
 				return;
 			case "update": return onUpdate(msg.update);
 			case "permission": return onPermission(msg);
@@ -669,7 +914,7 @@
 			case "chime": return chime();
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
-			case "restoreInput": return restoreInput(msg.text);
+			case "restoreInput": return restoreInput(msg.text, msg.attachments);
 			case "notice":
 				breakFlow();
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));
@@ -714,13 +959,99 @@
 		suggestions.hidden = hits.length === 0;
 	}
 
+	/** The text starts with a slash command: one omp listed, or, before it has, any /word (a path has more slashes). */
+	function startsWithCommand(text) {
+		const match = /^\/([^\s/]+)(?:\s|$)/.exec(text);
+		return Boolean(match) && (commands.length === 0 || commands.some(command => command.name === match[1]));
+	}
+
 	function send() {
 		const text = input.value.trim();
-		if (!text) return;
-		vscode.postMessage({ type: "send", text });
+		if (!text && drafts.length === 0) return;
+		if (drafts.length > 0 && startsWithCommand(text)) {
+			// omp would read the files' text as the command's arguments (/compact's instructions, say).
+			localNotice("warning", "A slash command can't take attached files: send the command on its own, and the files in a message of their own.");
+			return;
+		}
+		sendWhenThumbnailed({ type: "send", text, attachments: drafts.map(chip => chip.id) });
 		input.value = "";
+		drafts = [];
+		renderDrafts();
 		updateSuggestions();
 	}
+
+	attachButton.addEventListener("click", () => vscode.postMessage({ type: "pickFiles" }));
+
+	/**
+	 * Excel, Word and Keynote copy a picture of the selection along with its text, as plain and rich
+	 * text: the text is what was meant. A file copied in Finder comes with only its name, as plain text.
+	 */
+	function isRichTextCopy(data) {
+		const types = [...(data.types || [])];
+		return Boolean(data.getData?.("text/plain")?.trim()) && (types.includes("text/html") || types.includes("text/rtf"));
+	}
+
+	input.addEventListener("paste", event => {
+		const files = [...(event.clipboardData?.files || [])];
+		if (files.length === 0 || isRichTextCopy(event.clipboardData)) return; // text pastes as usual
+		event.preventDefault();
+		attachFiles(files);
+	});
+
+	// Files dropped on the page. VS Code hands a drop to a page in an editor tab only while Shift is held.
+	// From the Explorer or a tab the drop carries the files' addresses; from outside VS Code, the files themselves.
+	const URI_LIST_TYPES = ["application/vnd.code.uri-list", "text/uri-list"];
+	const JSON_LIST_TYPES = ["resourceurls", "codefiles"]; // VS Code's own: addresses, and paths
+
+	function isFileDrag(event) {
+		const types = [...(event.dataTransfer?.types || [])].map(type => type.toLowerCase());
+		return types.includes("files") || [...URI_LIST_TYPES, ...JSON_LIST_TYPES].some(type => types.includes(type));
+	}
+
+	function droppedUris(data) {
+		for (const type of URI_LIST_TYPES) {
+			const list = data.getData(type);
+			if (list) return list.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith("#"));
+		}
+		for (const type of JSON_LIST_TYPES) {
+			try {
+				const list = JSON.parse(data.getData(type) || "[]");
+				if (Array.isArray(list) && list.length) return list.filter(item => typeof item === "string");
+			} catch {
+				// not a list: try the next kind
+			}
+		}
+		return [];
+	}
+
+	let dragDepth = 0; // dragenter/dragleave fire for every element crossed
+	function endDrag() {
+		dragDepth = 0;
+		document.body.classList.remove("dropping");
+	}
+	document.addEventListener("dragenter", event => {
+		if (!isFileDrag(event)) return;
+		event.preventDefault();
+		dragDepth++;
+		document.body.classList.add("dropping");
+	});
+	document.addEventListener("dragover", event => {
+		if (!isFileDrag(event)) return;
+		event.preventDefault(); // allows the drop
+		event.dataTransfer.dropEffect = "copy";
+	});
+	document.addEventListener("dragleave", event => {
+		if (isFileDrag(event) && --dragDepth <= 0) endDrag();
+	});
+	document.addEventListener("drop", event => {
+		endDrag();
+		if (!isFileDrag(event)) return; // dragged text drops into the input as usual
+		event.preventDefault();
+		const uris = droppedUris(event.dataTransfer);
+		if (uris.length) vscode.postMessage({ type: "attachUris", uris });
+		else attachFiles([...event.dataTransfer.files]);
+		input.focus();
+	});
 
 	input.addEventListener("input", updateSuggestions);
 	input.addEventListener("keydown", event => {
@@ -730,7 +1061,8 @@
 		}
 	});
 	sendButton.addEventListener("click", send);
-	stopButton.addEventListener("click", () => vscode.postMessage({ type: "cancel" }));
+	// After a message still waiting for its thumbnails: Stop then puts it back in the input, as for any queued message.
+	stopButton.addEventListener("click", () => afterWaitingSends({ type: "cancel" }));
 
 	vscode.postMessage({ type: "ready" });
 })();
