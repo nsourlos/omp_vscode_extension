@@ -25,6 +25,8 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 		private readonly extensionUri: vscode.Uri,
 		private readonly reviews: ReviewManager,
 		private readonly output: vscode.OutputChannel,
+		/** Where chats save copies of attached files that have no location of their own. */
+		private readonly copiesRoot: string,
 	) {}
 
 	get all(): readonly Session[] {
@@ -57,8 +59,13 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 
 	/** Bring the last-used session's tab to the front, or open a first session. */
 	open(): Session {
-		const session = this.#active ?? this.create();
+		if (this.#active) {
+			this.#active.panel.reveal();
+			return this.#active;
+		}
+		const session = this.create();
 		session.panel.reveal();
+		void session.controller.start(); // so the slash commands are there before the first message
 		return session;
 	}
 
@@ -114,6 +121,7 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 			panel,
 			this.reviews,
 			line => this.output.appendLine(`[${label}] ${line}`),
+			this.copiesRoot,
 			saved?.sessionId,
 			saved !== undefined && !title,
 		);

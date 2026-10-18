@@ -3,9 +3,21 @@
  * Every permission/approval omp asks for becomes a card in the chat; every file
  * write becomes a hunk-by-hunk review before anything is saved.
  */
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, posix, relative } from "node:path";
 import * as vscode from "vscode";
 import { AgentError, RpcError } from "./acp/rpc";
+import {
+	MAX_READ_BYTES,
+	attachedChipOf,
+	chipOf,
+	isChipThumbnail,
+	prepareAttachment,
+	promptBlocks,
+	textTokenBudget,
+	type Attachment,
+	type AttachmentSource,
+} from "./attachments";
 import type {
 	ConfigOption,
 	ElicitationParams,
@@ -43,6 +55,7 @@ interface PendingRequest {
 interface QueuedMessage {
 	id: string;
 	text: string;
+	attachments: Attachment[];
 }
 
 /** How many replies may be followed by an attempt to name an untitled chat. */
@@ -53,6 +66,7 @@ const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
 
 let nextRequestId = 1;
 let nextQueuedId = 1;
+let nextAttachmentId = 1;
 let nextControllerId = 1;
 
 /** Runs one chat session: its own omp process, cards and review queue. */
@@ -77,6 +91,15 @@ export class Controller implements vscode.Disposable {
 	/** Code of the tool calls still running (eval), so a bare "Allow tool: browser" can show what it will do. */
 	#runningCode = new Map<string, string>();
 	#queue: QueuedMessage[] = [];
+	/** Files attached in the input and not sent yet, by id; the chat page shows their chips. */
+	#drafts = new Map<string, Attachment>();
+	/** The file being attached; the next waits for it (#attach). */
+	#attaching: Promise<void> = Promise.resolve();
+	/** Copies of attached files that came with no location, for omp to read; removed when the chat closes. */
+	readonly copiesDir: string;
+	#disposed = false;
+	/** omp's last word on its context window, which sets how much text a message may attach. */
+	#context: { used: number; size: number } | undefined;
 	#lastNotice: string | undefined;
 	#disposables: vscode.Disposable[] = [];
 
@@ -84,11 +107,14 @@ export class Controller implements vscode.Disposable {
 		private readonly chat: ChatPanel,
 		private readonly reviews: ReviewManager,
 		private readonly log: (line: string) => void,
+		/** The folder of every chat's copies, private to this user (see removeStaleCopies). */
+		copiesRoot: string,
 		/** A saved chat to load on first start; after that (e.g. a restart after a crash) a fresh one opens. */
 		private resumeSessionId?: string,
 		/** The saved chat has no name yet: name it once it has loaded. */
 		private readonly nameOnLoad = false,
 	) {
+		this.copiesDir = join(copiesRoot, `${process.pid}-${this.id}`);
 		this.#disposables.push(
 			chat.onMessage(message => this.#onChatMessage(message)),
 			reviews.onDidChangeReview(info => {
@@ -102,15 +128,15 @@ export class Controller implements vscode.Disposable {
 	 * cancels the running turn when a second prompt arrives; queued messages go together as
 	 * the next turn, and the chime waits for that one.
 	 */
-	async send(text: string): Promise<void> {
+	async send(text: string, attachments: Attachment[] = []): Promise<void> {
 		// Until a saved chat has loaded (or while it loads again after omp stopped), a message shows as
 		// queued at once and is sent after the replayed conversation; if the chat can't load, it goes back to the input.
 		// One typed while a queued message still waits (e.g. while the loaded chat is named) queues behind it, in order.
 		const loading = this.resumeSessionId !== undefined || this.#waitingForLoad;
 		if (this.#busy || loading) {
 			const id = String(nextQueuedId++);
-			this.#queue.push({ id, text });
-			this.chat.post({ type: "queued", id, text });
+			this.#queue.push({ id, text, attachments });
+			this.chat.post({ type: "queued", id, text, attachments: attachments.map(chipOf) });
 			if (!this.#busy) void this.#sendWhenLoaded();
 			return;
 		}
@@ -118,7 +144,8 @@ export class Controller implements vscode.Disposable {
 		this.#stopRequested = false;
 		this.#lastNotice = undefined;
 		this.#runningCode.clear();
-		this.chat.post({ type: "user", text });
+		attachments = await this.#withinTextBudget(attachments);
+		this.chat.post({ type: "user", text, attachments: attachments.map(chipOf) });
 		this.chat.post({ type: "status", state: "busy" });
 		let agent: OmpAgent | undefined;
 		let finished = false;
@@ -126,7 +153,7 @@ export class Controller implements vscode.Disposable {
 			agent = await this.#ensureAgent();
 			const started = Date.now();
 			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
-			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(text);
+			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(promptBlocks(text, attachments));
 			this.chat.post({
 				type: "turnEnd",
 				stopReason: result.stopReason,
@@ -142,10 +169,7 @@ export class Controller implements vscode.Disposable {
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
 		// Stop empties the queue, so anything queued after a Stop was typed to replace the stopped turn.
-		if ((finished || this.#stopRequested) && this.#queue.length > 0) {
-			const next = this.#takeNextTurn();
-			return this.send(next.map(message => message.text).join("\n\n"));
-		}
+		if ((finished || this.#stopRequested) && this.#queue.length > 0) return this.#sendTurn(this.#takeNextTurn());
 		this.#returnQueueToInput();
 		this.chat.markFinished();
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
@@ -160,8 +184,13 @@ export class Controller implements vscode.Disposable {
 			this.#returnQueueToInput(); // omp exited while naming: queued messages must not start a fresh, empty chat
 			return;
 		}
-		if (this.#queue.length > 0) return this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+		if (this.#queue.length > 0) return this.#sendTurn(this.#takeNextTurn());
 		this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
+	}
+
+	/** Send queued messages as one turn: their texts together, and all their attachments. */
+	#sendTurn(messages: QueuedMessage[]): Promise<void> {
+		return this.send(joinTexts(messages), messages.flatMap(message => message.attachments));
 	}
 
 	/** Send what was queued while a saved chat loaded, once it has; if it can't load, the messages go back to the input. */
@@ -178,7 +207,7 @@ export class Controller implements vscode.Disposable {
 		} finally {
 			this.#waitingForLoad = false;
 		}
-		if (!this.#busy && this.#queue.length > 0) await this.send(this.#takeNextTurn().map(message => message.text).join("\n\n"));
+		if (!this.#busy && this.#queue.length > 0) await this.#sendTurn(this.#takeNextTurn());
 	}
 
 	/** The chat has no name yet (from omp, or the saved chat's), and omp may still be asked for one. */
@@ -247,9 +276,160 @@ export class Controller implements vscode.Disposable {
 		this.chat.post({ type: "dequeued", ids: messages.map(message => message.id) });
 	}
 
+	/** Put the queued messages back in the input, their attachments back on it. */
 	#returnQueueToInput(): void {
 		const queued = this.#takeQueue();
-		if (queued.length > 0) this.chat.notify({ type: "restoreInput", text: queued.map(message => message.text).join("\n\n") });
+		if (queued.length === 0) return;
+		const attachments = queued.flatMap(message => message.attachments);
+		for (const attachment of attachments) this.#drafts.set(attachment.id, attachment);
+		this.chat.notify({ type: "restoreInput", text: joinTexts(queued), attachments: attachments.map(chipOf) });
+	}
+
+	/** The attachments with these ids (from the chat page), taken out of the input's drafts. */
+	#takeDrafts(ids: unknown): Attachment[] {
+		if (!Array.isArray(ids)) return [];
+		const taken: Attachment[] = [];
+		for (const id of ids) {
+			const attachment = this.#drafts.get(id);
+			if (!attachment) continue;
+			this.#drafts.delete(id);
+			taken.push(attachment);
+		}
+		return taken;
+	}
+
+	async #pickFiles(): Promise<void> {
+		const uris = await vscode.window.showOpenDialog({
+			canSelectMany: true,
+			canSelectFiles: true,
+			canSelectFolders: false,
+			defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+			openLabel: "Attach",
+			title: "Attach files to your message",
+		});
+		for (const uri of uris ?? []) void this.#attach(() => this.#sourceOf(uri));
+	}
+
+	/** Attach files from outside the chat page (the Explorer's menu), once the page can show their chips. */
+	attachFiles(uris: readonly vscode.Uri[]): void {
+		const loaded = this.chat.whenReady();
+		for (const uri of uris) {
+			void this.#attach(async () => {
+				await loaded;
+				return this.#sourceOf(uri);
+			});
+		}
+	}
+
+	/** Files dropped from the Explorer or an editor tab: their addresses, or (some drags) plain paths. */
+	#attachUris(values: unknown): void {
+		if (!Array.isArray(values)) return;
+		for (const value of values) {
+			if (typeof value === "string" && value.trim()) void this.#attach(() => this.#sourceOf(toUri(value.trim())));
+		}
+	}
+
+	/**
+	 * Read the file and add it to the input's attachments; one that can't be attached is reported in the chat.
+	 * Files are attached one after another, so their chips keep the order they came in and share the text budget right.
+	 */
+	#attach(read: () => Promise<AttachmentSource>): Promise<void> {
+		this.#attaching = this.#attaching
+			.then(() => this.#attachNow(read))
+			.catch(error => this.log(`attaching a file failed: ${errorText(error)}`)); // the next file is still attached
+		return this.#attaching;
+	}
+
+	async #attachNow(read: () => Promise<AttachmentSource>): Promise<void> {
+		if (this.#disposed) return;
+		let source: AttachmentSource;
+		try {
+			source = await read();
+		} catch (error) {
+			if (!this.#disposed) this.#notice("warning", `Could not attach a file: ${errorText(error)}`);
+			return;
+		}
+		if (this.#disposed) return;
+		let tokensLeft = this.#textTokenBudget();
+		for (const draft of this.#drafts.values()) tokensLeft -= draft.tokens ?? 0; // the message's text attachments share one budget
+		const id = `a${nextAttachmentId++}`;
+		let attachment = prepareAttachment(id, source, tokensLeft);
+		if ("error" in attachment && attachment.needsPath && (source.bytes || source.text !== undefined)) {
+			// No location (pasted, dropped from outside VS Code, or an untitled editor), and it can only go as a path: saved where omp can read it.
+			const bytes = source.bytes ?? Buffer.from(source.text ?? "");
+			try {
+				const saved = prepareAttachment(id, { ...source, path: await this.#saveCopy(id, source.name, bytes) }, tokensLeft);
+				attachment = "error" in saved ? saved : { ...saved, savedCopy: true };
+			} catch (error) {
+				if (!this.#disposed) this.#notice("warning", `Could not attach ${source.name}: saving a copy for omp failed (${errorText(error)}).`);
+				return;
+			}
+		}
+		if ("error" in attachment) {
+			this.#notice("warning", attachment.error);
+			return;
+		}
+		this.#drafts.set(attachment.id, attachment);
+		this.chat.notify({ type: "attached", attachment: attachedChipOf(attachment) });
+	}
+
+	/** How many tokens of text one message may attach now. */
+	#textTokenBudget(): number {
+		return textTokenBudget(this.#context, vscode.workspace.getConfiguration("omp").get<number>("attachments.maxTextTokens", 0));
+	}
+
+	/**
+	 * The attachments, with the text that no longer fits the budget sent as its path instead (a copy
+	 * saved for text with no file of its own). Queued messages' files were each measured alone, and
+	 * the context may have filled since they were attached.
+	 */
+	async #withinTextBudget(attachments: Attachment[]): Promise<Attachment[]> {
+		let tokensLeft = this.#textTokenBudget();
+		const fitted: Attachment[] = [];
+		for (const attachment of attachments) {
+			const tokens = attachment.tokens ?? 0;
+			if (attachment.kind !== "text" || tokens <= tokensLeft) {
+				tokensLeft -= tokens;
+				fitted.push(attachment);
+				continue;
+			}
+			try {
+				const path = attachment.path ?? (await this.#saveCopy(attachment.id, attachment.name, Buffer.from(attachment.text ?? "")));
+				const asPath = prepareAttachment(attachment.id, { name: attachment.name, path, text: attachment.text }, tokensLeft);
+				fitted.push("error" in asPath ? attachment : { ...asPath, savedCopy: !attachment.path });
+			} catch (error) {
+				this.log(`sending ${attachment.name}'s text over the budget: saving a copy for omp failed (${errorText(error)})`);
+				fitted.push(attachment);
+			}
+		}
+		return fitted;
+	}
+
+	/** Save a file that has no location of its own where omp can read it, until the chat closes. */
+	async #saveCopy(id: string, name: string, bytes: Uint8Array): Promise<string> {
+		if (this.#disposed) throw new Error("the chat is closed");
+		const copy = join(this.copiesDir, id, safeFileName(name));
+		// Only this user may open them: pasted screenshots and text can be private.
+		await mkdir(dirname(copy), { recursive: true, mode: 0o700 });
+		await writeFile(copy, bytes, { mode: 0o600 });
+		if (this.#disposed) {
+			// Closed while saving: dispose() may have removed the folder before this copy was written.
+			await rm(this.copiesDir, { recursive: true, force: true });
+			throw new Error("the chat is closed");
+		}
+		return copy;
+	}
+
+	/** A file to attach: an open editor's text (unsaved changes included), else what is on disk. */
+	async #sourceOf(uri: vscode.Uri): Promise<AttachmentSource> {
+		const name = posix.basename(uri.path) || uri.toString();
+		const path = uri.scheme === "file" ? promptPath(uri) : undefined;
+		const open = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === uri.toString());
+		if (open) return { name, path, text: open.getText() };
+		const stat = await vscode.workspace.fs.stat(uri);
+		if (stat.type & vscode.FileType.Directory) return { name, path, folder: true };
+		if (stat.size > MAX_READ_BYTES) return { name, path, size: stat.size };
+		return { name, path, bytes: await vscode.workspace.fs.readFile(uri) };
 	}
 
 	#unqueue(id: string): void {
@@ -274,8 +454,10 @@ export class Controller implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.#disposed = true;
 		this.#queue = [];
 		this.#stopAgent("Chat closed");
+		void rm(this.copiesDir, { recursive: true, force: true }).catch(() => {});
 		for (const disposable of this.#disposables) disposable.dispose();
 	}
 
@@ -321,6 +503,7 @@ export class Controller implements vscode.Disposable {
 			},
 		});
 		this.#agent = agent;
+		this.#context = undefined; // a new session's context (or a saved one's) is reported afresh
 		const loadSessionId = this.resumeSessionId;
 		if (!loadSessionId) this.#forgetTitle(); // a fresh session (e.g. after omp exited) is a new, unnamed chat
 		this.#loadingSessionId = loadSessionId;
@@ -394,9 +577,37 @@ export class Controller implements vscode.Disposable {
 
 	#onChatMessage(message: any): void {
 		switch (message?.type) {
-			case "send":
-				if (typeof message.text === "string" && message.text.trim()) void this.send(message.text.trim());
+			case "send": {
+				const text = typeof message.text === "string" ? message.text.trim() : "";
+				const attachments = this.#takeDrafts(message.attachments);
+				if (text || attachments.length > 0) void this.send(text, attachments);
 				break;
+			}
+			case "ready":
+				this.#drafts.clear(); // a page that (re)loads starts with an empty input
+				break;
+			case "pickFiles":
+				void this.#pickFiles();
+				break;
+			case "attachUris":
+				this.#attachUris(message.uris);
+				break;
+			case "attachData":
+				// Pasted, or dropped from outside VS Code: the page read the file, but its location is unknown.
+				if (typeof message.name === "string" && typeof message.data === "string") {
+					const bytes = Buffer.from(message.data, "base64");
+					void this.#attach(async () => ({ name: message.name, bytes }));
+				}
+				break;
+			case "detach":
+				this.#drafts.delete(message.id);
+				break;
+			case "thumbnail": {
+				// The page's small copy of an attached image, for the chips of the message it goes with.
+				const attachment = this.#drafts.get(message.id) ?? this.#queue.flatMap(queued => queued.attachments).find(queued => queued.id === message.id);
+				if (attachment?.kind === "image" && isChipThumbnail(message.data)) attachment.thumbnail = message.data;
+				break;
+			}
 			case "cancel":
 				this.cancel();
 				break;
@@ -455,6 +666,9 @@ export class Controller implements vscode.Disposable {
 				this.chat.setChatTitle(update.title.trim());
 			}
 			return;
+		}
+		if (update.sessionUpdate === "usage_update" && typeof update.used === "number" && typeof update.size === "number" && update.size > 0) {
+			this.#context = { used: update.used, size: update.size };
 		}
 		if (this.#naming && update.sessionUpdate === "agent_message_chunk") return; // omp's "Session renamed to …"
 		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
@@ -631,6 +845,35 @@ function currentModelName(options: ConfigOption[]): string | undefined {
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** Queued messages' texts as one message. */
+function joinTexts(messages: QueuedMessage[]): string {
+	return messages
+		.map(message => message.text)
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+/** A file name from the chat page, safe as one file in a folder of ours. */
+function safeFileName(name: string): string {
+	const base = posix.basename(name.replace(/\\/g, "/")).replace(/[\0-\x1f<>:"|?*]/g, "_");
+	return base && base !== "." && base !== ".." ? base : "attachment";
+}
+
+/** A dropped address (file:///…, untitled:…) or a plain path (/…, C:\…). */
+function toUri(value: string): vscode.Uri {
+	// A scheme has two letters or more, so a Windows drive (C:) is a path.
+	return /^[a-z][\w+.-]+:/i.test(value) ? vscode.Uri.parse(value, true) : vscode.Uri.file(value);
+}
+
+/** The path omp is given for a file: relative to the folder omp runs in when inside it, else absolute. */
+function promptPath(uri: vscode.Uri): string {
+	const folder = vscode.workspace.workspaceFolders?.[0];
+	if (!folder) return uri.fsPath;
+	const inside = relative(folder.uri.fsPath, uri.fsPath);
+	const outside = !inside || isAbsolute(inside) || inside === ".." || /^\.\.[\\/]/.test(inside);
+	return outside ? uri.fsPath : inside.split("\\").join("/");
 }
 
 /** The chats omp has saved for the open folder, newest first, asked of a short-lived omp. */

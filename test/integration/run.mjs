@@ -4,6 +4,7 @@
 // Set VSCODE_PATH to an installed VS Code executable to skip the download.
 // Usage: npm run build && node test/integration/run.mjs [offline]
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,15 @@ writeFileSync(
 
 const offline = process.argv[2] === "offline";
 const fakeLog = join(workspace, ".fake-omp.log");
+// The real suite drags files onto the chat through the window's DevTools protocol, on a free port.
+const cdpPort = offline
+	? undefined
+	: await new Promise(resolvePort => {
+			const server = createServer().listen(0, "127.0.0.1", () => {
+				const { port } = server.address();
+				server.close(() => resolvePort(port));
+			});
+		});
 if (offline) {
 	mkdirSync(join(workspace, ".vscode"));
 	writeFileSync(
@@ -35,8 +45,15 @@ try {
 		...(process.env.VSCODE_PATH ? { vscodeExecutablePath: process.env.VSCODE_PATH } : {}),
 		extensionDevelopmentPath: root,
 		extensionTestsPath: join(root, "test", "integration", offline ? "offline.js" : "suite.js"),
-		extensionTestsEnv: { OMP_FAKE_LOG: fakeLog },
-		launchArgs: [workspace, "--user-data-dir", userData, "--disable-workspace-trust", "--disable-extensions"],
+		extensionTestsEnv: { OMP_FAKE_LOG: fakeLog, ...(cdpPort ? { OMP_CDP_PORT: String(cdpPort) } : {}) },
+		launchArgs: [
+			workspace,
+			"--user-data-dir",
+			userData,
+			"--disable-workspace-trust",
+			"--disable-extensions",
+			...(cdpPort ? [`--remote-debugging-port=${cdpPort}`] : []),
+		],
 	});
 } catch (error) {
 	console.error("Integration test failed:", error);

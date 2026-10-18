@@ -194,7 +194,13 @@ async function handle(message) {
 			return send({ id: message.id, result: {} });
 		}
 		case "session/prompt": {
-			const text = message.params.prompt[0].text;
+			// A message with attachments (a text block per file, an image block per image) is logged whole and ends the turn.
+			const blocks = message.params.prompt;
+			if (blocks.length > 1 || blocks[0].text?.startsWith("<attached-file")) {
+				record({ event: "attachments", prompt: blocks });
+				return send({ id: message.id, result: { stopReason: "end_turn" } });
+			}
+			const text = blocks[0].text;
 			// Naming attempts stay out of the log (except a real rename), so "the latest event" stays the turn's own.
 			if (text !== "/rename") record({ event: "prompt", promptSessionId: message.params.sessionId });
 			if (text === "/rename") {

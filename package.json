@@ -80,6 +80,12 @@
         "icon": "$(link-external)"
       },
       {
+        "command": "omp.attachToChat",
+        "title": "Attach to OMP Chat",
+        "category": "OMP",
+        "icon": "$(attach)"
+      },
+      {
         "command": "omp.addMcpServer",
         "title": "Add MCP Server…",
         "category": "OMP",
@@ -162,6 +168,19 @@
       "diffEditor.codeLens": true
     },
     "menus": {
+      "explorer/context": [
+        {
+          "command": "omp.attachToChat",
+          "group": "7_omp@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "omp.attachToChat",
+          "when": "resourceScheme == file || resourceScheme == untitled",
+          "group": "7_omp@1"
+        }
+      ],
       "editor/context": [
         {
           "command": "omp.review.acceptAtCursor",
@@ -276,6 +295,12 @@
           "type": "boolean",
           "default": true,
           "description": "Give omp the MCP servers from ~/.omp/agent/mcp.json, the project's .omp/mcp.json and the project's .mcp.json (omp ignores its own config inside an editor). Add servers of omp's own with \"OMP: Add MCP Server…\". Servers that fail to start are left out, with a warning in the chat."
+        },
+        "omp.attachments.maxTextTokens": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "How much attached text one message may include, in tokens (about 4 characters each). `0` means half of the context omp has left (100,000 tokens before omp has reported its context). A file over the limit, or over 5 MB, is sent as its path, which omp can read itself."
         },
         "omp.soundOnFinish": {
           "type": "boolean",

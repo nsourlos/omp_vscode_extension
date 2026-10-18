@@ -17,8 +17,9 @@ const BODY = `<div id="log"></div>
 <div id="queue"></div>
 <footer>
   <div id="settings"></div>
+  <div id="attachments" hidden></div>
   <textarea id="input"></textarea>
-  <div class="row"><span id="status"></span><span id="usage"></span><button id="stop" hidden></button><button id="send"></button></div>
+  <div class="row"><button id="attach"></button><span id="status"></span><span id="usage"></span><button id="stop" hidden></button><button id="send"></button></div>
 </footer>`;
 
 const windows = [];
@@ -593,4 +594,337 @@ test("a chime that fails for another reason is reported, not thrown", async () =
 	chat.deliver({ type: "chime" });
 	await new Promise(resolve => setImmediate(resolve));
 	assert.match(warnings[0], /could not play the finish chime/);
+});
+
+// ---------- attachments ----------
+const { wrapAttachment } = require("../dist/core.js");
+
+const chip = (id, kind, name, extra = {}) => ({ id, kind, name, ...extra });
+const chipNames = container => [...container.querySelectorAll(".attachment-name")].map(node => node.textContent);
+
+test("+ asks the extension for the file picker", () => {
+	const chat = openChat();
+	chat.window.document.getElementById("attach").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "pickFiles" });
+});
+
+/** jsdom decodes no images and draws no canvas: stand-ins with the sizes a real one would have. */
+function drawsImages(window, size = { width: 1600, height: 400 }) {
+	window.Image = class {
+		naturalWidth = size.width;
+		naturalHeight = size.height;
+		set src(value) {
+			queueMicrotask(() => (size.broken ? this.onerror() : this.onload()));
+		}
+	};
+	window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {} });
+	window.HTMLCanvasElement.prototype.toDataURL = function () {
+		return `data:image/png;base64,${this.width}x${this.height}`;
+	};
+}
+
+test("attached files show above the input, can be removed, and go with the message", async () => {
+	const chat = openChat(window => drawsImages(window, { broken: true })); // so the image's thumbnail is done with at once
+	const doc = chat.window.document;
+	const tray = doc.getElementById("attachments");
+	assert.equal(tray.hidden, true, "hidden while nothing is attached");
+	chat.deliver(
+		{ type: "attached", attachment: chip("a1", "text", "parser.ts", { path: "src/parser.ts", note: "Its text is sent (about 120 tokens)." }) },
+		{ type: "attached", attachment: chip("a2", "image", "shot.png", { thumbnail: "data:image/png;base64,AAA" }) },
+		{ type: "attached", attachment: chip("a3", "path", "huge.log") },
+	);
+	assert.equal(tray.hidden, false);
+	assert.deepEqual(chipNames(tray), ["parser.ts", "shot.png", "huge.log"]);
+	assert.equal(tray.querySelector(".attachment").title, "src/parser.ts\nIts text is sent (about 120 tokens).", "the path and how it is sent, on hover");
+	assert.equal(tray.querySelector("img").getAttribute("src"), "data:image/png;base64,AAA");
+
+	tray.querySelectorAll(".attachment button")[2].click();
+	assert.deepEqual(chat.posted.at(-1), { type: "detach", id: "a3" });
+	assert.deepEqual(chipNames(tray), ["parser.ts", "shot.png"]);
+
+	await new Promise(resolve => setImmediate(resolve));
+	doc.getElementById("input").value = "why does this fail?";
+	doc.getElementById("send").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "send", text: "why does this fail?", attachments: ["a1", "a2"] });
+	assert.equal(tray.hidden, true, "sent: the input is empty again");
+});
+
+test("a message can be only attachments", () => {
+	const chat = openChat();
+	chat.deliver({ type: "attached", attachment: chip("a1", "image", "shot.png") });
+	chat.window.document.getElementById("send").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "send", text: "", attachments: ["a1"] });
+	chat.window.document.getElementById("send").click();
+	assert.equal(chat.posted.filter(message => message.type === "send").length, 1, "nothing to send the second time");
+});
+
+test("a sent message shows its attachments; editing it puts back only its text", () => {
+	const chat = openChat();
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "user", text: "look", attachments: [chip("a1", "text", "a.ts"), chip("a2", "image", "b.png")] });
+	const message = chat.log.querySelector(".msg.user");
+	assert.equal(message.querySelector(".user-text").textContent, "look");
+	assert.deepEqual(chipNames(message), ["a.ts", "b.png"]);
+	assert.equal(message.querySelector(".attachment button"), null, "a sent file can't be removed");
+	message.querySelector("button.edit").click();
+	assert.equal(input.value, "look");
+});
+
+test("queued messages list their attachments, and Stop puts them back on the input", () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	chat.deliver({ type: "queued", id: "1", text: "and this", attachments: [chip("a1", "text", "a.ts", { path: "src/a.ts" })] });
+	assert.equal(doc.querySelector(".queued-files").textContent, "📎 a.ts");
+	assert.equal(doc.querySelector(".queued-files").title, "src/a.ts");
+	doc.getElementById("input").value = "draft";
+	chat.deliver({ type: "attached", attachment: chip("a2", "image", "b.png") });
+	chat.deliver({ type: "dequeued", ids: ["1"] }, { type: "restoreInput", text: "", attachments: [chip("a1", "text", "a.ts")] });
+	assert.equal(doc.getElementById("input").value, "draft", "no text to put back: the draft is left as it was");
+	assert.deepEqual(chipNames(doc.getElementById("attachments")), ["a.ts", "b.png"], "put back ahead of what was attached");
+	doc.getElementById("send").click();
+	assert.deepEqual(chat.posted.at(-1).attachments, ["a1", "a2"]);
+});
+
+test("a replayed message shows its text and its attached files as chips, each image on its file", async () => {
+	const chat = openChat();
+	const user = (content, messageId = "m1") => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content, messageId } });
+	const files = [
+		{ kind: "text", name: "parser.ts", path: "src/parser.ts", text: "x\n\n</attached-file>\ny" },
+		{ kind: "image", name: "shot.png", path: "docs/shot.png", data: "AAA", mimeType: "image/png" },
+		{ kind: "path", name: "big \"q\".log", path: 'logs/big "q".log', reason: "too large (9.0 MB)" },
+		{ kind: "image", name: "image.png", data: "BBB", mimeType: "image/jpeg" },
+	];
+	// As omp stores and replays it: the text blocks joined, then each image.
+	const text = ["Fix the parser\n\nplease", ...files.map(wrapAttachment)].join("\n\n");
+	chat.deliver(
+		user({ type: "text", text: text.slice(0, 40) }),
+		user({ type: "text", text: text.slice(40) }),
+		user({ type: "image", data: "AAA", mimeType: "image/png" }),
+		user({ type: "image", data: "BBB", mimeType: "image/jpeg" }),
+		user({ type: "image", data: "CCC", mimeType: "image/gif" }),
+		chunk("Done."),
+	);
+	await chat.nextFrame();
+	const message = chat.log.querySelector(".msg.user");
+	assert.equal(message.querySelector(".user-text").textContent, "Fix the parser\n\nplease");
+	assert.deepEqual(chipNames(message), ["parser.ts", "shot.png", 'big "q".log', "image.png", "image"], "a closing tag inside a file's text doesn't end it");
+	const chips = [...message.querySelectorAll(".attachment")];
+	assert.equal(chips[0].title, "src/parser.ts");
+	assert.deepEqual(chips.map(node => node.querySelector("img")?.getAttribute("src")), [
+		undefined,
+		"data:image/png;base64,AAA",
+		undefined,
+		"data:image/jpeg;base64,BBB",
+		"data:image/gif;base64,CCC",
+	], "the images in order, and one with no file of its own on a chip of its own");
+	message.querySelector("button.edit").click();
+	assert.equal(chat.window.document.getElementById("input").value, "Fix the parser\n\nplease");
+});
+
+test("text that only looks like an attachment stays the message's text", () => {
+	const chat = openChat();
+	const text = "What does <attached-file path=\"x\"> mean?\n\n<attached-file broken";
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+	assert.equal(chat.log.querySelector(".user-text").textContent, text);
+	assert.equal(chat.log.querySelector(".msg.user .attachments").hidden, true);
+});
+
+/** A drag event the page can read, as jsdom has no DataTransfer. */
+function dragEvent(window, type, data = {}, files = []) {
+	const event = new window.Event(type, { bubbles: true, cancelable: true });
+	const types = [...Object.keys(data), ...(files.length ? ["Files"] : [])];
+	Object.defineProperty(event, "dataTransfer", { value: { types, files, getData: key => data[key.toLowerCase()] ?? "", dropEffect: "none" } });
+	return event;
+}
+
+test("files dropped from the Explorer go to the extension by address; the drop target lights up while dragging", () => {
+	const chat = openChat();
+	const { window } = chat;
+	const body = window.document.body;
+	body.dispatchEvent(dragEvent(window, "dragenter", { "text/uri-list": "" }));
+	assert.ok(body.classList.contains("dropping"));
+	const over = dragEvent(window, "dragover", { "text/uri-list": "" });
+	body.dispatchEvent(over);
+	assert.ok(over.defaultPrevented, "the page accepts the drop");
+	const drop = dragEvent(window, "drop", { "application/vnd.code.uri-list": "file:///repo/a.ts\r\n# a comment\r\nfile:///repo/b%20c.ts\r\n" });
+	body.dispatchEvent(drop);
+	assert.ok(drop.defaultPrevented);
+	assert.equal(body.classList.contains("dropping"), false);
+	assert.deepEqual(chat.posted.at(-1), { type: "attachUris", uris: ["file:///repo/a.ts", "file:///repo/b%20c.ts"] });
+
+	body.dispatchEvent(dragEvent(window, "drop", { codefiles: JSON.stringify(["/repo/c.ts"]) }));
+	assert.deepEqual(chat.posted.at(-1), { type: "attachUris", uris: ["/repo/c.ts"] }, "VS Code's own list of paths");
+});
+
+test("dragged text is left to drop into the input", () => {
+	const chat = openChat();
+	const drop = dragEvent(chat.window, "drop", { "text/plain": "hello" });
+	chat.window.document.body.dispatchEvent(drop);
+	assert.equal(drop.defaultPrevented, false);
+	assert.deepEqual(chat.posted.filter(message => message.type.startsWith("attach")), []);
+});
+
+/** Wait for the page's FileReader to post what it read. */
+async function postedAttachData(chat, count = 1) {
+	for (let i = 0; i < 100 && chat.posted.filter(message => message.type === "attachData").length < count; i++) await new Promise(resolve => setTimeout(resolve, 5));
+	return chat.posted.filter(message => message.type === "attachData");
+}
+
+test("files dropped from outside VS Code, and pasted images, are read by the page and handed over", async () => {
+	const chat = openChat();
+	const { window } = chat;
+	const file = new window.File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], "shot.png", { type: "image/png" });
+	window.document.body.dispatchEvent(dragEvent(window, "drop", {}, [file]));
+	assert.deepEqual(await postedAttachData(chat), [{ type: "attachData", name: "shot.png", data: "iVBORw==" }]);
+
+	const input = window.document.getElementById("input");
+	const paste = new window.Event("paste", { bubbles: true, cancelable: true });
+	Object.defineProperty(paste, "clipboardData", { value: { files: [new window.File(["hi"], "image.png", { type: "image/png" })] } });
+	input.dispatchEvent(paste);
+	assert.ok(paste.defaultPrevented);
+	assert.deepEqual((await postedAttachData(chat, 2))[1], { type: "attachData", name: "image.png", data: "aGk=" });
+
+	const textPaste = new window.Event("paste", { bubbles: true, cancelable: true });
+	Object.defineProperty(textPaste, "clipboardData", { value: { files: [] } });
+	input.dispatchEvent(textPaste);
+	assert.equal(textPaste.defaultPrevented, false, "a text paste is left alone");
+});
+
+/** A paste event the page can read, as jsdom has no DataTransfer. */
+function pasteEvent(window, data, files) {
+	const event = new window.Event("paste", { bubbles: true, cancelable: true });
+	const types = [...Object.keys(data), ...(files.length ? ["Files"] : [])];
+	Object.defineProperty(event, "clipboardData", { value: { types, files, getData: type => data[type] ?? "" } });
+	return event;
+}
+
+test("cells copied from Excel paste as their text, not as the picture of them that comes along", async () => {
+	const chat = openChat();
+	const { window } = chat;
+	const input = window.document.getElementById("input");
+	const picture = () => [new window.File(["png"], "image.png", { type: "image/png" })];
+	const excel = pasteEvent(window, { "text/plain": "Hours\t8\nDays\t5", "text/html": "<table>…</table>" }, picture());
+	input.dispatchEvent(excel);
+	assert.equal(excel.defaultPrevented, false, "the text pastes as usual");
+	const keynote = pasteEvent(window, { "text/plain": "Slide title", "text/rtf": "{\\rtf1 Slide title}" }, picture());
+	input.dispatchEvent(keynote);
+	assert.equal(keynote.defaultPrevented, false);
+
+	const finder = pasteEvent(window, { "text/plain": "report.pdf" }, [new window.File(["%PDF"], "report.pdf")]);
+	input.dispatchEvent(finder);
+	assert.ok(finder.defaultPrevented, "a file copied in Finder comes with only its name: it is attached");
+	const copiedImage = pasteEvent(window, { "text/html": '<img src="https://example.com/a.png">' }, picture());
+	input.dispatchEvent(copiedImage);
+	assert.ok(copiedImage.defaultPrevented, "an image copied from a web page has no plain text: it is attached");
+	assert.deepEqual((await postedAttachData(chat, 2)).map(message => message.name), ["report.pdf", "image.png"]);
+});
+
+test("a slash command can't be sent with attached files; the command and the files stay in the input", () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	chat.deliver({ type: "attached", attachment: chip("a1", "text", "notes.md") });
+	input.value = "/compact";
+	doc.getElementById("send").click();
+	assert.equal(chat.posted.filter(message => message.type === "send").length, 0);
+	assert.match(chat.log.querySelector(".notice.warning").textContent, /slash command can't take attached files/);
+	assert.equal(input.value, "/compact");
+	assert.deepEqual(chipNames(doc.getElementById("attachments")), ["notes.md"]);
+
+	input.value = "/Users/me/notes.md is the file";
+	doc.getElementById("send").click();
+	assert.equal(chat.posted.at(-1).type, "send", "a path is no command");
+
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "compact" }] } },
+		{ type: "attached", attachment: chip("a2", "text", "notes.md") },
+	);
+	input.value = "/tmp is full, why?";
+	doc.getElementById("send").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "send", text: "/tmp is full, why?", attachments: ["a2"] }, "once omp has listed its commands, only those count");
+});
+
+test("an attached image's chip gets a small thumbnail, which the extension keeps for the sent message", async () => {
+	const chat = openChat(window => drawsImages(window));
+	chat.deliver({ type: "attached", attachment: chip("a1", "image", "shot.png", { thumbnail: "data:image/png;base64,WHOLE" }) });
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(chat.posted.at(-1), { type: "thumbnail", id: "a1", data: "data:image/png;base64,112x28" }, "no wider than twice the chip's 56 px");
+	assert.equal(chat.window.document.querySelector("#attachments img").getAttribute("src"), "data:image/png;base64,112x28");
+});
+
+test("a message sent right after an image is attached waits for its thumbnail, so the sent chip shows it", async () => {
+	const chat = openChat(window => drawsImages(window));
+	const doc = chat.window.document;
+	chat.deliver({ type: "attached", attachment: chip("a1", "image", "shot.png", { thumbnail: "data:image/png;base64,WHOLE" }) });
+	doc.getElementById("input").value = "what is this?";
+	doc.getElementById("send").click();
+	assert.equal(doc.getElementById("input").value, "", "the input empties at once");
+	doc.getElementById("input").value = "and this";
+	doc.getElementById("send").click(); // nothing of its own to wait for, but sent after the first
+	assert.deepEqual(chat.posted.filter(message => message.type === "send"), [], "not sent before the thumbnail");
+	await new Promise(resolve => setImmediate(resolve));
+	const sent = chat.posted.filter(message => message.type === "thumbnail" || message.type === "send");
+	assert.deepEqual(sent.map(message => message.text ?? message.type), ["thumbnail", "what is this?", "and this"]);
+});
+
+test("Stop pressed while a message waits for its thumbnail reaches the extension after it, so the message goes back to the input", async () => {
+	const chat = openChat(window => drawsImages(window));
+	const doc = chat.window.document;
+	chat.deliver({ type: "attached", attachment: chip("a1", "image", "shot.png", { thumbnail: "data:image/png;base64,WHOLE" }) });
+	doc.getElementById("input").value = "what is this?";
+	doc.getElementById("send").click();
+	doc.getElementById("stop").click();
+	assert.deepEqual(chat.posted.filter(message => message.type === "cancel"), [], "held behind the message");
+	await new Promise(resolve => setImmediate(resolve));
+	const order = chat.posted.filter(message => ["thumbnail", "send", "cancel"].includes(message.type)).map(message => message.type);
+	assert.deepEqual(order, ["thumbnail", "send", "cancel"]);
+
+	doc.getElementById("stop").click();
+	assert.equal(chat.posted.at(-1).type, "cancel", "with nothing waiting, Stop goes at once");
+});
+
+test("a file too large for the page to read is not read, and the user is told how to attach it", () => {
+	const chat = openChat();
+	const { window } = chat;
+	const huge = { name: "video.mov", size: 21 * 1024 * 1024 };
+	window.document.body.dispatchEvent(dragEvent(window, "drop", {}, [huge]));
+	assert.match(chat.log.querySelector(".notice.warning").textContent, /video\.mov is too large to attach from here .*attach it with \+/);
+	assert.deepEqual(chat.posted.filter(message => message.type === "attachData"), []);
+});
+
+test("omp's description of an image, replayed for a model that can't read images, is a note and not a message of the user's", async () => {
+	const chat = openChat();
+	const user = (content, messageId) => ({ type: "update", update: { sessionUpdate: "user_message_chunk", content, messageId } });
+	// As omp 18.6.1 replayed a chat whose model reads no images.
+	chat.deliver(
+		user({ type: "text", text: '<image path="local://image-45b8.webp">\nA solid red rectangle occupies the entire frame.\n</image>' }, "d1"),
+		user({ type: "text", text: 'What colour?\n\n<attached-file path="swatch.png" type="image">\nThe image is attached to this message.\n</attached-file>' }, "m1"),
+		user({ type: "image", data: "UklGRg==", mimeType: "image/webp" }, "m1"),
+	);
+	const note = chat.log.querySelector(".image-description");
+	assert.match(note.querySelector("summary").textContent, /described the image for the model/);
+	assert.equal(note.querySelector("div").textContent, "A solid red rectangle occupies the entire frame.");
+	const messages = chat.log.querySelectorAll(".msg.user");
+	assert.equal(messages.length, 1, "only the user's own message is a message");
+	assert.equal(messages[0].querySelector(".user-text").textContent, "What colour?");
+	assert.equal(messages[0].querySelector("img").getAttribute("src"), "data:image/webp;base64,UklGRg==");
+});
+
+test("an empty attached file and one ending in a newline both replay as chips", () => {
+	const chat = openChat();
+	const text = ['<attached-file path="empty.txt">\n</attached-file>', '<attached-file path="a.txt">\none\n</attached-file>'].join("\n\n");
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+	assert.deepEqual(chipNames(chat.log.querySelector(".msg.user")), ["empty.txt", "a.txt"]);
+	assert.equal(chat.log.querySelector(".user-text").textContent, "");
+});
+
+test("a replayed document attachment shows as a document chip", () => {
+	const chat = openChat();
+	const text = `Summarise it\n\n${wrapAttachment({ id: "1", kind: "document", name: "plan.docx", path: "/tmp/x/a1/plan.docx", reason: "a Word document" })}`;
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+	const chip = chat.log.querySelector(".msg.user .attachment");
+	assert.ok(chip.classList.contains("attachment-document"));
+	assert.equal(chip.querySelector(".attachment-icon").textContent, "📑");
+	assert.equal(chip.querySelector(".attachment-name").textContent, "plan.docx");
+	assert.equal(chat.log.querySelector(".user-text").textContent, "Summarise it");
 });

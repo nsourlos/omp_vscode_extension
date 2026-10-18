@@ -12,6 +12,7 @@ import { failedMcpServers } from "./mcp";
 import {
 	PROTOCOL_VERSION,
 	type ConfigOption,
+	type ContentBlock,
 	type McpServer,
 	type SavedSession,
 	type ElicitationParams,
@@ -235,10 +236,10 @@ export class OmpAgent {
 		return rpc;
 	}
 
-	prompt(text: string): Promise<PromptResult> {
+	prompt(prompt: string | ContentBlock[]): Promise<PromptResult> {
 		return this.#requireRpc().request<PromptResult>("session/prompt", {
 			sessionId: this.#requireSession(),
-			prompt: [{ type: "text", text }],
+			prompt: typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt,
 		});
 	}
 

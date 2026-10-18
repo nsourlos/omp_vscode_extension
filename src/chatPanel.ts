@@ -14,6 +14,7 @@ export class ChatPanel implements vscode.Disposable {
 	#marked = false;
 	#chatTitle: string | undefined;
 	#history: unknown[] = [];
+	#readyWaiters: (() => void)[] = [];
 	#messages = new vscode.EventEmitter<any>();
 	#activated = new vscode.EventEmitter<void>();
 	readonly onMessage = this.#messages.event;
@@ -76,8 +77,14 @@ export class ChatPanel implements vscode.Disposable {
 			this.#ready = true;
 			this.#postSound();
 			for (const item of this.#history) void this.#panel.webview.postMessage(item);
+			for (const resolve of this.#readyWaiters.splice(0)) resolve(); // run after the "ready" listeners below
 		}
 		this.#messages.fire(message);
+	}
+
+	/** Resolves once the page has loaded and can be posted to. */
+	whenReady(): Promise<void> {
+		return this.#ready ? Promise.resolve() : new Promise(resolve => this.#readyWaiters.push(resolve));
 	}
 
 	/** Tell the page whether to load the finish sound: on every (re)load, and when the setting changes. */
@@ -157,7 +164,7 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.U
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; media-src ${webview.cspSource}; script-src 'nonce-${n}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; media-src ${webview.cspSource}; img-src data:; script-src 'nonce-${n}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${style}">
 <title>OMP</title>
@@ -168,8 +175,10 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.U
 <div id="queue"></div>
 <footer>
   <div id="settings"></div>
+  <div id="attachments" hidden></div>
   <textarea id="input" rows="3" placeholder="Ask omp… (Enter to send, Shift+Enter for a new line)"></textarea>
   <div class="row">
+    <button id="attach" class="secondary" title="Attach files. You can also hold Shift and drop files here, or paste an image." aria-label="Attach files">+</button>
     <span id="status">Not started</span>
     <span id="usage"></span>
     <button id="stop" class="secondary" hidden>Stop</button>
