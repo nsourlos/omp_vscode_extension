@@ -245,6 +245,41 @@ button:disabled {
 	position: relative;
 }
 
+/* A long message shows its first three lines until opened with "Show more". */
+.msg.user .user-text.clamped {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+	overflow: hidden;
+}
+
+.msg.user button.more {
+	display: block;
+	margin-top: 2px;
+	padding: 0;
+	background: none;
+	color: var(--vscode-textLink-foreground);
+	font-size: 0.9em;
+}
+
+.msg.user button.more::before {
+	content: "Show more";
+}
+
+.msg.user .user-text:not(.clamped) ~ button.more::before {
+	content: "Show less";
+}
+
+.msg.user button.more:hover {
+	background: none;
+	color: var(--vscode-textLink-activeForeground);
+	text-decoration: underline;
+}
+
+.msg.user button.more[hidden] {
+	display: none;
+}
+
 .msg.user button.edit {
 	position: absolute;
 	top: 2px;
@@ -427,6 +462,24 @@ details.thought summary,
 	background: var(--vscode-editor-background);
 }
 
+.reject-note[hidden],
+.tool-ask .buttons[hidden] {
+	display: none;
+}
+
+.reject-note textarea {
+	margin: 2px 0 6px;
+}
+
+.reject-note textarea.reject-command {
+	font-family: var(--vscode-editor-font-family);
+	font-size: var(--vscode-editor-font-size);
+}
+
+.tool-ask.resolved .reject-note {
+	display: none;
+}
+
 .tool-note {
 	margin: 2px 0;
 	font-style: italic;
@@ -571,4 +624,17 @@ label.choice {
 
 .suggestion:hover {
 	background: var(--vscode-list-hoverBackground);
+}
+
+.suggestion.active {
+	background: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground);
+}
+
+.suggestion-icon {
+	margin-right: 4px;
+}
+
+.suggestion-dir {
+	opacity: 0.7;
 }

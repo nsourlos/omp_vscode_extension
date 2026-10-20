@@ -139,13 +139,41 @@ function splitCommand(command: string): string[][] | undefined {
 
 /** True when every part of a shell command only reads or navigates (see READ_ONLY_COMMANDS). */
 export function isReadOnlyCommand(command: string): boolean {
+	return commandParts(command)?.every(part => part.readOnly) ?? false;
+}
+
+/**
+ * Each simple command's program, and whether that part only reads or navigates (see
+ * READ_ONLY_COMMANDS); undefined when the command can't be judged (see splitCommand).
+ */
+export function commandParts(command: string): { name: string; readOnly: boolean }[] | undefined {
 	const commands = splitCommand(command);
-	if (!commands || commands.length === 0) return false;
-	return commands.every(([name, ...args]) => {
-		if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
-		if (name === "rg" && args.some(arg => RG_RUNS_PROGRAMS.test(arg))) return false;
-		return !args.some(arg => WRITING_FLAGS.test(arg));
-	});
+	if (!commands || commands.length === 0) return undefined;
+	return commands.map(words => ({ name: words[0], readOnly: isReadOnlyPart(words) }));
+}
+
+function isReadOnlyPart([name, ...args]: string[]): boolean {
+	if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
+	if (name === "rg" && args.some(arg => RG_RUNS_PROGRAMS.test(arg))) return false;
+	return !args.some(arg => WRITING_FLAGS.test(arg));
+}
+
+/**
+ * The message that carries the user's note on a command (or other tool call) they rejected, and the
+ * command as they changed it, if they did. omp's answer to a permission can only say "rejected", so
+ * this goes to omp as the user's next message (see Controller.#requestPermission).
+ */
+export function rejectedCommandMessage(rejected: { command?: string; title?: string }, note: string, changed?: string): string {
+	// A fence longer than any run of backticks in the commands, so one holding ``` can't close it early.
+	const longest = Math.max(0, ...[rejected.command ?? "", changed ?? ""].flatMap(text => text.match(/`+/g) ?? []).map(run => run.length));
+	const fence = "`".repeat(Math.max(3, longest + 1));
+	const lines: string[] = [];
+	if (rejected.command !== undefined) lines.push("I rejected this command, so it did not run:", fence, rejected.command, fence);
+	else lines.push(`I rejected this tool call, so it did not run: ${rejected.title ?? "(no title)"}`);
+	if (changed) lines.push("Run this instead:", fence, changed, fence);
+	if (note) lines.push(`My note: ${note}`);
+	lines.push("Do what I ask here instead of what I rejected, then continue with the task.");
+	return lines.join("\n");
 }
 
 /** Parse omp's generic approval prompt ("Allow tool: edit\nFile: x"). */

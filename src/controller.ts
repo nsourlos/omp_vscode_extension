@@ -3,8 +3,10 @@
  * Every permission/approval omp asks for becomes a card in the chat; every file
  * write becomes a hunk-by-hunk review before anything is saved.
  */
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import * as vscode from "vscode";
 import { AgentError, RpcError } from "./acp/rpc";
 import {
@@ -31,15 +33,17 @@ import type {
 	WriteTextFileParams,
 } from "./acp/types";
 import type { ChatPanel } from "./chatPanel";
+import { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery, type MentionItem } from "./mentions";
 import { OmpAgent, REPLAYED_UPDATES, ompSavedToken, resolveOmpCommand } from "./omp/agent";
 import { addSavedLogins, loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
 	PREFER_EDIT_TOOL_PROMPT,
 	codeOfToolInput,
+	commandParts,
 	fileChangeWarning,
-	isReadOnlyCommand,
 	parseApprovalMessage,
+	rejectedCommandMessage,
 	rejectionMessage,
 	staleFileMessage,
 	urlsIn,
@@ -50,6 +54,10 @@ import type { ReviewManager } from "./review/reviewManager";
 interface PendingRequest {
 	resolve: (value: any) => void;
 	cancelValue: unknown;
+	/** A command's card: allows its read-only programs from now on (the checkbox). */
+	allowReadOnly?: () => void;
+	/** A permission's card: sends the note given with "Reject with note…", and the command as changed there. */
+	rejectNote?: (note: string, changed: string | undefined) => void;
 }
 
 interface QueuedMessage {
@@ -60,6 +68,10 @@ interface QueuedMessage {
 
 /** How many replies may be followed by an attempt to name an untitled chat. */
 const MAX_NAMING_ATTEMPTS = 3;
+
+/** The most files the @ suggestions search, and how long their list is reused while one types. */
+const MAX_MENTION_FILES = 20_000;
+const FILE_LIST_TTL_MS = 10_000;
 
 /** The extension's own permission option; answered to omp as "allow once". */
 const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
@@ -77,8 +89,8 @@ export class Controller implements vscode.Disposable {
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
 	#stopRequested = false;
-	/** Set by "Always allow read-only commands"; lasts as long as this chat tab. */
-	#allowReadOnly = false;
+	/** The read-only programs (cd, grep…) the user chose to always allow; for as long as this chat tab is open. */
+	#allowedReadOnly = new Set<string>();
 	#namingAttempts = 0;
 	/** The omp session whose conversation the chat already shows, so loading it again replays nothing. */
 	#shownSessionId: string | undefined;
@@ -95,6 +107,12 @@ export class Controller implements vscode.Disposable {
 	#drafts = new Map<string, Attachment>();
 	/** The file being attached; the next waits for it (#attach). */
 	#attaching: Promise<void> = Promise.resolve();
+	/** The last sent message whose @ mentions are being read; the next waits for it, so messages keep their order. */
+	#resolvingMentions: Promise<void> = Promise.resolve();
+	/** How many sent messages wait for their @ mentions to be read. */
+	#mentionsPending = 0;
+	/** The workspace's files for the @ suggestions, listed at most every FILE_LIST_TTL_MS. */
+	#fileList: { at: number; files: Promise<string[]> } | undefined;
 	/** Copies of attached files that came with no location, for omp to read; removed when the chat closes. */
 	readonly copiesDir: string;
 	#disposed = false;
@@ -253,7 +271,7 @@ export class Controller implements vscode.Disposable {
 	 * at the start of a prompt, otherwise the plain messages up to the next slash command.
 	 */
 	#takeNextTurn(): QueuedMessage[] {
-		const isCommand = (message: QueuedMessage) => message.text.startsWith("/");
+		const isCommand = (message: QueuedMessage) => isSlashCommand(message.text);
 		let count = 1;
 		if (!isCommand(this.#queue[0])) {
 			while (count < this.#queue.length && !isCommand(this.#queue[count])) count++;
@@ -432,6 +450,119 @@ export class Controller implements vscode.Disposable {
 		return { name, path, bytes: await vscode.workspace.fs.readFile(uri) };
 	}
 
+	/**
+	 * Send a message once the files and folders it mentions (@path) are attached. Each message waits
+	 * for the one before it, so a second one sent quickly never overtakes the first.
+	 */
+	#sendWithMentions(text: string, attachments: Attachment[]): void {
+		// No mention to read: sent at once, so it is queued (or started) before anything the page sends next.
+		if (this.#mentionsPending === 0 && (isSlashCommand(text) || mentionsIn(text).length === 0)) {
+			void this.send(text, attachments);
+			return;
+		}
+		this.#mentionsPending++;
+		this.#resolvingMentions = this.#resolvingMentions
+			.then(() =>
+				this.#mentioned(text, attachments).catch(error => {
+					this.log(`attaching the files a message mentions failed: ${errorText(error)}`);
+					return [];
+				}),
+			)
+			.then(mentioned => {
+				this.#mentionsPending--;
+				if (!this.#disposed) void this.send(text, [...attachments, ...mentioned]);
+			})
+			.catch(error => this.log(`sending a message that mentions files failed: ${errorText(error)}`)); // later messages still go
+	}
+
+	/** Stop pressed on the page: after the messages sent before it, as for those still waiting for thumbnails there. */
+	#cancelFromPage(): void {
+		if (this.#mentionsPending === 0) this.cancel();
+		else this.#resolvingMentions = this.#resolvingMentions.then(() => this.cancel()).catch(error => this.log(`stopping failed: ${errorText(error)}`));
+	}
+
+	/**
+	 * The files and folders the message mentions that exist as typed, letter case included (relative
+	 * to the project folder, or absolute), each attached once and not again if already attached. A
+	 * folder goes as a reference, for omp to look in. A mention of anything else is left as text.
+	 */
+	async #mentioned(text: string, attached: readonly Attachment[]): Promise<Attachment[]> {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!root || isSlashCommand(text)) return []; // a slash command takes no attachments (see send() in media/chat.js)
+		const taken = new Set(attached.map(attachment => attachment.path).filter(Boolean));
+		let tokensLeft = this.#textTokenBudget() - attached.reduce((sum, attachment) => sum + (attachment.tokens ?? 0), 0);
+		const found: Attachment[] = [];
+		for (const spellings of mentionsIn(text)) {
+			for (const spelling of spellings) {
+				const local = localPath(root, spelling);
+				if (!(await existsAsTyped(root, local))) continue; // try the next spelling, or leave the mention as text
+				const uri = vscode.Uri.file(local);
+				let source: AttachmentSource;
+				try {
+					source = await this.#sourceOf(uri);
+				} catch {
+					continue; // no such file: try the next spelling, or leave the mention as text
+				}
+				if (source.path && !taken.has(source.path)) {
+					taken.add(source.path);
+					const attachment = prepareAttachment(`a${nextAttachmentId++}`, source, tokensLeft);
+					if ("error" in attachment) {
+						this.#notice("warning", attachment.error);
+					} else {
+						tokensLeft -= attachment.tokens ?? 0;
+						found.push(attachment);
+					}
+				}
+				break;
+			}
+		}
+		return found;
+	}
+
+	/**
+	 * Answer the page's @ suggestions, completing what is typed like a path: the entries of the
+	 * folder typed so far (the project folder when none is) whose names start with the rest; for a
+	 * name with no folder, then also the project's files and folders further down that match it.
+	 */
+	async #findMentions(id: unknown, query: string): Promise<void> {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		// Always answered, if only with nothing, so the page drops the rows it shows for what was typed before.
+		if (!root) return this.chat.notify({ type: "mentions", id, items: [] });
+		try {
+			const { folder, name } = splitMentionQuery(query);
+			let items: MentionItem[] = completeInFolder(await folderEntries(localPath(root, folder || ".")), folder, name);
+			if (!folder && name) {
+				const shown = new Set(items.map(item => item.path));
+				const elsewhere = rankMentions(await this.#workspaceFiles(), name).filter(item => !shown.has(item.path));
+				items = [...items, ...elsewhere].slice(0, 12);
+			}
+			this.chat.notify({ type: "mentions", id, items });
+		} catch (error) {
+			this.log(`listing files for @ suggestions failed: ${errorText(error)}`);
+			this.chat.notify({ type: "mentions", id, items: [] });
+		}
+	}
+
+	/**
+	 * The project's files, relative to its folder; listed again once the last list is a few seconds old.
+	 * In a git repository, the files git sees, so what it ignores (.venv, build output…) stays out, which
+	 * VS Code's file search can't do; elsewhere, what that search finds.
+	 */
+	#workspaceFiles(): Promise<string[]> {
+		if (!this.#fileList || Date.now() - this.#fileList.at > FILE_LIST_TTL_MS) {
+			const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+			const files = (root ? gitFiles(root) : Promise.reject(new Error("no folder open"))).catch(() =>
+				Promise.resolve(vscode.workspace.findFiles("**/*", excludeGlob(), MAX_MENTION_FILES)).then(uris => uris.map(promptPath)),
+			);
+			const list = { at: Date.now(), files };
+			this.#fileList = list;
+			files.catch(() => {
+				if (this.#fileList === list) this.#fileList = undefined; // listed again next time
+			});
+		}
+		return this.#fileList.files;
+	}
+
 	#unqueue(id: string): void {
 		const message = this.#queue.find(queued => queued.id === id);
 		if (message) this.#dequeue([message]);
@@ -580,9 +711,12 @@ export class Controller implements vscode.Disposable {
 			case "send": {
 				const text = typeof message.text === "string" ? message.text.trim() : "";
 				const attachments = this.#takeDrafts(message.attachments);
-				if (text || attachments.length > 0) void this.send(text, attachments);
+				if (text || attachments.length > 0) this.#sendWithMentions(text, attachments);
 				break;
 			}
+			case "findMentions":
+				if (typeof message.query === "string") void this.#findMentions(message.id, message.query);
+				break;
 			case "ready":
 				this.#drafts.clear(); // a page that (re)loads starts with an empty input
 				break;
@@ -609,7 +743,7 @@ export class Controller implements vscode.Disposable {
 				break;
 			}
 			case "cancel":
-				this.cancel();
+				this.#cancelFromPage();
 				break;
 			case "unqueue":
 				this.#unqueue(message.id);
@@ -618,8 +752,13 @@ export class Controller implements vscode.Disposable {
 				const pending = this.#pending.get(message.requestId);
 				if (!pending) return;
 				this.#pending.delete(message.requestId);
+				// Ticked on a command's card: its read-only programs are allowed from now on, whatever this one's answer.
+				if (message.allowReadOnly === true) pending.allowReadOnly?.();
 				pending.resolve(message.value);
 				this.chat.post({ type: "resolved", requestId: message.requestId, label: message.label });
+				const note = typeof message.note === "string" ? message.note.trim() : "";
+				const changed = typeof message.changedCommand === "string" && message.changedCommand.trim() ? message.changedCommand.trim() : undefined;
+				if (note || changed) pending.rejectNote?.(note, changed);
 				break;
 			}
 			case "openReview":
@@ -631,12 +770,12 @@ export class Controller implements vscode.Disposable {
 		}
 	}
 
-	/** Show a card in the chat and wait for the user's answer. */
-	#ask<T>(card: Record<string, unknown>, cancelValue: T): Promise<T> {
+	/** Show a card in the chat and wait for the user's answer; `extras` run on what else the card sends with it. */
+	#ask<T>(card: Record<string, unknown>, cancelValue: T, extras: Pick<PendingRequest, "allowReadOnly" | "rejectNote"> = {}): Promise<T> {
 		const requestId = String(nextRequestId++);
 		this.chat.requestAttention();
 		return new Promise<T>(resolve => {
-			this.#pending.set(requestId, { resolve, cancelValue });
+			this.#pending.set(requestId, { resolve, cancelValue, ...extras });
 			this.chat.post({ ...card, requestId });
 		});
 	}
@@ -727,16 +866,24 @@ export class Controller implements vscode.Disposable {
 		const command: string | undefined =
 			typeof params.toolCall.rawInput?.command === "string" ? params.toolCall.rawInput.command : undefined;
 		const allowOnce = params.options.find(option => option.kind === "allow_once");
-		const readOnly = command !== undefined && allowOnce !== undefined && isReadOnlyCommand(command);
-		if (readOnly && this.#allowReadOnly) {
+		const parts = command !== undefined && allowOnce !== undefined ? commandParts(command) : undefined;
+		const readOnly = parts !== undefined && parts.every(part => part.readOnly);
+		if (readOnly && parts.every(part => this.#allowedReadOnly.has(part.name))) {
+			const names = [...new Set(parts.map(part => part.name))];
 			this.log(`auto-allowed a read-only command: ${command}`);
-			this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId });
-			return { outcome: { outcome: "selected", optionId: allowOnce.optionId } };
+			this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId, names });
+			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
 		}
+		// The read-only programs in this command not allowed yet, which "always allow" would add.
+		const toAllow = [...new Set((parts ?? []).filter(part => part.readOnly && !this.#allowedReadOnly.has(part.name)).map(part => part.name))];
+		const allowThem = () => {
+			for (const name of toAllow) this.#allowedReadOnly.add(name);
+		};
 
 		// omp's own "always" answers cover every later shell command in the session: "always allow"
 		// would let writes through and "always reject" would silently refuse even `ls`. Neither is
-		// offered for commands; an "always" that covers read-only commands only is added instead.
+		// offered for commands. Instead, "always" covers the read-only programs this command runs: a
+		// button on a read-only command, and on any other a checkbox that leaves this one's answer to the user.
 		const options: (PermissionOption & { description?: string })[] = [];
 		for (const option of params.options) {
 			if (command !== undefined && (option.kind === "allow_always" || option.kind === "reject_always")) continue;
@@ -744,9 +891,9 @@ export class Controller implements vscode.Disposable {
 			if (readOnly && option === allowOnce) {
 				options.push({
 					optionId: ALLOW_READ_ONLY,
-					name: "Always allow read-only commands",
+					name: `Always allow ${toAllow.join(", ")}`,
 					kind: "allow_always",
-					description: "Allow this and later commands that only read or navigate (cd, ls, cat, grep, find, git log…) in this chat. Anything else still asks.",
+					description: `Allow this, and later commands in this chat made only of ${[...this.#allowedReadOnly, ...toAllow].join(", ")}, when they only read. Any other program, or an option that writes or runs one, still asks.`,
 				});
 			}
 		}
@@ -763,11 +910,24 @@ export class Controller implements vscode.Disposable {
 				warning: command && warn ? fileChangeWarning(command) : undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
 				options,
+				// The checkbox: the read-only programs to allow from now on, whatever this command's answer.
+				offerReadOnly: !readOnly && toAllow.length > 0 ? toAllow : undefined,
 			},
 			undefined,
+			{
+				allowReadOnly: allowThem,
+				// omp tells the model only "rejected by user", and takes no message during a turn: so the turn
+				// stops, and the note follows as the next message (queued until the stopped turn ends).
+				rejectNote: (note, changed) => {
+					const text = rejectedCommandMessage({ command, title: params.toolCall.title }, note, command !== undefined ? changed : undefined);
+					this.log("a command was rejected with a note: stopping the turn to send it");
+					this.cancel();
+					void this.send(text);
+				},
+			},
 		);
 		if (optionId === ALLOW_READ_ONLY) {
-			this.#allowReadOnly = true;
+			allowThem();
 			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
 		}
 		return optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
@@ -859,6 +1019,80 @@ function joinTexts(messages: QueuedMessage[]): string {
 function safeFileName(name: string): string {
 	const base = posix.basename(name.replace(/\\/g, "/")).replace(/[\0-\x1f<>:"|?*]/g, "_");
 	return base && base !== "." && base !== ".." ? base : "attachment";
+}
+
+/**
+ * What file searches leave out: what VS Code's search leaves out (files.exclude, search.exclude),
+ * and dependencies and git's own files. A pattern given to findFiles replaces files.exclude, so it is
+ * included here; patterns that would break the {a,b} group are skipped.
+ */
+function excludeGlob(): string {
+	const patterns = new Set(["**/node_modules", "**/.git"]);
+	for (const setting of ["files.exclude", "search.exclude"]) {
+		const excluded = vscode.workspace.getConfiguration().get<Record<string, unknown>>(setting) ?? {};
+		for (const [pattern, on] of Object.entries(excluded)) {
+			if (on === true && !/[{},]/.test(pattern)) patterns.add(pattern);
+		}
+	}
+	return `{${[...patterns].join(",")}}`;
+}
+
+/** A slash command for omp: "/word" (a path, "/Users/…", has more slashes), as send() in media/chat.js tells them apart. */
+function isSlashCommand(text: string): boolean {
+	return /^\/[^\s/]+(?:\s|$)/.test(text);
+}
+
+/**
+ * The files git sees in a folder (tracked, and new ones it doesn't ignore), relative to it, a
+ * submodule with a trailing slash, as a folder; fails outside a git repository.
+ */
+async function gitFiles(folder: string): Promise<string[]> {
+	const [tracked, untracked] = await Promise.all([
+		git(folder, ["ls-files", "--stage", "-z"]), // with each one's mode, which tells a submodule apart
+		git(folder, ["ls-files", "--others", "--exclude-standard", "-z"]),
+	]);
+	// A file with a merge conflict is listed once for each side.
+	return [...new Set([...gitStagePaths(tracked), ...untracked.split("\0").filter(Boolean)])].slice(0, MAX_MENTION_FILES);
+}
+
+function git(folder: string, args: string[]): Promise<string> {
+	return new Promise((done, fail) => {
+		execFile("git", args, { cwd: folder, maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => (error ? fail(error) : done(stdout)));
+	});
+}
+
+/**
+ * The path exists as typed, letter case included: macOS and Windows find a folder named "test" for
+ * "Test" too, which would make a pasted @Test decorator a mention. Only the part typed is compared,
+ * and only a difference of case fails (a link may lead somewhere else altogether).
+ */
+async function existsAsTyped(root: string, path: string): Promise<boolean> {
+	let real: string;
+	try {
+		real = await realpath(path);
+	} catch {
+		return false;
+	}
+	const inside = relative(root, path);
+	if (!inside) return true; // the project folder itself
+	const typed = (inside.startsWith("..") || isAbsolute(inside) ? path : inside).split(/[\\/]/).filter(Boolean);
+	const found = real.split(/[\\/]/).filter(Boolean).slice(-typed.length);
+	return typed.every((part, i) => part === found[i] || part.toLowerCase() !== found[i]?.toLowerCase());
+}
+
+/** A path typed in a message (relative to the project folder, absolute, or under ~) on this machine. */
+function localPath(root: string, typed: string): string {
+	return resolve(root, typed.replace(/^~(?=\/|$)/, homedir()));
+}
+
+/** A folder's entries (a link to a folder counts as one); none when it can't be read, e.g. a folder still being typed. */
+async function folderEntries(path: string): Promise<{ name: string; folder: boolean }[]> {
+	try {
+		const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(path));
+		return entries.map(([name, type]) => ({ name, folder: (type & vscode.FileType.Directory) !== 0 }));
+	} catch {
+		return [];
+	}
 }
 
 /** A dropped address (file:///…, untitled:…) or a plain path (/…, C:\…). */

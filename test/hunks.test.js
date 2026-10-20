@@ -3,10 +3,12 @@ const assert = require("node:assert/strict");
 const {
 	applyDecisions,
 	codeOfToolInput,
+	commandParts,
 	diffFile,
 	fileChangeWarning,
 	isReadOnlyCommand,
 	parseApprovalMessage,
+	rejectedCommandMessage,
 	rejectionMessage,
 	urlsIn,
 } = require("../dist/core.js");
@@ -128,6 +130,36 @@ test("judges which shell commands only read or navigate", () => {
 		'find . "-de\\\nlete"',
 	];
 	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
+});
+
+test("a note on a rejected command goes to omp with the command, and the change asked for", () => {
+	assert.equal(
+		rejectedCommandMessage({ command: "cd /repo && gh auth status" }, "no need to cd", "gh auth status"),
+		"I rejected this command, so it did not run:\n```\ncd /repo && gh auth status\n```\nRun this instead:\n```\ngh auth status\n```\nMy note: no need to cd\nDo what I ask here instead of what I rejected, then continue with the task.",
+	);
+	assert.equal(
+		rejectedCommandMessage({ title: "mcp: create issue" }, "ask me first"),
+		"I rejected this tool call, so it did not run: mcp: create issue\nMy note: ask me first\nDo what I ask here instead of what I rejected, then continue with the task.",
+	);
+	assert.equal(
+		rejectedCommandMessage({ command: "printf '```\\n'" }, "", "echo ````"),
+		"I rejected this command, so it did not run:\n`````\nprintf '```\\n'\n`````\nRun this instead:\n`````\necho ````\n`````\nDo what I ask here instead of what I rejected, then continue with the task.",
+		"a fence longer than any backticks in the commands",
+	);
+});
+
+test("names each part's program and whether that part only reads", () => {
+	assert.deepEqual(commandParts("cd src && grep -rn foo . | head -3"), [
+		{ name: "cd", readOnly: true },
+		{ name: "grep", readOnly: true },
+		{ name: "head", readOnly: true },
+	]);
+	assert.deepEqual(commandParts("kubectl get pods 2>/dev/null | grep api; find . -delete"), [
+		{ name: "kubectl", readOnly: false },
+		{ name: "grep", readOnly: true },
+		{ name: "find", readOnly: false },
+	]);
+	assert.equal(commandParts("cat $(rm x)"), undefined, "not judged at all");
 });
 
 test("finds the code of an eval call and the web addresses in it", () => {
