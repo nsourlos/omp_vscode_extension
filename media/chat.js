@@ -2,6 +2,8 @@
 // as markdown and sanitised (dist/markdown.js) before they reach the page.
 (function () {
 	const vscode = acquireVsCodeApi();
+	/** The nonce this script runs with, which a script the page adds later (Mermaid) must carry too. */
+	const SCRIPT_NONCE = document.currentScript?.nonce ?? "";
 	const log = document.getElementById("log");
 	const input = document.getElementById("input");
 	const sendButton = document.getElementById("send");
@@ -76,7 +78,140 @@
 	function renderMarkdown(container, text) {
 		container.innerHTML = ompMarkdown.toHtml(text);
 		for (const pre of container.querySelectorAll("pre")) addCopyButton(pre);
+		drawDiagrams(container);
 	}
+
+	// ---------- Mermaid diagrams ----------
+	// A ```mermaid block is drawn once its closing fence has come, so a diagram appears while the reply
+	// is still streaming. Mermaid (dist/mermaid.js, about 5 MB) loads the first time one is needed. A
+	// reply is drawn again on every frame it grows, so each diagram is kept by its source and reused.
+	const PENDING = "pending";
+	const diagrams = new Map(); // source -> PENDING | { svg } | { error }
+	let mermaidLoad = null;
+	let mermaidTheme = null;
+	let diagramCount = 0;
+	/** Goes up when the theme changes, so a diagram still being drawn in the old one is dropped. */
+	let diagramGeneration = 0;
+
+	function drawDiagrams(container) {
+		for (const block of container.querySelectorAll('.mermaid-block[data-complete="true"]')) {
+			const source = diagramSource(block);
+			const drawn = diagrams.get(source);
+			if (drawn === undefined) void renderDiagram(source);
+			else if (drawn !== PENDING) showDiagram(block, drawn);
+		}
+	}
+
+	function diagramSource(block) {
+		return block.querySelector("code")?.textContent ?? "";
+	}
+
+	async function renderDiagram(source) {
+		diagrams.set(source, PENDING);
+		const generation = diagramGeneration;
+		let drawn;
+		try {
+			const mermaid = await loadMermaid();
+			await whenVisible(); // a hidden page measures text as nothing, which squashes the diagram
+			const theme = darkTheme() ? "dark" : "default";
+			if (theme !== mermaidTheme) {
+				mermaid.initialize({ startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true, theme });
+				mermaidTheme = theme;
+			}
+			let svg;
+			try {
+				({ svg } = await mermaid.render(`omp-diagram-${++diagramCount}`, source));
+			} catch (error) {
+				// Tried once more without a mistake models often make (see fixMermaidLabels); else the first error stands.
+				const fixed = ompMarkdown.fixMermaidLabels(source);
+				if (fixed === source) throw error;
+				({ svg } = await mermaid.render(`omp-diagram-${++diagramCount}`, fixed).catch(() => Promise.reject(error)));
+			}
+			drawn = { svg: ompMarkdown.sanitizeSvg(svg) };
+		} catch (error) {
+			drawn = { error: error?.message || String(error) };
+		}
+		if (generation !== diagramGeneration) return; // the theme changed meanwhile: drawn again in the new one
+		diagrams.set(source, drawn);
+		keepScrolled(() => {
+			for (const block of log.querySelectorAll('.mermaid-block[data-complete="true"]')) {
+				if (diagramSource(block) === source) showDiagram(block, drawn);
+			}
+		});
+	}
+
+	function loadMermaid() {
+		if (window.mermaid) return Promise.resolve(window.mermaid);
+		if (!mermaidLoad) {
+			mermaidLoad = new Promise((resolve, reject) => {
+				const src = document.body.dataset.mermaid;
+				if (!src) return reject(new Error("Mermaid is not available here"));
+				const script = document.createElement("script");
+				script.nonce = SCRIPT_NONCE; // the page runs only scripts that carry its nonce
+				script.src = src;
+				script.onload = () => (window.mermaid ? resolve(window.mermaid) : reject(new Error("Mermaid did not load")));
+				script.onerror = () => reject(new Error("Mermaid could not be loaded"));
+				document.head.appendChild(script);
+			});
+			mermaidLoad.catch(() => (mermaidLoad = null)); // tried again for the next diagram
+		}
+		return mermaidLoad;
+	}
+
+	function whenVisible() {
+		if (!document.hidden) return Promise.resolve();
+		return new Promise(resolve => {
+			const shown = () => {
+				if (document.hidden) return;
+				document.removeEventListener("visibilitychange", shown);
+				resolve();
+			};
+			document.addEventListener("visibilitychange", shown);
+		});
+	}
+
+	/** The diagram in place of its code, with a button to see the code; or why it couldn't be drawn, above the code. */
+	function showDiagram(block, drawn) {
+		if (block.dataset.drawn) return;
+		block.dataset.drawn = "true";
+		const pre = block.querySelector("pre");
+		if (drawn.error) {
+			// Mermaid's parse errors run over several lines, with a pointer under the text: the first says where.
+			const note = block.insertBefore(el("div", "diagram-error", `Couldn't draw this Mermaid diagram: ${drawn.error.split("\n")[0]}`), pre);
+			note.title = drawn.error;
+			return;
+		}
+		const view = block.insertBefore(el("div", "diagram"), pre);
+		view.innerHTML = drawn.svg;
+		pre.hidden = true;
+		const toggle = block.insertBefore(el("button", "secondary diagram-toggle", "Show code"), view);
+		toggle.addEventListener("click", () => {
+			keepScrolled(() => {
+				pre.hidden = !pre.hidden;
+				view.hidden = !pre.hidden;
+				toggle.textContent = pre.hidden ? "Show code" : "Show diagram";
+			});
+		});
+	}
+
+	// VS Code marks the page's theme on <body>: diagrams are drawn again in the new one.
+	function darkTheme() {
+		const themes = document.body.classList;
+		return themes.contains("vscode-dark") || (themes.contains("vscode-high-contrast") && !themes.contains("vscode-high-contrast-light"));
+	}
+
+	new MutationObserver(() => {
+		const theme = darkTheme() ? "dark" : "default";
+		if (mermaidTheme === null || theme === mermaidTheme) return;
+		diagramGeneration++;
+		diagrams.clear();
+		for (const block of log.querySelectorAll(".mermaid-block[data-drawn]")) {
+			for (const added of block.querySelectorAll(".diagram, .diagram-error, .diagram-toggle")) added.remove();
+			block.querySelector("pre").hidden = false;
+			delete block.dataset.drawn;
+		}
+		drawDiagrams(log);
+	}).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 
 	function addCopyButton(pre) {
 		const button = pre.appendChild(el("button", "copy secondary", "Copy"));

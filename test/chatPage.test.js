@@ -258,6 +258,112 @@ test("a streamed reply renders once per frame, with nothing lost", async () => {
 	assert.equal(reply[0].textContent.trim(), words.join("").trim());
 });
 
+/** A stand-in for Mermaid: draws each source as an SVG naming it, and fails on "broken". */
+function drawsDiagrams(window, calls) {
+	window.mermaid = {
+		initialize: config => calls.push(["initialize", config.theme, config.securityLevel]),
+		render: async (id, source) => {
+			calls.push(["render", source]);
+			if (source.includes("broken")) throw new Error("Parse error on line 1");
+			return { svg: `<svg id="${id}" onload="alert(1)"><script>alert(2)</script><text>${source}</text></svg>` };
+		},
+	};
+}
+
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test("a Mermaid block is drawn once its closing fence comes, once, and its code is a click away", async () => {
+	const calls = [];
+	const chat = openChat(window => drawsDiagrams(window, calls));
+	chat.deliver(chunk("Here:\n\n```mermaid\ngraph TD\n  A-->B"));
+	await chat.nextFrame();
+	await settle();
+	assert.equal(calls.length, 0, "still streaming: shown as code");
+	assert.equal(chat.log.querySelector(".mermaid-block code").textContent, "graph TD\n  A-->B");
+
+	chat.deliver(chunk("\n```\n\nDone"));
+	await chat.nextFrame();
+	await settle();
+	chat.deliver(chunk(" now."));
+	await chat.nextFrame();
+	await settle();
+	assert.deepEqual(calls, [["initialize", "default", "strict"], ["render", "graph TD\n  A-->B"]], "drawn once, though the reply was drawn again");
+	const block = chat.log.querySelector(".mermaid-block");
+	const svg = block.querySelector(".diagram svg");
+	assert.ok(svg, "the diagram replaces the code");
+	assert.equal(svg.getAttribute("onload"), null, "no event handlers");
+	assert.equal(block.querySelector("script"), null, "no scripts");
+	assert.equal(block.querySelector("pre").hidden, true);
+
+	const toggle = block.querySelector(".diagram-toggle");
+	toggle.click();
+	assert.equal(block.querySelector("pre").hidden, false);
+	assert.equal(block.querySelector(".diagram").hidden, true);
+	assert.equal(toggle.textContent, "Show diagram");
+});
+
+test("a diagram's labels, HTML inside <foreignObject>, survive cleaning; scripts and handlers in them don't", () => {
+	const chat = openChat();
+	const clean = chat.window.ompMarkdown.sanitizeSvg(
+		'<svg><foreignObject width="40" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg"><span class="edgeLabel"><p>calls</p></span>' +
+			'<img src=x onerror="alert(1)"><script>alert(2)</script><a href="javascript:alert(3)">link</a></div></foreignObject></svg>',
+	);
+	const box = chat.window.document.createElement("div");
+	box.innerHTML = clean;
+	assert.equal(box.querySelector("foreignObject p")?.textContent, "calls", "the label's text is kept");
+	assert.doesNotMatch(clean, /onerror|<script|javascript:/);
+});
+
+test("a Mermaid block that can't be drawn stays code, with the reason", async () => {
+	const chat = openChat(window => drawsDiagrams(window, []));
+	chat.deliver(chunk("```mermaid\nbroken\n```"));
+	await chat.nextFrame();
+	await settle();
+	const block = chat.log.querySelector(".mermaid-block");
+	assert.equal(block.querySelector(".diagram-error").textContent, "Couldn't draw this Mermaid diagram: Parse error on line 1");
+	assert.equal(block.querySelector("pre").hidden, false);
+	assert.equal(block.querySelector(".diagram"), null);
+});
+
+test("a Mermaid label that starts with a backtick, which Mermaid can't read, is drawn without its backticks", async () => {
+	const calls = [];
+	const chat = openChat(window => {
+		drawsDiagrams(window, calls);
+		const render = window.mermaid.render;
+		window.mermaid.render = async (id, source) => {
+			if (source.includes('"`omp acp` process"')) {
+				calls.push(["render", source]);
+				throw new Error("Lexical error on line 2. Unrecognized text.");
+			}
+			return render(id, source);
+		};
+	});
+	chat.deliver(chunk('```mermaid\nflowchart TB\n  A["`omp acp` process"] --> B["spawns `omp` here"] --> C["`**bold**`"]\n```'));
+	await chat.nextFrame();
+	await settle();
+	assert.deepEqual(calls.filter(call => call[0] === "render").map(call => call[1]), [
+		'flowchart TB\n  A["`omp acp` process"] --> B["spawns `omp` here"] --> C["`**bold**`"]',
+		'flowchart TB\n  A["omp acp process"] --> B["spawns `omp` here"] --> C["`**bold**`"]',
+	], "tried again with only that label changed");
+	assert.ok(chat.log.querySelector(".mermaid-block .diagram svg"), "drawn");
+	assert.equal(chat.log.querySelector(".diagram-error"), null);
+});
+
+test("Mermaid diagrams follow VS Code's theme", async () => {
+	const calls = [];
+	const chat = openChat(window => drawsDiagrams(window, calls));
+	chat.window.document.body.classList.add("vscode-dark");
+	chat.deliver(chunk("```mermaid\ngraph LR\n  A-->B\n```"));
+	await chat.nextFrame();
+	await settle();
+	assert.deepEqual(calls.filter(call => call[0] === "initialize").map(call => call[1]), ["dark"]);
+	chat.window.document.body.classList.replace("vscode-dark", "vscode-light");
+	await settle();
+	await settle();
+	assert.deepEqual(calls.filter(call => call[0] === "initialize").map(call => call[1]), ["dark", "default"], "drawn again in the new theme");
+	assert.equal(chat.log.querySelectorAll(".mermaid-block .diagram").length, 1, "and shown once");
+});
+
 test("a reply cut by a tool call is rendered in full before the next one starts", async () => {
 	const chat = openChat();
 	chat.deliver(chunk("Hello "), chunk("there"));
