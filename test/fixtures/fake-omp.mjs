@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Stand-in for `omp acp` in tests: speaks just enough ACP and never calls a model.
 // A prompt starting with "/" is logged as a slash command and ends the turn. Otherwise the prompt
-// text is a JSON list of steps (or several, separated by a blank line), run in order:
+// text is a JSON list of steps (or several, separated by a blank line), run in order (any other
+// text is logged as is and ends the turn):
 //   {"write": {"path", "content"}}  ask the editor to write a file
 //   {"writes": [{"path", "content"}]} ask for several writes at once
 //   {"elicitUrl": "<url>"}          send a URL-mode elicitation
@@ -12,6 +13,7 @@
 //   {"nameOnRename": "<title>"}     the next "/rename" names the chat this
 //   {"crashOnRename": true}         the next "/rename" exits instead (after "renameDelay" ms, if given)
 //   {"hang": true}                  wait until session/cancel
+//   {"untilCancelled": true}        the same, but a cancel that already came during this turn counts
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
 // Flags: --init-delay <ms> delays the initialize reply; --log <file> appends one JSON line per outcome;
@@ -58,6 +60,8 @@ let pendingName;
 let renameDelay = 0;
 let crashOnRename = false;
 let cancelTurn;
+/** A cancel that came between a turn's steps, when no step waited for one: only "untilCancelled" counts it. */
+let cancelledBetweenSteps = false;
 
 const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const record = entry => logFile && appendFileSync(logFile, `${JSON.stringify({ sessionId, ...entry })}\n`);
@@ -70,7 +74,15 @@ const request = (method, params) =>
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function runTurn(steps) {
+	cancelledBetweenSteps = false;
+	cancelTurn = undefined; // left by an earlier turn's step or "/rename"
 	for (const step of steps) {
+		if (step.untilCancelled) {
+			record({ event: "hang" });
+			if (!cancelledBetweenSteps) await new Promise(resolve => (cancelTurn = resolve));
+			cancelTurn = undefined;
+			return "cancelled";
+		}
 		if (step.write) {
 			const reply = await request("fs/write_text_file", { sessionId, ...step.write });
 			record({ event: "write", path: step.write.path, error: reply.error?.message });
@@ -113,6 +125,7 @@ async function runTurn(steps) {
 		} else if (step.hang) {
 			record({ event: "hang" });
 			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
+			cancelTurn = undefined;
 			if (cancelled) return "cancelled";
 		} else if (step.exit !== undefined) {
 			process.exit(step.exit);
@@ -221,13 +234,22 @@ async function handle(message) {
 				record({ event: "command", text });
 				return send({ id: message.id, result: { stopReason: "end_turn" } });
 			}
-			// Queued messages arrive joined by a blank line: one JSON list each.
-			const steps = text.split("\n\n").flatMap(part => JSON.parse(part));
+			// Queued messages arrive joined by a blank line: one JSON list each. Any other text (like a
+			// rejected command's note, which the extension writes) is logged and ends the turn.
+			let steps;
+			try {
+				steps = text.split("\n\n").flatMap(part => JSON.parse(part));
+			} catch {
+				record({ event: "text", text });
+				return send({ id: message.id, result: { stopReason: "end_turn" } });
+			}
 			const stopReason = await runTurn(steps);
 			return send({ id: message.id, result: { stopReason } });
 		}
 		case "session/cancel":
-			return cancelTurn?.(true);
+			if (cancelTurn) return cancelTurn(true);
+			cancelledBetweenSteps = true;
+			return;
 	}
 }
 

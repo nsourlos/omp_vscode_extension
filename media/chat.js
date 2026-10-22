@@ -112,10 +112,31 @@
 			.join("\n");
 	}
 
+	// Long messages of the user's show their first lines until opened. One observer measures them all
+	// again whenever a text's box changes size, e.g. when a hidden tab is shown (it measures nothing while hidden).
+	const userTextSizes =
+		typeof ResizeObserver === "function"
+			? new ResizeObserver(entries => {
+					for (const entry of entries) {
+						const node = entry.target.closest(".msg.user");
+						if (node) fitUserText(node);
+					}
+				})
+			: null;
+
 	/** One of the user's messages, with its attachments and an edit button that puts its text back in the input. */
 	function userMessage(text, attachments = []) {
 		const node = el("div", "msg user");
-		const body = node.appendChild(el("span", "user-text", text));
+		const body = node.appendChild(el("div", "user-text clamped", text));
+		// Its label comes from the stylesheet (Show more / Show less), so it adds no text to the message.
+		const more = node.appendChild(el("button", "more"));
+		more.hidden = true;
+		more.setAttribute("aria-label", "Show the whole message");
+		more.addEventListener("click", () => {
+			const clamped = body.classList.toggle("clamped");
+			more.setAttribute("aria-label", clamped ? "Show the whole message" : "Show less of the message");
+		});
+		userTextSizes?.observe(body);
 		node.appendChild(el("div", "attachments"));
 		const edit = node.appendChild(el("button", "edit secondary"));
 		edit.title = "Edit: put this message back in the input to change and send again";
@@ -125,8 +146,16 @@
 		return node;
 	}
 
+	/** Show the Show more button only when the clamped text is cut off; an opened message stays open. */
+	function fitUserText(node) {
+		const body = node.querySelector(".user-text");
+		const more = node.querySelector("button.more");
+		if (!body || !more || !body.classList.contains("clamped")) return; // e.g. turned into an image's description
+		more.hidden = body.scrollHeight <= body.clientHeight + 1;
+	}
+
 	// ---------- attachments ----------
-	const ATTACHMENT_ICONS = { image: "🖼️", text: "📄", document: "📑", path: "🔗" };
+	const ATTACHMENT_ICONS = { image: "🖼️", text: "📄", document: "📑", folder: "📁", path: "🔗" };
 	const IMAGE_TYPE = /^image\/[\w.+-]+$/;
 	/** omp shrinks images to about 500 KB, so a replayed one is small; this keeps a stray huge one off the page. */
 	const MAX_THUMBNAIL_CHARS = 3 * 1024 * 1024;
@@ -174,7 +203,7 @@
 	 * text can hold anything else.
 	 */
 	function splitAttachments(raw) {
-		const opening = /<attached-file (path|name)="([^"]*)"(?: type="(image|document|path)")?>\n/y;
+		const opening = /<attached-file (path|name)="([^"]*)"(?: type="(image|document|folder|path)")?>\n/y;
 		const CLOSE = "\n</attached-file>";
 		const NEXT = "\n\n<attached-file ";
 		const files = [];
@@ -219,6 +248,8 @@
 	/** Draw a replayed message again from everything received of it so far; each image goes on its file's chip. */
 	function fillReplayed(message) {
 		if (!message.images.length && IMAGE_DESCRIPTION.test(message.raw)) {
+			const body = message.node.querySelector(".user-text");
+			if (body) userTextSizes?.unobserve(body);
 			message.node.className = "image-description";
 			message.node.textContent = "";
 			const details = message.node.appendChild(el("details"));
@@ -235,6 +266,7 @@
 		}
 		const { text, files } = splitAttachments(message.raw);
 		message.node.querySelector(".user-text").textContent = text;
+		fitUserText(message.node);
 		let next = 0;
 		const chips = files.map(file => (file.kind === "image" && message.images[next] ? { ...file, thumbnail: message.images[next++].thumbnail } : file));
 		chips.push(...message.images.slice(next)); // images with no wrapper, e.g. pasted into omp's terminal app
@@ -598,7 +630,7 @@
 				tool.command.hidden = false;
 			}
 			// A shell tool's title is its command, already shown in the command box: show it once.
-			tool.title.hidden = !tool.command.hidden && tool.title.textContent.trim() === tool.command.textContent.slice(2).trim();
+			tool.title.hidden = !tool.command.hidden && isCommandTitle(tool.title.textContent, tool.command.textContent.slice(2));
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -607,6 +639,14 @@
 				if (update.status === "failed") tool.details.open = true;
 			}
 		});
+	}
+
+	/** omp titles a shell call "$ <command>", cut to 4000 characters with "…". */
+	function isCommandTitle(title, command) {
+		const text = title.trim().replace(/^\$\s+/, "");
+		command = command.trim();
+		if (text === command) return true;
+		return text.endsWith("…") && text.length > 1 && command.startsWith(text.slice(0, -1));
 	}
 
 	function onPlan(entries) {
@@ -626,8 +666,8 @@
 	}
 
 	// ---------- cards that wait for the user ----------
-	function respond(requestId, value, label) {
-		vscode.postMessage({ type: "respond", requestId, value, label });
+	function respond(requestId, value, label, extra = {}) {
+		vscode.postMessage({ type: "respond", requestId, value, label, ...extra });
 		markResolved(requestId, label);
 	}
 
@@ -685,17 +725,85 @@
 		if (msg.cwd) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
+		let readOnlyBox = null;
+		const toAllow = Array.isArray(msg.offerReadOnly) ? msg.offerReadOnly.join(", ") : "";
+		if (toAllow) {
+			// Not a button: this command is not read-only, so it still needs its own answer.
+			const label = node.appendChild(el("label", "choice always-read-only"));
+			readOnlyBox = label.appendChild(el("input"));
+			readOnlyBox.type = "checkbox";
+			label.appendChild(document.createTextNode(` From now on, allow ${toAllow} without asking in this chat`));
+			label.title = `Later commands made only of these programs run without asking, when they only read. Anything else, this command included, still asks.`;
+		}
 		const buttons = node.appendChild(el("div", "buttons"));
 		for (const option of msg.options || []) {
 			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "secondary", option.name));
 			const hint = option.description || OPTION_HINTS[option.kind];
 			if (hint) button.title = hint;
 			button.addEventListener("click", () => {
-				respond(msg.requestId, option.optionId, option.name);
+				if (readOnlyBox?.checked) respond(msg.requestId, option.optionId, `${option.name} · ${toAllow} allowed from now on`, { allowReadOnly: true });
+				else respond(msg.requestId, option.optionId, option.name);
 				if (!option.kind.startsWith("allow")) notRunning(id); // a rejected tool never runs, and omp may not say so
 			});
 		}
+		const reject = (msg.options || []).find(option => option.kind === "reject_once");
+		if (reject) addRejectWithNote(node, buttons, msg, reject, id, readOnlyBox);
 		finishCard(node);
+	}
+
+	/**
+	 * "Reject with note…": a note for omp and, for a command, the command to change. The extension
+	 * stops the turn and sends them as the next message, since omp's answer can only say "rejected".
+	 */
+	function addRejectWithNote(node, buttons, msg, reject, toolCallId, readOnlyBox) {
+		const open = buttons.appendChild(el("button", "secondary", "Reject with note…"));
+		open.title = "Reject, and tell omp what to do instead, or change the command";
+		const form = node.appendChild(el("div", "reject-note"));
+		form.hidden = true;
+		let commandBox = null;
+		if (typeof msg.command === "string") {
+			form.appendChild(el("div", "field-description", "Change the command to suggest another (omp still asks before running it):"));
+			commandBox = form.appendChild(el("textarea", "reject-command"));
+			commandBox.value = msg.command;
+			commandBox.rows = Math.min(6, Math.max(2, Math.ceil(msg.command.length / 70)));
+		}
+		form.appendChild(el("div", "field-description", "Note for omp:"));
+		const note = form.appendChild(el("textarea"));
+		note.rows = 2;
+		note.placeholder = "What should omp do instead?";
+		const actions = form.appendChild(el("div", "buttons"));
+		const submit = actions.appendChild(el("button", "", "Reject and send"));
+		const cancel = actions.appendChild(el("button", "secondary", "Cancel"));
+		open.addEventListener("click", () => {
+			form.hidden = false;
+			buttons.hidden = true;
+			note.focus();
+		});
+		cancel.addEventListener("click", () => {
+			form.hidden = true;
+			buttons.hidden = false;
+		});
+		const send = () => {
+			const text = note.value.trim();
+			const changed = commandBox && commandBox.value.trim() !== msg.command.trim() ? commandBox.value.trim() : "";
+			if (!text && !changed) {
+				note.focus(); // nothing to send: Reject does that
+				return;
+			}
+			// The checkbox counts whatever the answer, as with the other buttons.
+			const allowed = readOnlyBox?.checked ? { allowReadOnly: true } : {};
+			const label = changed ? "Rejected with a changed command" : "Rejected with a note";
+			respond(msg.requestId, reject.optionId, readOnlyBox?.checked ? `${label} · ${msg.offerReadOnly.join(", ")} allowed from now on` : label, {
+				note: text,
+				changedCommand: changed || undefined,
+				...allowed,
+			});
+			notRunning(toolCallId);
+		};
+		submit.addEventListener("click", send);
+		note.addEventListener("keydown", event => {
+			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send();
+		});
 	}
 
 	function notRunning(toolCallId) {
@@ -703,9 +811,10 @@
 		showActivity();
 	}
 
-	function onAutoAllowed(toolCallId) {
-		const tool = tools.get(toolCallId);
-		if (tool) tool.card.insertBefore(el("div", "tool-note", "Allowed automatically: read-only command"), tool.details);
+	function onAutoAllowed(msg) {
+		const tool = tools.get(msg.toolCallId);
+		const names = Array.isArray(msg.names) && msg.names.length ? msg.names.join(", ") : "read-only commands";
+		if (tool) tool.card.insertBefore(el("div", "tool-note", `Allowed automatically: you always allow ${names} in this chat`), tool.details);
 	}
 
 	function onApproval(msg) {
@@ -894,7 +1003,7 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				append(userMessage(msg.text, msg.attachments));
+				fitUserText(append(userMessage(msg.text, msg.attachments)));
 				return;
 			case "attached":
 				drafts.push(msg.attachment);
@@ -903,7 +1012,7 @@
 				return;
 			case "update": return onUpdate(msg.update);
 			case "permission": return onPermission(msg);
-			case "autoAllowed": return onAutoAllowed(msg.toolCallId);
+			case "autoAllowed": return onAutoAllowed(msg);
 			case "approval": return onApproval(msg);
 			case "question": return onQuestion(msg);
 			case "resolved": return markResolved(msg.requestId, msg.label);
@@ -915,6 +1024,7 @@
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
 			case "restoreInput": return restoreInput(msg.text, msg.attachments);
+			case "mentions": return onMentions(msg);
 			case "notice":
 				breakFlow();
 				append(el("div", `notice ${msg.level || "info"}`, msg.text));
@@ -936,27 +1046,136 @@
 	suggestions.hidden = true;
 	input.parentElement.insertBefore(suggestions, input);
 
+	// Suggestions under the input: slash commands, and files and folders after "@". Picked with a
+	// click, or the arrow keys and Enter or Tab; Escape closes them.
+	let suggestionItems = []; // { row, pick }
+	let activeSuggestion = -1;
+	let mentionRequest = 0;
+	let mentionTimer = 0;
+
 	function updateSuggestions() {
-		const value = input.value;
-		const match = /^\/(\S*)$/.exec(value);
-		suggestions.textContent = "";
-		if (!match || commands.length === 0) {
-			suggestions.hidden = true;
+		const mention = mentionAtCursor();
+		clearTimeout(mentionTimer);
+		mentionRequest++; // results for what was typed before are dropped
+		if (mention) {
+			// The rows shown are for what was typed before: nothing is picked until the new ones arrive, so Enter sends as typed.
+			activeSuggestion = -1;
+			markActiveSuggestion();
+			const id = mentionRequest;
+			mentionTimer = setTimeout(() => vscode.postMessage({ type: "findMentions", id, query: mention.query }), 60);
 			return;
 		}
-		const hits = commands.filter(c => c.name.startsWith(match[1])).slice(0, 8);
-		for (const command of hits) {
+		const match = /^\/(\S*)$/.exec(input.value);
+		const hits = match ? commands.filter(c => c.name.startsWith(match[1])).slice(0, 8) : [];
+		// No row is picked until an arrow key moves to it, so Enter still sends "/compact" as typed.
+		showSuggestions(
+			hits.map(command => ({
+				render: row => {
+					row.appendChild(el("strong", "", "/" + command.name));
+					row.appendChild(document.createTextNode(" " + (command.description || "")));
+				},
+				pick: () => (input.value = "/" + command.name + " "),
+			})),
+			-1,
+		);
+	}
+
+	/** The "@…" being typed at the cursor, if any: where it starts, and what is typed after "@". */
+	function mentionAtCursor() {
+		if (input.selectionStart !== input.selectionEnd) return null;
+		const before = input.value.slice(0, input.selectionStart);
+		const match = /(^|\s)@("[^"\n]*|[^\s"]*)$/.exec(before);
+		if (!match) return null;
+		const quoted = match[2].startsWith('"');
+		// The rest of the word the cursor is in (and a quoted mention's closing quote), which a picked path
+		// replaces too. Only up to a space: a quoted mention typed before other words must leave them.
+		const after = (quoted ? /^[^\s"]*"?/ : /^[^\s"]*/).exec(input.value.slice(input.selectionStart))[0];
+		return { start: before.length - match[2].length - 1, end: input.selectionStart + after.length, query: match[2].replace(/^"/, "") };
+	}
+
+	function onMentions(msg) {
+		const mention = mentionAtCursor();
+		if (msg.id !== mentionRequest || !mention) return;
+		const items = (msg.items || []).filter(item => typeof item.path === "string" && !item.path.includes('"'));
+		// The first row is picked (for Enter or Tab) only when it holds the name being typed: a guess from
+		// letters in order (@john → src/json/handler.ts), or a folder typed in full (@src/), sends as typed.
+		const name = mention.query.slice(mention.query.lastIndexOf("/") + 1).toLowerCase();
+		const active = name && items[0]?.path.toLowerCase().includes(name) ? 0 : -1;
+		showSuggestions(
+			items.map(item => ({
+				render: row => {
+					const slash = item.path.lastIndexOf("/");
+					row.appendChild(el("span", "suggestion-icon", item.folder ? "📁" : "📄"));
+					row.appendChild(el("strong", "", item.path.slice(slash + 1) + (item.folder ? "/" : "")));
+					if (slash > 0) row.appendChild(el("span", "suggestion-dir", " " + item.path.slice(0, slash)));
+					row.title = item.path;
+				},
+				pick: () => {
+					const at = mentionAtCursor();
+					if (!at) return; // the cursor has left the mention: nothing to replace
+					// A file ends the mention; a folder stays open (quote and all), so its contents show next.
+					const quote = /\s/.test(item.path) ? '"' : "";
+					const rest = input.value.slice(at.end);
+					const space = /^\s/.test(rest) ? "" : " ";
+					const text = item.folder ? `@${quote}${item.path}/` : `@${quote}${item.path}${quote}${space}`;
+					input.value = input.value.slice(0, at.start) + text + rest;
+					input.selectionStart = input.selectionEnd = at.start + text.length;
+				},
+			})),
+			active,
+		);
+	}
+
+	function showSuggestions(items, active) {
+		suggestions.textContent = "";
+		suggestionItems = items.map(item => {
 			const row = suggestions.appendChild(el("div", "suggestion"));
-			row.appendChild(el("strong", "", "/" + command.name));
-			row.appendChild(document.createTextNode(" " + (command.description || "")));
+			item.render(row);
 			row.addEventListener("mousedown", event => {
-				event.preventDefault();
-				input.value = "/" + command.name + " ";
-				updateSuggestions();
-				input.focus();
+				event.preventDefault(); // keeps the input focused
+				pickSuggestion(item);
 			});
+			return { row, pick: item.pick };
+		});
+		activeSuggestion = items.length ? active : -1;
+		markActiveSuggestion();
+		suggestions.hidden = items.length === 0;
+	}
+
+	function markActiveSuggestion() {
+		suggestionItems.forEach(({ row }, i) => row.classList.toggle("active", i === activeSuggestion));
+		suggestionItems[activeSuggestion]?.row.scrollIntoView({ block: "nearest" });
+	}
+
+	function pickSuggestion(item) {
+		item.pick();
+		input.focus();
+		updateSuggestions();
+	}
+
+	function hideSuggestions() {
+		clearTimeout(mentionTimer);
+		mentionRequest++;
+		showSuggestions([], -1);
+	}
+
+	/** Arrow keys, Enter, Tab and Escape while suggestions show; true when the key was used. */
+	function suggestionKey(event) {
+		if (suggestions.hidden || suggestionItems.length === 0) return false;
+		const count = suggestionItems.length;
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			const step = event.key === "ArrowDown" ? 1 : -1;
+			activeSuggestion = activeSuggestion < 0 ? (step > 0 ? 0 : count - 1) : (activeSuggestion + step + count) % count;
+			markActiveSuggestion();
+		} else if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && activeSuggestion >= 0) {
+			pickSuggestion(suggestionItems[activeSuggestion]);
+		} else if (event.key === "Escape") {
+			hideSuggestions();
+		} else {
+			return false;
 		}
-		suggestions.hidden = hits.length === 0;
+		event.preventDefault();
+		return true;
 	}
 
 	/** The text starts with a slash command: one omp listed, or, before it has, any /word (a path has more slashes). */
@@ -1054,8 +1273,17 @@
 	});
 
 	input.addEventListener("input", updateSuggestions);
+	input.addEventListener("blur", hideSuggestions);
+	// A cursor moved off (or into) a mention changes what the suggestions are for. Up and Down move in the list instead.
+	const CURSOR_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+	input.addEventListener("keyup", event => {
+		if (CURSOR_KEYS.has(event.key)) updateSuggestions();
+	});
+	input.addEventListener("click", updateSuggestions);
 	input.addEventListener("keydown", event => {
-		if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+		if (event.isComposing) return;
+		if (suggestionKey(event)) return;
+		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
 			send();
 		}

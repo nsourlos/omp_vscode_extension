@@ -12,7 +12,12 @@ const {
 	imageMimeType,
 	isChipThumbnail,
 	prepareAttachment,
+	completeInFolder,
+	mentionsIn,
 	promptBlocks,
+	gitStagePaths,
+	rankMentions,
+	splitMentionQuery,
 	removeStaleCopies,
 	textTokenBudget,
 	wrapAttachment,
@@ -81,14 +86,88 @@ test("an image goes as an image, a huge one as its path", () => {
 	assert.match(tooLarge.reason, /an image too large to attach \(20\.0 MB\)/);
 });
 
-test("folders, binary files and files too large to read go as their paths", () => {
-	assert.deepEqual(prepareAttachment("a1", { name: "src", path: "src", folder: true }, 100), { id: "a1", kind: "path", name: "src", path: "src", reason: "a folder" });
+test("binary files and files too large to read go as their paths", () => {
 	assert.equal(prepareAttachment("a2", { name: "a.zip", path: "a.zip", bytes: bytesOf("PK\0\u0003") }, 100).reason, "not a text file or an image");
 	assert.equal(prepareAttachment("a3", { name: "db.bin", path: "db.bin", size: 50 * 1024 * 1024 }, 100).reason, "too large (50.0 MB)");
 	const pasted = prepareAttachment("a4", { name: "a.zip", bytes: bytesOf("PK\0\u0003") }, 100);
 	assert.match(pasted.error, /a\.zip can't be attached: it is not a text file or an image, and its location is unknown/);
 	assert.equal(pasted.needsPath, true, "saved to disk, it could go as a path");
 	assert.equal(prepareAttachment("a5", { name: "src", folder: true }, 100).needsPath, true);
+});
+
+test("a folder goes as a reference: only its path, for omp to look in and read what matters", () => {
+	const folder = prepareAttachment("a1", { name: "src", path: "src", folder: true }, 0);
+	assert.deepEqual(folder, { id: "a1", kind: "folder", name: "src", path: "src" }, "nothing of it counts against the budget");
+	assert.equal(
+		wrapAttachment(folder),
+		'<attached-file path="src" type="folder">\nA folder, as a reference: none of its files are included here. Look in it and read the files that matter for this message, if any, before you answer.\n</attached-file>',
+	);
+	assert.match(chipOf(folder).note, /Only its path is sent; omp looks in it/);
+	assert.equal(prepareAttachment("a2", { name: "src", folder: true }, 100).needsPath, true, "dropped from Finder: no path to give");
+});
+
+test("a git submodule is suggested as a folder, not a file", () => {
+	const output = [
+		"100644 a1b2c3 0\tsrc/app.ts",
+		"160000 d4e5f6 0\tvendor/lib",
+		"100644 a1b2c3 1\tsrc/conflict.ts",
+		"100644 a1b2c3 2\tsrc/conflict.ts",
+		"",
+	].join("\0");
+	assert.deepEqual(gitStagePaths(output), ["src/app.ts", "vendor/lib/", "src/conflict.ts", "src/conflict.ts"]);
+	assert.deepEqual(rankMentions(gitStagePaths(output), "lib"), [{ path: "vendor/lib", folder: true }]);
+	assert.deepEqual(gitStagePaths(""), []);
+});
+
+test("finds the paths a message mentions with @, and ranks files and folders for the suggestions", () => {
+	assert.deepEqual(mentionsIn("see @src/a.ts, @\"my docs/b.md\" and @lib; mail a@b.com @"), [["src/a.ts,", "src/a.ts"], ["my docs/b.md"], ["lib;", "lib"]]);
+	assert.deepEqual(mentionsIn("@README.md"), [["README.md"]]);
+	assert.deepEqual(mentionsIn('look in @"my docs/'), [["my docs/", "my"]], "a picked folder's quote left open at the end");
+	assert.deepEqual(mentionsIn('@"my docs/\nand more'), [["my docs/", "my"]], "or at the end of a line");
+	assert.deepEqual(
+		mentionsIn('@"my dir/ what is in here?'),
+		[["my dir/ what is in here?", "my dir/ what is in here", "my dir/ what is in", "my dir/ what is", "my dir/ what", "my dir/", "my"]],
+		"words typed after a picked folder: cut back at each space until a path exists",
+	);
+	assert.deepEqual(mentionsIn('see @"my dir/, then'), [["my dir/, then", "my dir/,", "my dir/", "my"]], "each cut also without trailing punctuation");
+	assert.deepEqual(
+		mentionsIn("fix this:\n```css\n@media (max-width: 600px) {}\n```\nand `@Test` in @src/a.ts"),
+		[["src/a.ts"]],
+		"code mentions nothing: pasted CSS or a decorator is no path",
+	);
+	assert.deepEqual(mentionsIn("```\n@media unclosed block"), [], "a block left open runs to the end");
+
+	const files = ["README.md", "src/omp/policy.ts", "src/controller.ts", "test/policy.test.js", "src/mentions.ts"];
+	const paths = query => rankMentions(files, query).map(item => (item.folder ? `${item.path}/` : item.path));
+	assert.deepEqual(paths(""), ["src/", "test/", "README.md"], "nothing typed: the top level, folders first");
+	assert.deepEqual(paths("policy"), ["src/omp/policy.ts", "test/policy.test.js"]);
+	assert.deepEqual(paths("omp"), ["src/omp/", "src/omp/policy.ts"]);
+	assert.deepEqual(paths("src/c"), ["src/controller.ts", "src/omp/policy.ts"], "the path's start before its letters in order");
+	assert.deepEqual(paths("ctrl"), ["src/controller.ts"], "letters in order");
+	assert.deepEqual(paths("zzz"), []);
+	const withClone = rankMentions(["vendor/lib/", "vendor/a.ts"], "lib").map(item => [item.path, item.folder]);
+	assert.deepEqual(withClone, [["vendor/lib", true]], "git's vendor/lib/ (a repository cloned inside, untracked) is a folder, not a nameless file");
+});
+
+test("@ completes what is typed like a path: the entries of the folder typed so far that start with the rest", () => {
+	assert.deepEqual(splitMentionQuery("src/om"), { folder: "src/", name: "om" });
+	assert.deepEqual(splitMentionQuery("src/"), { folder: "src/", name: "" });
+	assert.deepEqual(splitMentionQuery("pol"), { folder: "", name: "pol" });
+
+	const entries = [
+		{ name: "omp", folder: true },
+		{ name: "Omnibus.ts", folder: false },
+		{ name: "acp", folder: true },
+		{ name: "prompt.ts", folder: false },
+		{ name: ".git", folder: true },
+		{ name: "node_modules", folder: true },
+	];
+	const paths = (folder, name) => completeInFolder(entries, folder, name).map(item => (item.folder ? `${item.path}/` : item.path));
+	assert.deepEqual(paths("src/", "om"), ["src/omp/", "src/Omnibus.ts", "src/prompt.ts"], "names that start with it (any case, folders first), then names that hold it");
+	assert.deepEqual(paths("src/", ""), ["src/acp/", "src/omp/", "src/Omnibus.ts", "src/prompt.ts"], "everything but hidden entries and dependencies");
+	assert.deepEqual(paths("", ".g"), [".git/"], "hidden entries once a dot is typed");
+	assert.deepEqual(paths("", "node"), ["node_modules/"]);
+	assert.deepEqual(paths("../x/", "zzz"), []);
 });
 
 test("Word, Excel, PowerPoint, PDF and EPUB files go as documents for omp's read tool to turn into text", () => {

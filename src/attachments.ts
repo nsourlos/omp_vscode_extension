@@ -11,7 +11,7 @@ import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ContentBlock } from "./acp/types";
 
-export type AttachmentKind = "image" | "text" | "document" | "path";
+export type AttachmentKind = "image" | "text" | "document" | "folder" | "path";
 
 export interface Attachment {
 	id: string;
@@ -136,7 +136,8 @@ export function prepareAttachment(
 	const unreadable = (reason: string) => ({ error: `${name} can't be attached: it is ${reason}, and its location is unknown, so omp can't read it either.`, needsPath: true });
 	const asPath = (reason: string): Attachment | { error: string; needsPath?: boolean } =>
 		path ? { id, kind: "path", name, path, reason } : unreadable(reason);
-	if (source.folder) return asPath("a folder");
+	// A reference: omp lists the folder and reads the files that matter itself, so nothing of it is sent up front.
+	if (source.folder) return path ? { id, kind: "folder", name, path } : unreadable("a folder");
 	const document = source.text === undefined ? documentKind(name) : undefined;
 	if (document) return path ? { id, kind: "document", name, path, reason: document } : unreadable(document);
 	if (source.text === undefined && !source.bytes) return asPath(`too large (${megabytes(source.size ?? 0)})`);
@@ -159,6 +160,7 @@ export function chipOf(attachment: Attachment): AttachmentChip {
 	if (attachment.kind === "path") chip.note = `Only its path is sent: it is ${attachment.reason}. omp can read it if it needs to.`;
 	if (attachment.kind === "document") chip.note = `omp gets its path and reads it with its read tool, which turns ${attachment.reason} into text.`;
 	if (attachment.kind === "text") chip.note = `Its text is sent (about ${thousands(attachment.tokens ?? 0)} tokens).`;
+	if (attachment.kind === "folder") chip.note = "Only its path is sent; omp looks in it and reads the files it needs.";
 	if (attachment.savedCopy) chip.note += "\nIt has no file of its own (pasted, dropped from outside VS Code, or an unsaved editor), so a copy is saved for omp until this chat closes.";
 	if (attachment.kind === "image") {
 		chip.note = "Sent as an image.";
@@ -240,6 +242,8 @@ export function wrapAttachment(attachment: Attachment): string {
 			const what = (attachment.reason ?? "a document").replace(/^./, letter => letter.toUpperCase());
 			return `<attached-file ${where} type="document">\n${what}: its text is not included here. Read it with your read tool, which converts it to text, before you answer.\n</attached-file>`;
 		}
+		case "folder":
+			return `<attached-file ${where} type="folder">\nA folder, as a reference: none of its files are included here. Look in it and read the files that matter for this message, if any, before you answer.\n</attached-file>`;
 		case "path":
 			return `<attached-file ${where} type="path">\nOnly the path is attached: it is ${attachment.reason}. Read it from disk if you need it.\n</attached-file>`;
 	}

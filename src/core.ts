@@ -13,15 +13,18 @@ export {
 } from "./omp/mcp";
 export {
 	codeOfToolInput,
+	commandParts,
 	fileChangeWarning,
 	isReadOnlyCommand,
 	parseApprovalMessage,
+	rejectedCommandMessage,
 	rejectionMessage,
 	urlsIn,
 	PREFER_EDIT_TOOL_PROMPT,
 } from "./omp/policy";
 export { applyDecisions, describeHunk, diffFile, splitLines } from "./review/hunks";
 export { RpcError } from "./acp/rpc";
+export { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery } from "./mentions";
 export { mergeChunk } from "./chatHistory";
 export {
 	attachedChipOf,

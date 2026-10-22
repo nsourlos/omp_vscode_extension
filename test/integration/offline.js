@@ -1,9 +1,14 @@
 // Runs inside a real VS Code with the extension loaded, against test/fixtures/fake-omp.mjs.
 // No model calls: each prompt is a JSON list of steps the fake agent carries out.
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
+
+/** A folder as omp is given it: a reference, none of its files (wrapAttachment in src/attachments.ts). */
+const FOLDER_REFERENCE = folder =>
+	`<attached-file path="${folder}" type="folder">\nA folder, as a reference: none of its files are included here. Look in it and read the files that matter for this message, if any, before you answer.\n</attached-file>`;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const allTabs = () => vscode.window.tabGroups.all.flatMap(group => group.tabs);
@@ -1131,8 +1136,132 @@ exports.run = async function run() {
 			await turn;
 		},
 
-		// Last but one: it leaves read-only commands auto-allowed in session 1, which no later test expects.
-		async "\"Always allow read-only commands\" auto-allows only read-only commands, for this chat only"() {
+		async "the checkbox on another command's card allows that command's read-only programs later, never the command itself"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const cards = () => posts.filter(m => m.type === "permission");
+			const answered = () => fakeLog().slice(logged).filter(e => e.event === "permission").map(e => e.result.outcome);
+			const logged = fakeLog().length;
+
+			const kubectl = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api | head -5" }));
+			const card = await waitFor(() => cards()[0], "the card for a command that is not read-only");
+			assert.deepEqual(card.offerReadOnly, ["grep", "head"], "the checkbox names its read-only programs");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Reject", allowReadOnly: true });
+			await kubectl;
+			assert.equal(answered().at(-1).optionId, "reject_once", "the command's own answer is the one given");
+
+			await session.controller.send(steps({ permission: "grep -rn foo src | head" }));
+			assert.equal(cards().length, 1, "a later command of only those programs asks nothing");
+			assert.equal(answered().at(-1).optionId, "allow_once");
+
+			const ls = session.controller.send(steps({ permission: "ls -la" }));
+			const lsCard = await waitFor(() => cards()[1], "another read-only program still asks");
+			respond(session.panel, lsCard, "reject_once", "Reject");
+			await ls;
+
+			const again = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api" }));
+			const asked = await waitFor(() => cards()[2], "the other command still asks");
+			assert.equal(asked.offerReadOnly, undefined, "grep is already allowed: nothing left to offer");
+			respond(session.panel, asked, "reject_once", "Reject");
+			await again;
+			session.panel.dispose();
+		},
+
+		async "Reject with note rejects the command, stops the turn and sends the note, with the command as changed, next"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const logged = fakeLog().length;
+			const turn = session.controller.send(steps({ permission: "cd /repo && gh auth status 2>&1 | head -5" }, { untilCancelled: true }));
+			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a changed command", note: "no need to cd", changedCommand: "gh auth status" });
+			await turn;
+			const sent = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the note to reach omp");
+			const events = fakeLog().slice(logged).map(e => e.event).filter(event => event !== "session/new");
+			assert.deepEqual(events, ["prompt", "permission", "hang", "prompt", "text"], "rejected, stopped, then the note as the next message");
+			assert.equal(fakeLog().slice(logged).find(e => e.event === "permission").result.outcome.optionId, "reject_once", "omp is told the command was rejected");
+			assert.equal(
+				sent.text,
+				"I rejected this command, so it did not run:\n```\ncd /repo && gh auth status 2>&1 | head -5\n```\nRun this instead:\n```\ngh auth status\n```\nMy note: no need to cd\nDo what I ask here instead of what I rejected, then continue with the task.",
+			);
+			await waitFor(() => posts.filter(m => m.type === "turnEnd").length === 2, "the note's own turn to end");
+			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["cancelled", "end_turn"], "the turn that asked was stopped");
+			assert.ok(posts.some(m => m.type === "user" && m.text === sent.text), "the note shows in the chat as the user's message");
+			session.panel.dispose();
+		},
+
+		async "@ suggests the project's files and folders, and attaches the ones a message mentions"() {
+			const session = await newSession();
+			const notes = notificationsOf(session.panel);
+			fs.mkdirSync(file("mentioned/inner"), { recursive: true });
+			fs.writeFileSync(file("mentioned/inner/deep.ts"), "deep\n");
+			fs.writeFileSync(file("mentioned/top.md"), "top\n");
+			fs.writeFileSync(file("mention-me.ts"), "export const x = 1;\n");
+
+			session.panel.receive({ type: "findMentions", id: 7, query: "mention" });
+			const found = await waitFor(() => notes.find(m => m.type === "mentions" && m.id === 7), "the suggestions");
+			assert.deepEqual(found.items.slice(0, 2), [{ path: "mentioned", folder: true }, { path: "mention-me.ts", folder: false }], "a bare name: the project folder's entries first");
+			const suggested = async (id, query) => {
+				session.panel.receive({ type: "findMentions", id, query });
+				return (await waitFor(() => notes.find(m => m.type === "mentions" && m.id === id), `the suggestions for ${query}`)).items;
+			};
+			assert.deepEqual(await suggested(8, "mentioned/"), [{ path: "mentioned/inner", folder: true }, { path: "mentioned/top.md", folder: false }], "a folder: its entries");
+			assert.deepEqual(await suggested(9, "mentioned/T"), [{ path: "mentioned/top.md", folder: false }], "what starts with the rest, in any case");
+			assert.deepEqual(await suggested(10, "deep"), [{ path: "mentioned/inner/deep.ts", folder: false }], "a name in no folder typed: found further down");
+			assert.deepEqual(await suggested(11, "no-such/x"), []);
+
+			const logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "compare @mention-me.ts, @mentioned/ and @missing.ts; mail a@b.com", attachments: [] });
+			const entry = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "attachments"), "the prompt to reach omp");
+			assert.deepEqual(entry.prompt, [
+				{ type: "text", text: "compare @mention-me.ts, @mentioned/ and @missing.ts; mail a@b.com" },
+				{ type: "text", text: '<attached-file path="mention-me.ts">\nexport const x = 1;\n</attached-file>' },
+				{ type: "text", text: FOLDER_REFERENCE("mentioned") },
+			]);
+
+			// Not mentions: another letter case (macOS finds "Mention-me.ts" too), and code. Each message also
+			// mentions the folder, so it reaches omp as one with attachments: just that one.
+			const attachedTo = async text => {
+				const before = fakeLog().length;
+				session.panel.receive({ type: "send", text, attachments: [] });
+				const entry = await waitFor(() => fakeLog().slice(before).find(e => e.event === "attachments"), `"${text}" to reach omp`);
+				return entry.prompt.slice(1).map(block => block.text);
+			};
+			assert.deepEqual(await attachedTo("see @Mention-me.ts in @mentioned"), [FOLDER_REFERENCE("mentioned")], "the case typed must match the file's");
+			assert.deepEqual(
+				await attachedTo("fix:\n```css\n@mention-me.ts {}\n```\nand `@mention-me.ts` in @mentioned"),
+				[FOLDER_REFERENCE("mentioned")],
+				"code mentions nothing",
+			);
+			assert.deepEqual(
+				await attachedTo("/Users/me/notes.txt explains @mention-me.ts"),
+				['<attached-file path="mention-me.ts">\nexport const x = 1;\n</attached-file>'],
+				"a path at the start is no slash command",
+			);
+			session.panel.dispose();
+		},
+
+		async "in a git repository, @ suggestions leave out what git ignores"() {
+			const session = await newSession(); // a fresh list of the project's files
+			const notes = notificationsOf(session.panel);
+			execFileSync("git", ["init", "-q"], { cwd: root });
+			try {
+				fs.writeFileSync(file(".gitignore"), "ignored-out/\n");
+				for (const folder of ["ignored-out", "kept-in"]) {
+					fs.mkdirSync(file(folder), { recursive: true });
+					fs.writeFileSync(file(`${folder}/needle-file.ts`), "x\n");
+				}
+				session.panel.receive({ type: "findMentions", id: 21, query: "needle-file" });
+				const found = await waitFor(() => notes.find(m => m.type === "mentions" && m.id === 21), "the suggestions");
+				assert.deepEqual(found.items, [{ path: "kept-in/needle-file.ts", folder: false }]);
+			} finally {
+				fs.rmSync(file(".git"), { recursive: true, force: true });
+				fs.rmSync(file(".gitignore"), { force: true });
+				session.panel.dispose();
+			}
+		},
+
+		// Last but one: it leaves ls, cd, grep and head auto-allowed in session 1, which no later test expects.
+		async "\"Always allow\" on a read-only command allows only its programs, only while they read, for this chat only"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);
 			const cards = () => posts.slice(seen).filter(m => m.type === "permission");
@@ -1142,24 +1271,33 @@ exports.run = async function run() {
 
 			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
 			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
-			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way, and no read-only option");
+			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way");
+			assert.equal(writeCard.offerReadOnly, undefined, "and no read-only program in it to allow");
 			respond(panel, writeCard, "reject_once", "Reject");
 			await writeCommand;
 
 			const first = controller.send(steps({ permission: "ls -la" }));
 			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
-			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow read-only commands", "Reject"]);
-			respond(panel, readCard, readCard.options[1].optionId, "Always allow read-only commands");
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
+			assert.equal(readCard.offerReadOnly, undefined, "a button rather than the checkbox");
+			respond(panel, readCard, readCard.options[1].optionId, "Always allow ls");
 			await first;
 			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");
 
-			await controller.send(steps({ permission: "cd src && grep -rn \"a\\|b\" . | head" }));
-			assert.equal(cards().length, 2, "a later read-only command asks nothing");
-			assert.equal(answered().at(-1), "allow_once");
-			assert.ok(posts.slice(seen).some(m => m.type === "autoAllowed"), "and its row says it was allowed automatically");
+			await controller.send(steps({ permission: "ls src" }));
+			assert.equal(cards().length, 2, "a later ls asks nothing");
+			assert.deepEqual(posts.slice(seen).find(m => m.type === "autoAllowed")?.names, ["ls"], "and its row says why");
 
-			const write = controller.send(steps({ permission: "echo hi > notes.md" }));
-			const asked = await waitFor(() => cards()[2], "a command that writes still asks");
+			const mixed = controller.send(steps({ permission: "cd src && ls | head" }));
+			const mixedCard = await waitFor(() => cards()[2], "a command with other read-only programs still asks");
+			assert.deepEqual(mixedCard.options.map(o => o.name), ["Allow once", "Always allow cd, head", "Reject"], "offering only the ones not allowed yet");
+			respond(panel, mixedCard, mixedCard.options[1].optionId, "Always allow cd, head");
+			await mixed;
+			await controller.send(steps({ permission: "cd lib; head -3 a.txt | ls" }));
+			assert.equal(cards().length, 3, "now allowed together");
+
+			const write = controller.send(steps({ permission: "ls > notes.md" }));
+			const asked = await waitFor(() => cards()[3], "an allowed program used to write still asks");
 			respond(panel, asked, "reject_once", "Reject");
 			await write;
 
@@ -1195,7 +1333,7 @@ exports.run = async function run() {
 			assert.deepEqual(attached.map(chip => [chip.kind, chip.name, chip.path]), [
 				["text", "att.ts", "att.ts"],
 				["image", "shot.png", "shot.png"],
-				["path", "assets", "assets"],
+				["folder", "assets", "assets"],
 				["text", "notes.txt", undefined],
 			]);
 			assert.ok(attached[1].thumbnail.startsWith("data:image/png;base64,"));
@@ -1207,7 +1345,7 @@ exports.run = async function run() {
 				{ type: "text", text: "look at these" },
 				{ type: "text", text: '<attached-file path="att.ts">\nunsaved\n</attached-file>' },
 				{ type: "text", text: '<attached-file path="shot.png" type="image">\nThe image is attached to this message.\n</attached-file>' },
-				{ type: "text", text: '<attached-file path="assets" type="path">\nOnly the path is attached: it is a folder. Read it from disk if you need it.\n</attached-file>' },
+				{ type: "text", text: FOLDER_REFERENCE("assets") },
 				{ type: "text", text: '<attached-file name="notes.txt">\npasted text\n</attached-file>' },
 				{ type: "image", data: "iVBORw0KGgoH", mimeType: "image/png" },
 			]);

@@ -111,6 +111,102 @@ test("a command's permission goes inside its tool row, and the command is shown 
 	assert.equal(rows[0].querySelector(".tool-ask .card-result").textContent, "Allow once", "the answer stays visible in the row");
 });
 
+test("a shell call titled \"$ <command>\" by omp shows its command once, even when the title is cut short", () => {
+	const chat = openChat();
+	const shownTimes = (id, command, title) => {
+		chat.deliver({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: id, title, kind: "execute", status: "pending", rawInput: { command } } });
+		const row = [...chat.log.querySelectorAll(".tool")].at(-1);
+		return [...row.querySelectorAll(".tool-title, .tool-command")].filter(node => !node.hidden).length;
+	};
+	const command = "kubectl -n fbn logs deploy/private-gpt --since=10m 2>/dev/null | head -5";
+	assert.equal(shownTimes("k1", command, `$ ${command}`), 1);
+	assert.equal(shownTimes("k2", command, `$ ${command.slice(0, 20)}…`), 1, "omp cuts titles at 4000 characters");
+	assert.equal(shownTimes("k3", command, "Check the logs"), 2, "a title of its own is kept");
+});
+
+test("Reject with note… sends a note and the command as changed, and needs one of them", () => {
+	const chat = openChat();
+	const command = "cd /repo && gh auth status 2>&1 | head -5";
+	chat.deliver({ ...permission, command });
+	const ask = chat.log.querySelector(".tool-ask");
+	const buttons = ask.querySelector(".buttons");
+	const form = ask.querySelector(".reject-note");
+	assert.equal(form.hidden, true);
+	[...buttons.querySelectorAll("button")].find(button => button.textContent === "Reject with note…").click();
+	assert.equal(form.hidden, false);
+	assert.equal(buttons.hidden, true, "the form replaces the buttons");
+	const [commandBox, note] = form.querySelectorAll("textarea");
+	assert.equal(commandBox.value, command, "the command, ready to change");
+	const [submit, cancel] = form.querySelectorAll("button");
+
+	const sent = chat.posted.length;
+	submit.click();
+	assert.equal(chat.posted.length, sent, "nothing changed and no note: nothing sent");
+	cancel.click();
+	assert.equal(form.hidden, true);
+	assert.equal(buttons.hidden, false);
+
+	commandBox.value = "gh auth status --hostname github.com";
+	note.value = "  no need to cd  ";
+	submit.click();
+	assert.deepEqual(chat.posted.at(-1), {
+		type: "respond",
+		requestId: "7",
+		value: "reject_once",
+		label: "Rejected with a changed command",
+		note: "no need to cd",
+		changedCommand: "gh auth status --hostname github.com",
+	});
+	assert.equal(ask.querySelector(".card-result").textContent, "Rejected with a changed command");
+
+	chat.deliver({ ...permission, requestId: "8", toolCallId: "t2", command: "ls" });
+	const second = chat.log.querySelectorAll(".tool-ask")[1];
+	[...second.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
+	second.querySelectorAll(".reject-note textarea")[1].value = "use rg";
+	second.querySelector(".reject-note button").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "reject_once", label: "Rejected with a note", note: "use rg" }, "an unchanged command is not sent as a change");
+});
+
+test("Reject with note… counts the read-only checkbox too", () => {
+	const chat = openChat();
+	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: ["cat"] });
+	const ask = chat.log.querySelector(".tool-ask");
+	ask.querySelector(".always-read-only input").checked = true;
+	[...ask.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
+	ask.querySelectorAll(".reject-note textarea")[1].value = "don't pipe into sh";
+	ask.querySelector(".reject-note button").click();
+	assert.deepEqual(chat.posted.at(-1), {
+		type: "respond",
+		requestId: "7",
+		value: "reject_once",
+		label: "Rejected with a note · cat allowed from now on",
+		note: "don't pipe into sh",
+		allowReadOnly: true,
+	});
+});
+
+test("a command that is not read-only offers a checkbox for later read-only commands, sent with the answer", () => {
+	const chat = openChat();
+	chat.deliver({ ...permission, command: "kubectl get pods | grep api | head", offerReadOnly: ["grep", "head"] });
+	const ask = chat.log.querySelector(".tool-ask");
+	assert.equal(ask.querySelector(".always-read-only").textContent, " From now on, allow grep, head without asking in this chat", "names the programs it allows");
+	const box = ask.querySelector(".always-read-only input");
+	assert.equal(box.checked, false, "off until ticked");
+	box.checked = true;
+	ask.querySelectorAll(".buttons button")[1].click();
+	assert.deepEqual(chat.posted.at(-1), {
+		type: "respond",
+		requestId: "7",
+		value: "reject_once",
+		label: "Reject · grep, head allowed from now on",
+		allowReadOnly: true,
+	});
+	assert.equal(box.disabled, true);
+
+	chat.deliver({ ...permission, requestId: "8", toolCallId: "other" });
+	assert.equal(chat.log.querySelectorAll(".always-read-only").length, 1, "not offered unless the extension asks for it");
+});
+
 test("approval cards send Approve or Deny with a label", () => {
 	const chat = openChat();
 	chat.deliver({ type: "approval", requestId: "8", toolName: "bash", details: "rm -rf build", warning: "may change files" });
@@ -601,6 +697,152 @@ const { wrapAttachment } = require("../dist/core.js");
 
 const chip = (id, kind, name, extra = {}) => ({ id, kind, name, ...extra });
 const chipNames = container => [...container.querySelectorAll(".attachment-name")].map(node => node.textContent);
+
+test("a long message of the user's shows its first lines until opened", () => {
+	// jsdom lays nothing out: the clamped text reports being taller than its box, as a long one would.
+	const chat = openChat(window => {
+		Object.defineProperty(window.HTMLElement.prototype, "scrollHeight", { get() { return this.textContent.length > 20 ? 200 : 20; } });
+		Object.defineProperty(window.HTMLElement.prototype, "clientHeight", { get() { return 60; } });
+	});
+	chat.deliver({ type: "user", text: "short" }, { type: "user", text: "a long message\n".repeat(10) });
+	const [short, long] = chat.log.querySelectorAll(".msg.user");
+	assert.equal(short.querySelector("button.more").hidden, true, "nothing to open");
+	const more = long.querySelector("button.more");
+	assert.equal(more.hidden, false);
+	assert.ok(long.querySelector(".user-text").classList.contains("clamped"));
+	more.click();
+	assert.ok(!long.querySelector(".user-text").classList.contains("clamped"), "opened in full");
+	more.click();
+	assert.ok(long.querySelector(".user-text").classList.contains("clamped"), "and closed again");
+});
+
+test("@ asks for matching files and folders, and picking one puts its path in the message", async () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	const type = text => {
+		input.value = text;
+		input.selectionStart = input.selectionEnd = text.length;
+		input.dispatchEvent(new chat.window.Event("input"));
+	};
+	const key = name => input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: name, cancelable: true }));
+	const rows = () => [...doc.querySelectorAll(".suggestion")];
+
+	type("mail me@work");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	assert.ok(!chat.posted.some(m => m.type === "findMentions"), "an address is no mention");
+
+	type("look at @src/om");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	const request = chat.posted.at(-1);
+	assert.deepEqual({ ...request, id: undefined }, { type: "findMentions", id: undefined, query: "src/om" });
+	chat.deliver({ type: "mentions", id: request.id, items: [{ path: "src/omp", folder: true }, { path: "src/omp/policy.ts", folder: false }, { path: "my docs/a.md", folder: false }] });
+	assert.deepEqual(rows().map(row => row.textContent), ["📁omp/ src", "📄policy.ts src/omp", "📄a.md my docs"]);
+	assert.ok(rows()[0].classList.contains("active"), "the first is picked by Enter");
+
+	key("ArrowDown");
+	assert.ok(rows()[1].classList.contains("active"));
+	key("Enter");
+	assert.equal(input.value, "look at @src/omp/policy.ts ");
+	assert.equal(doc.querySelector(".suggestions").hidden, true);
+	assert.ok(!chat.posted.some(m => m.type === "send"), "Enter picked the file rather than sending");
+
+	type("look at @src/omp/policy.ts and @my");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "my docs", folder: true }] });
+	key("Tab");
+	assert.equal(input.value, 'look at @src/omp/policy.ts and @"my docs/', "a folder stays open to pick in, a path with spaces quoted");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	assert.equal(chat.posted.at(-1).query, "my docs/", "and its contents are asked for at once");
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "my docs/a.md", folder: false }] });
+	assert.ok(!rows()[0].classList.contains("active"), "in a folder typed in full, Enter sends it as typed: a row is picked with the arrows");
+	key("ArrowDown");
+	key("Enter");
+	assert.equal(input.value, 'look at @src/omp/policy.ts and @"my docs/a.md" ', "a file ends the mention");
+
+	type("@x");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	const stale = chat.posted.at(-1).id;
+	type("@xy");
+	chat.deliver({ type: "mentions", id: stale, items: [{ path: "x.ts", folder: false }] });
+	assert.equal(rows().length, 0, "results for what was typed before are dropped");
+});
+
+test("typing on while a lookup is pending unpicks the old rows, so Enter sends as typed rather than an earlier result", async () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	const type = text => {
+		input.value = text;
+		input.selectionStart = input.selectionEnd = text.length;
+		input.dispatchEvent(new chat.window.Event("input"));
+	};
+	type("look at @src/a.t");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "src/a.test.ts", folder: false }] });
+	assert.ok(doc.querySelector(".suggestion.active"));
+	type("look at @src/a.ts"); // and Enter at once, before the new rows
+	assert.equal(doc.querySelector(".suggestion.active"), null, "the old rows still show, but none is picked");
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+	assert.equal(chat.posted.at(-1).text, "look at @src/a.ts");
+});
+
+test("picking for a quoted mention typed before other words leaves those words", async () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	input.value = 'please check @"my d and summarize it';
+	input.selectionStart = input.selectionEnd = 'please check @"my d'.length;
+	input.dispatchEvent(new chat.window.Event("input"));
+	await new Promise(resolve => setTimeout(resolve, 80));
+	assert.equal(chat.posted.at(-1).query, "my d");
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "my dir", folder: true }] });
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Tab", cancelable: true }));
+	assert.equal(input.value, 'please check @"my dir/ and summarize it');
+});
+
+test("a guess from letters in order is shown but not picked, so Enter sends the message as typed", async () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	input.value = "thanks, ping @john";
+	input.selectionStart = input.selectionEnd = input.value.length;
+	input.dispatchEvent(new chat.window.Event("input"));
+	await new Promise(resolve => setTimeout(resolve, 80));
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "src/json/handler.ts", folder: false }] });
+	assert.equal(doc.querySelectorAll(".suggestion").length, 1);
+	assert.equal(doc.querySelector(".suggestion.active"), null);
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+	assert.equal(chat.posted.at(-1).text, "thanks, ping @john");
+});
+
+test("moving the cursor refreshes the suggestions: off the mention they close, and a pick replaces the whole word", async () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	const moveTo = (at, key) => {
+		input.selectionStart = input.selectionEnd = at;
+		input.dispatchEvent(new chat.window.KeyboardEvent("keyup", { key }));
+	};
+	input.value = "fix this @src";
+	moveTo(input.value.length, "End");
+	await new Promise(resolve => setTimeout(resolve, 80));
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "src/a.ts", folder: false }] });
+	assert.ok(doc.querySelector(".suggestion.active"));
+
+	moveTo(3, "Home"); // before the @, as Home or ← would leave it
+	assert.equal(doc.querySelector(".suggestions").hidden, true, "no mention at the cursor: closed");
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+	assert.equal(chat.posted.at(-1).text, "fix this @src", "Enter sends the text untouched");
+
+	input.value = "see @srcxx now";
+	moveTo("see @src".length, "ArrowLeft"); // into the word
+	await new Promise(resolve => setTimeout(resolve, 80));
+	assert.equal(chat.posted.at(-1).query, "src", "asked again for what is before the cursor");
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "src/a.ts", folder: false }] });
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Tab", cancelable: true }));
+	assert.equal(input.value, "see @src/a.ts now", "the rest of the word (xx) is replaced, not kept");
+});
 
 test("+ asks the extension for the file picker", () => {
 	const chat = openChat();
