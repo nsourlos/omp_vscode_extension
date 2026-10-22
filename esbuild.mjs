@@ -1,3 +1,4 @@
+import { copyFile, mkdir } from "node:fs/promises";
 import * as esbuild from "esbuild";
 
 const watch = process.argv.includes("--watch");
@@ -28,8 +29,15 @@ const webview = {
 	logLevel: "info",
 };
 
+/** Mermaid's own browser build (global `mermaid`), which the chat page loads when a reply first holds a diagram. */
+async function copyMermaid() {
+	await mkdir("dist", { recursive: true });
+	await copyFile("node_modules/mermaid/dist/mermaid.min.js", "dist/mermaid.js");
+}
+
 if (watch) {
+	await copyMermaid();
 	for (const build of [options, webview]) await (await esbuild.context(build)).watch();
 } else {
-	await Promise.all([esbuild.build(options), esbuild.build(webview)]);
+	await Promise.all([esbuild.build(options), esbuild.build(webview), copyMermaid()]);
 }

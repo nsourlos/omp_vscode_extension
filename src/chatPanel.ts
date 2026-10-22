@@ -158,18 +158,20 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.U
 	const n = nonce();
 	const script = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.js"));
 	const markdownScript = webview.asWebviewUri(markdown);
+	const mermaidScript = webview.asWebviewUri(vscode.Uri.joinPath(markdown, "..", "mermaid.js"));
 	const style = webview.asWebviewUri(vscode.Uri.joinPath(media, "chat.css"));
 	const chime = webview.asWebviewUri(vscode.Uri.joinPath(media, "staplebops-01.mp3"));
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; media-src ${webview.cspSource}; img-src data:; script-src 'nonce-${n}';">
+<!-- Inline styles: the ones Mermaid puts in the diagrams it draws (cleaned before they reach the page). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; media-src ${webview.cspSource}; img-src data:; script-src 'nonce-${n}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="stylesheet" href="${style}">
 <title>OMP</title>
 </head>
-<body data-chime="${chime}">
+<body data-chime="${chime}" data-mermaid="${mermaidScript}">
 <div id="log" role="log" aria-live="polite"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>

@@ -324,6 +324,7 @@
     "diff": "^8.0.2",
     "dompurify": "3.4.16",
     "marked": "18.0.14",
+    "mermaid": "12.1.0",
     "which": "^5.0.0"
   },
   "devDependencies": {

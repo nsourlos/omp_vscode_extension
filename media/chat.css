@@ -480,6 +480,41 @@ details.thought summary,
 	display: none;
 }
 
+/* A Mermaid diagram drawn in a reply, with a button to see its code. */
+.mermaid-block {
+	margin: 6px 0;
+}
+
+.diagram {
+	overflow-x: auto;
+	padding: 8px;
+	border: 1px solid var(--vscode-panel-border);
+	text-align: center;
+}
+
+.diagram svg {
+	max-width: 100%;
+	height: auto;
+}
+
+.diagram[hidden],
+.mermaid-block pre[hidden] {
+	display: none;
+}
+
+.diagram-toggle {
+	display: block;
+	margin: 0 0 2px auto;
+	padding: 1px 6px;
+	font-size: 0.85em;
+}
+
+.diagram-error {
+	color: var(--vscode-errorForeground);
+	font-size: 0.9em;
+	margin-bottom: 2px;
+}
+
 .tool-note {
 	margin: 2px 0;
 	font-style: italic;
