@@ -212,6 +212,7 @@ test("approval cards send Approve or Deny with a label", () => {
 	chat.deliver({ type: "approval", requestId: "8", toolName: "bash", details: "rm -rf build", warning: "may change files" });
 	const card = chat.log.querySelector(".card");
 	assert.match(card.querySelector(".warning").textContent, /may change files/);
+	assert.equal(card.querySelectorAll("button")[1].className, "reject", "Deny looks like the other cards' Reject");
 	card.querySelectorAll("button")[1].click();
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "Deny", label: "Denied" });
 });

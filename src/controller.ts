@@ -116,6 +116,8 @@ export class Controller implements vscode.Disposable {
 	/** Copies of attached files that came with no location, for omp to read; removed when the chat closes. */
 	readonly copiesDir: string;
 	#disposed = false;
+	/** This tab has shown the warning about omp's Bun trusting leaked certificate authorities. */
+	#warnedAboutBun = false;
 	/** omp's last word on its context window, which sets how much text a message may attach. */
 	#context: { used: number; size: number } | undefined;
 	#lastNotice: string | undefined;
@@ -617,12 +619,15 @@ export class Controller implements vscode.Disposable {
 		for (const problem of mcp.problems) this.#notice("warning", problem);
 
 		this.chat.post({ type: "status", state: "starting" });
-		// Checked while omp starts; a Bun that trusts leaked certificate authorities is worth a warning every time.
-		void bunVersion().then(version => {
-			const problem = version && bunCertificateProblem(version);
-			if (problem && !this.#disposed) this.#notice("warning", problem);
-		});
 		const command = resolveOmpCommand(config.get<string>("path", "omp"));
+		// Checked while omp starts, once per tab (a new session after `bun upgrade` checks again). Posted
+		// directly: through #notice it would arrive between startup notices and upset their repeat check.
+		void bunVersion(command).then(version => {
+			const problem = version && bunCertificateProblem(version);
+			if (!problem || this.#disposed || this.#warnedAboutBun) return;
+			this.#warnedAboutBun = true;
+			this.chat.post({ type: "notice", level: "warning", text: problem });
+		});
 		const agent = new OmpAgent({
 			command,
 			args,

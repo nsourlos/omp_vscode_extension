@@ -3,8 +3,9 @@
  * No VS Code dependency: everything editor-specific comes in through `ClientHandlers`.
  */
 import type { ChildProcess } from "node:child_process";
+import { closeSync, openSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import spawn from "cross-spawn";
 import which from "which";
 import { AgentError, JsonRpcConnection, RpcError, withoutUrlQueries } from "../acp/rpc";
@@ -117,9 +118,39 @@ export function bunCertificateProblem(version: string): string | undefined {
 	);
 }
 
-/** The version of the Bun omp runs on (the one on omp's PATH), or undefined if there is none. */
-export function bunVersion(): Promise<string | undefined> {
-	const bun = which.sync("bun", { nothrow: true, path: searchPath() });
+/**
+ * The Bun that runs this omp, or undefined when it can't be told. omp installed with Bun is a script
+ * whose first line names its runtime: `#!/usr/bin/env bun` (the bun on omp's PATH) or a path to a
+ * bun. A script for another runtime (node) runs on no Bun, and a compiled program carries its own
+ * Bun, which can't be asked. On Windows, omp is a shim (omp.exe, omp.cmd) that starts the bun on
+ * PATH, so that one is the best guess.
+ */
+export function ompBun(ompCommand: string): string | undefined {
+	const onPath = () => which.sync("bun", { nothrow: true, path: searchPath() }) ?? undefined;
+	if (process.platform === "win32") return onPath();
+	let firstLine: string;
+	try {
+		const file = openSync(realpathSync(ompCommand), "r");
+		try {
+			const start = Buffer.alloc(256);
+			firstLine = start.subarray(0, readSync(file, start, 0, start.length, 0)).toString("utf8").split("\n")[0];
+		} finally {
+			closeSync(file);
+		}
+	} catch {
+		return undefined; // not found, or not readable
+	}
+	if (!firstLine.startsWith("#!")) return undefined; // a compiled program
+	const words = firstLine.slice(2).trim().split(/\s+/);
+	// `#!/usr/bin/env bun`, or `#!/usr/bin/env -S bun --flag`: the program is the first word after env's own options.
+	const program = basename(words[0]) === "env" ? words.slice(1).find(word => !word.startsWith("-")) : words[0];
+	if (!program || basename(program) !== "bun") return undefined;
+	return program.includes("/") ? program : onPath();
+}
+
+/** The version of the Bun that runs this omp (see ompBun), or undefined if there is none or it can't be told. */
+export function bunVersion(ompCommand: string): Promise<string | undefined> {
+	const bun = ompBun(ompCommand);
 	if (!bun) return Promise.resolve(undefined);
 	return new Promise(resolve => {
 		const child = spawn(bun, ["--version"], { env: ompEnvironment(), stdio: ["ignore", "pipe", "ignore"] });
