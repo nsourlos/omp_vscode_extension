@@ -98,6 +98,48 @@ export function ompSavedToken(ompCommand: string): (url: string) => Promise<stri
 		});
 }
 
+/** The first Bun that no longer trusts the eMudhra intermediates whose keys leaked (October 2026). */
+const FIRST_SAFE_BUN = [1, 4, 4];
+
+/**
+ * A warning when this Bun version still trusts the leaked eMudhra intermediates, or undefined.
+ * Bun carries its own root certificates and does not check Certificate Transparency, so omp on an
+ * older Bun accepts a forged certificate for any site: its API keys and replies could be intercepted.
+ */
+export function bunCertificateProblem(version: string): string | undefined {
+	const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(version.trim())?.slice(1).map(Number);
+	if (!parts) return undefined;
+	const index = parts.findIndex((part, i) => part !== FIRST_SAFE_BUN[i]);
+	if (index === -1 || parts[index] > FIRST_SAFE_BUN[index]) return undefined;
+	return (
+		`omp runs on Bun ${version.trim()}, which still trusts certificate authorities whose keys leaked in October 2026 (eMudhra), ` +
+		"so someone on your network could read omp's API keys or change its replies. Run `bun upgrade` (1.4.4 or later is fixed), then start a new session."
+	);
+}
+
+/** The version of the Bun omp runs on (the one on omp's PATH), or undefined if there is none. */
+export function bunVersion(): Promise<string | undefined> {
+	const bun = which.sync("bun", { nothrow: true, path: searchPath() });
+	if (!bun) return Promise.resolve(undefined);
+	return new Promise(resolve => {
+		const child = spawn(bun, ["--version"], { env: ompEnvironment(), stdio: ["ignore", "pipe", "ignore"] });
+		let stdout = "";
+		const timer = setTimeout(() => {
+			child.kill();
+			resolve(undefined);
+		}, 10_000);
+		child.stdout!.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+		child.on("error", () => {
+			clearTimeout(timer);
+			resolve(undefined);
+		});
+		child.on("close", code => {
+			clearTimeout(timer);
+			resolve(code === 0 ? stdout.trim() || undefined : undefined);
+		});
+	});
+}
+
 /** Full path to omp (finds omp, omp.exe, omp.cmd…), or the name itself if not found. */
 export function resolveOmpCommand(configured: string): string {
 	return which.sync(configured, { nothrow: true, path: searchPath() }) ?? configured;
