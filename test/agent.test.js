@@ -8,16 +8,18 @@ const {
 	addMcpServerToFile,
 	addSavedLogins,
 	bunCertificateProblem,
+	bunVersion,
 	ensureMcpConfigFile,
 	failedMcpServers,
 	loadMcpServers,
 	mcpConfigFiles,
 	mcpServerNameProblem,
+	ompBun,
 	ompSavedToken,
 	splitCommandLine,
 	suggestMcpServerName,
 } = require("../dist/core.js");
-const { lstatSync, mkdirSync, statSync, symlinkSync } = require("node:fs");
+const { chmodSync, lstatSync, mkdirSync, statSync, symlinkSync } = require("node:fs");
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -499,5 +501,46 @@ test("a Bun that still trusts the leaked eMudhra certificate authorities gets a 
 	}
 	for (const version of ["1.4.4", "1.4.10", "1.5.0", "2.0.0", "1.4.5-canary.1+abc", "not a version", ""]) {
 		assert.equal(bunCertificateProblem(version), undefined, version);
+	}
+});
+
+test("the Bun checked is the one that runs omp, as omp's first line says", { skip: process.platform === "win32" }, async () => {
+	const dir = mkdtempSync(join(tmpdir(), "omp-bun-"));
+	const executable = (name, text) => {
+		const file = join(dir, name);
+		writeFileSync(file, text);
+		chmodSync(file, 0o755);
+		return file;
+	};
+	const pathBun = join(dir, "path-bin", "bun");
+	mkdirSync(join(dir, "path-bin"));
+	writeFileSync(pathBun, `#!${process.execPath}\nconsole.log("1.3.9");\n`);
+	chmodSync(pathBun, 0o755);
+	const ownBun = executable("own-bun", `#!${process.execPath}\nconsole.log("1.4.2");\n`);
+	const savedPath = process.env.PATH;
+	process.env.PATH = `${join(dir, "path-bin")}:${savedPath}`;
+	try {
+		const viaEnv = executable("omp-env", "#!/usr/bin/env bun\nconsole.log('omp');\n");
+		const viaEnvS = executable("omp-env-s", "#!/usr/bin/env -S bun --smol\n");
+		const viaPath = executable("omp-own", `#!${dir}/bun\n`);
+		symlinkSync(ownBun, join(dir, "bun"));
+		const onNode = executable("omp-node", "#!/usr/bin/env node\n");
+		const compiled = executable("omp-compiled", "\x7fELF\x02\x01\x01 not a script");
+		const linked = join(dir, "omp-link");
+		symlinkSync(viaEnv, linked);
+
+		assert.equal(ompBun(viaEnv), pathBun, "#!/usr/bin/env bun: the bun on omp's PATH");
+		assert.equal(ompBun(viaEnvS), pathBun, "env -S with flags");
+		assert.equal(ompBun(linked), pathBun, "through the symlink a global install makes");
+		assert.equal(ompBun(viaPath), `${dir}/bun`, "a path to a bun: that bun");
+		assert.equal(ompBun(onNode), undefined, "omp on Node runs on no Bun");
+		assert.equal(ompBun(compiled), undefined, "a compiled omp's own Bun can't be asked");
+		assert.equal(ompBun(join(dir, "missing")), undefined);
+
+		assert.equal(await bunVersion(viaEnv), "1.3.9");
+		assert.equal(await bunVersion(viaPath), "1.4.2");
+		assert.equal(await bunVersion(onNode), undefined, "so no false warning");
+	} finally {
+		process.env.PATH = savedPath;
 	}
 });
