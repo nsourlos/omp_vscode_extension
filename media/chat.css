@@ -223,6 +223,31 @@ button.secondary {
 	background: var(--vscode-button-secondaryBackground);
 }
 
+/*
+ * Refusing answers (Reject, Deny) in the theme's error colours; Allow keeps the theme's button colour.
+ * Reject with note is the secondary button tinted with that error colour. The colours after the
+ * theme's are for themes that leave them out; a high-contrast theme's border keeps them visible.
+ */
+button.reject {
+	color: var(--vscode-statusBarItem-errorForeground, #fff);
+	background: var(--vscode-statusBarItem-errorBackground, #a8504a);
+	outline: 1px solid var(--vscode-contrastBorder, transparent);
+}
+
+button.reject:hover:not(:disabled) {
+	background: var(--vscode-statusBarItem-errorHoverBackground, #93433e);
+}
+
+button.reject-with-note {
+	color: var(--vscode-button-secondaryForeground, #fff);
+	background: color-mix(in srgb, var(--vscode-statusBarItem-errorBackground, #a8504a) 30%, var(--vscode-button-secondaryBackground, #5f6b7a));
+	outline: 1px solid var(--vscode-contrastBorder, transparent);
+}
+
+button.reject-with-note:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--vscode-statusBarItem-errorBackground, #a8504a) 30%, var(--vscode-button-secondaryHoverBackground, #4f5a67));
+}
+
 button:disabled {
 	opacity: 0.5;
 	cursor: default;

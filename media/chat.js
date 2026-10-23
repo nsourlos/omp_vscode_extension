@@ -872,7 +872,7 @@
 		}
 		const buttons = node.appendChild(el("div", "buttons"));
 		for (const option of msg.options || []) {
-			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "secondary", option.name));
+			const button = buttons.appendChild(el("button", option.kind.startsWith("allow") ? "" : "reject", option.name));
 			const hint = option.description || OPTION_HINTS[option.kind];
 			if (hint) button.title = hint;
 			button.addEventListener("click", () => {
@@ -891,7 +891,7 @@
 	 * stops the turn and sends them as the next message, since omp's answer can only say "rejected".
 	 */
 	function addRejectWithNote(node, buttons, msg, reject, toolCallId, readOnlyBox) {
-		const open = buttons.appendChild(el("button", "secondary", "Reject with note…"));
+		const open = buttons.appendChild(el("button", "reject-with-note", "Reject with note…"));
 		open.title = "Reject, and tell omp what to do instead, or change the command";
 		const form = node.appendChild(el("div", "reject-note"));
 		form.hidden = true;
@@ -972,7 +972,7 @@
 		addWarning(node, msg.warning);
 		const buttons = node.appendChild(el("div", "buttons"));
 		buttons.appendChild(el("button", "", "Approve")).addEventListener("click", () => respond(msg.requestId, "Approve", "Approved"));
-		buttons.appendChild(el("button", "secondary", "Deny")).addEventListener("click", () => respond(msg.requestId, "Deny", "Denied"));
+		buttons.appendChild(el("button", "reject", "Deny")).addEventListener("click", () => respond(msg.requestId, "Deny", "Denied"));
 		finishCard(node);
 	}
 
