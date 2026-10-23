@@ -34,7 +34,7 @@ import type {
 } from "./acp/types";
 import type { ChatPanel } from "./chatPanel";
 import { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery, type MentionItem } from "./mentions";
-import { OmpAgent, REPLAYED_UPDATES, ompSavedToken, resolveOmpCommand } from "./omp/agent";
+import { OmpAgent, REPLAYED_UPDATES, bunCertificateProblem, bunVersion, ompSavedToken, resolveOmpCommand } from "./omp/agent";
 import { addSavedLogins, loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
@@ -617,6 +617,11 @@ export class Controller implements vscode.Disposable {
 		for (const problem of mcp.problems) this.#notice("warning", problem);
 
 		this.chat.post({ type: "status", state: "starting" });
+		// Checked while omp starts; a Bun that trusts leaked certificate authorities is worth a warning every time.
+		void bunVersion().then(version => {
+			const problem = version && bunCertificateProblem(version);
+			if (problem && !this.#disposed) this.#notice("warning", problem);
+		});
 		const command = resolveOmpCommand(config.get<string>("path", "omp"));
 		const agent = new OmpAgent({
 			command,

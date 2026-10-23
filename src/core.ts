@@ -1,5 +1,5 @@
 /** VS Code-free modules, bundled separately so they can be tested with plain Node. */
-export { OmpAgent, ompSavedToken, resolveOmpCommand } from "./omp/agent";
+export { OmpAgent, bunCertificateProblem, ompSavedToken, resolveOmpCommand } from "./omp/agent";
 export {
 	addMcpServerToFile,
 	addSavedLogins,

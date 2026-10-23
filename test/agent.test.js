@@ -7,6 +7,7 @@ const {
 	OmpAgent,
 	addMcpServerToFile,
 	addSavedLogins,
+	bunCertificateProblem,
 	ensureMcpConfigFile,
 	failedMcpServers,
 	loadMcpServers,
@@ -490,4 +491,13 @@ test("a key in a web address omp prints in two pieces is still hidden in the log
 	const stderr = logged.filter(line => line.startsWith("[omp stderr]"));
 	assert.deepEqual(stderr, ["[omp stderr] could not reach https://mcp.example/v1?… (timeout)"]);
 	assert.ok(!logged.some(line => line.includes("SPLIT-SECRET")));
+});
+
+test("a Bun that still trusts the leaked eMudhra certificate authorities gets a warning", () => {
+	for (const version of ["1.3.14", "1.4.3", "0.9.99", "1.3.14\n"]) {
+		assert.match(bunCertificateProblem(version) ?? "", /bun upgrade/, version);
+	}
+	for (const version of ["1.4.4", "1.4.10", "1.5.0", "2.0.0", "1.4.5-canary.1+abc", "not a version", ""]) {
+		assert.equal(bunCertificateProblem(version), undefined, version);
+	}
 });
