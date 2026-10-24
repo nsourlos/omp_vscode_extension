@@ -221,14 +221,17 @@ export class OmpAgent {
 		return session;
 	}
 
-	/** The chats omp has saved for this folder, newest first, every page of them (needs `connect()` or `start()`). */
-	async listSessions(): Promise<SavedSession[]> {
+	/**
+	 * The chats omp has saved for this folder (or `cwd`, or every folder when it is null), newest first,
+	 * every page of them (needs `connect()` or `start()`).
+	 */
+	async listSessions(cwd: string | null = this.options.cwd): Promise<SavedSession[]> {
 		const sessions: SavedSession[] = [];
 		const seen = new Set<string>();
 		let cursor: string | undefined;
 		do {
 			const result = await this.#requireRpc().request<{ sessions?: SavedSession[]; nextCursor?: string | null }>("session/list", {
-				cwd: this.options.cwd,
+				...(cwd !== null ? { cwd } : {}),
 				...(cursor ? { cursor } : {}),
 			});
 			sessions.push(...(result?.sessions ?? []));

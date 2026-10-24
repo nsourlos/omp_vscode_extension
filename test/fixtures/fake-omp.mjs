@@ -23,8 +23,12 @@
 // Loading a session whose id starts with "missing" fails, like omp's "ACP session not found";
 // one starting with "flaky" fails with another error ("rate limited"), every time.
 // Loading "untitled-crash" makes the "/rename" that names it exit omp.
+// session/list without a cwd also lists a chat from MOVED_FOLDER (which doesn't exist) and one from the home folder.
 import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline";
+
+const MOVED_FOLDER = "/no-such-folder/renamed-project";
 
 const args = process.argv.slice(2);
 // `omp token <id>`: a saved MCP sign-in exists only for URLs containing "signed-in".
@@ -163,11 +167,20 @@ async function handle(message) {
 		}
 		case "session/list": {
 			record({ event: "session/list", cwd: message.params.cwd, cursor: message.params.cursor });
-			const sessions = [
-				{ sessionId: "empty-1", cwd: message.params.cwd, title: "", updatedAt: "2026-10-02T09:00:00.000Z", _meta: { messageCount: 0 } },
-				{ sessionId: "saved-1", cwd: message.params.cwd, title: "Fix the parser", updatedAt: "2026-10-01T09:00:00.000Z", _meta: { messageCount: 3 } },
-				{ sessionId: "saved-0", cwd: message.params.cwd, title: "Oldest chat", updatedAt: "2026-09-01T09:00:00.000Z", _meta: { messageCount: 2 } },
+			const here = message.params.cwd ?? process.cwd();
+			const elsewhere = [
+				{ sessionId: "moved-1", cwd: MOVED_FOLDER, title: "Chat from a renamed folder", updatedAt: "2026-09-20T09:00:00.000Z", _meta: { messageCount: 2 } },
+				{ sessionId: "other-1", cwd: homedir(), title: "Chat from another folder", updatedAt: "2026-09-10T09:00:00.000Z", _meta: { messageCount: 2 } },
 			];
+			const sessions =
+				here === MOVED_FOLDER
+					? elsewhere.slice(0, 1)
+					: [
+							{ sessionId: "empty-1", cwd: here, title: "", updatedAt: "2026-10-02T09:00:00.000Z", _meta: { messageCount: 0 } },
+							{ sessionId: "saved-1", cwd: here, title: "Fix the parser", updatedAt: "2026-10-01T09:00:00.000Z", _meta: { messageCount: 3 } },
+							{ sessionId: "saved-0", cwd: here, title: "Oldest chat", updatedAt: "2026-09-01T09:00:00.000Z", _meta: { messageCount: 2 } },
+							...(message.params.cwd ? [] : elsewhere),
+						];
 			if (!pageSize) return send({ id: message.id, result: { sessions } });
 			const offset = Number(message.params.cursor ?? 0);
 			const next = offset + pageSize < sessions.length ? String(offset + pageSize) : undefined;

@@ -1120,10 +1120,8 @@ function promptPath(uri: vscode.Uri): string {
 	return outside ? uri.fsPath : inside.split("\\").join("/");
 }
 
-/** The chats omp has saved for the open folder, newest first, asked of a short-lived omp. */
-export async function listSavedChats(log: (line: string) => void): Promise<SavedSession[]> {
-	const folder = vscode.workspace.workspaceFolders?.[0];
-	if (!folder) throw new Error("Open a folder first: omp works inside a project folder.");
+/** Runs `use` with a short-lived omp, started in `folder`, that can only list saved chats. */
+export async function withListingOmp<T>(log: (line: string) => void, folder: string, use: (omp: OmpAgent) => Promise<T>): Promise<T> {
 	const config = vscode.workspace.getConfiguration("omp");
 	const refuse = async (): Promise<never> => {
 		throw new RpcError(-32601, "not available while listing chats");
@@ -1131,7 +1129,7 @@ export async function listSavedChats(log: (line: string) => void): Promise<Saved
 	const agent = new OmpAgent({
 		command: resolveOmpCommand(config.get<string>("path", "omp")),
 		args: [...config.get<string[]>("extraArgs", [])],
-		cwd: folder.uri.fsPath,
+		cwd: folder,
 		handlers: {
 			readTextFile: refuse,
 			writeTextFile: refuse,
@@ -1144,7 +1142,7 @@ export async function listSavedChats(log: (line: string) => void): Promise<Saved
 	});
 	try {
 		await agent.connect();
-		return await agent.listSessions();
+		return await use(agent);
 	} finally {
 		agent.dispose();
 	}

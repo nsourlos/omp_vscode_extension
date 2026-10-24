@@ -15,7 +15,7 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 	const reviews = new ReviewManager();
 	// In the extension's own storage, private to this user (a temp folder is shared by every user on Linux).
 	const copiesRoot = vscode.Uri.joinPath(context.globalStorageUri, "attachments").fsPath;
-	const sessions = new Sessions(context.extensionUri, reviews, output, copiesRoot);
+	const sessions = new Sessions(context.extensionUri, reviews, output, copiesRoot, context.globalState);
 	void removeStaleCopies(copiesRoot);
 
 	context.subscriptions.push(
