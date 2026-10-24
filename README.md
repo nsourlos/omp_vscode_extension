@@ -40,7 +40,7 @@ Requirements: `omp` installed and logged in (run `omp` once in a terminal), Node
 
 ```sh
 npm install
-npm run package                                   # builds omp-vscode-0.1.0.vsix
+npm run package # builds omp-vscode-0.1.0.vsix
 code --install-extension omp-vscode-0.1.0.vsix --force
 ```
 
