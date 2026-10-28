@@ -293,6 +293,19 @@ test("every page of saved chats is listed", async () => {
 	}
 });
 
+test("saved chats are listed for another folder, or for every folder", async () => {
+	const { agent } = fakeAgent();
+	try {
+		await agent.connect();
+		const moved = await agent.listSessions("/no-such-folder/renamed-project");
+		assert.deepEqual(moved.map(session => session.sessionId), ["moved-1"]);
+		const all = await agent.listSessions(null);
+		assert.deepEqual(all.map(session => session.sessionId), ["empty-1", "saved-1", "saved-0", "moved-1", "other-1"]);
+	} finally {
+		agent.dispose();
+	}
+});
+
 test("${VAR:-default} in an mcp.json uses the default when VAR is unset or empty", () => {
 	const dir = mkdtempSync(join(tmpdir(), "omp-mcp-test-"));
 	const file = join(dir, "mcp.json");

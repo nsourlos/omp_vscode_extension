@@ -872,6 +872,44 @@ exports.run = async function run() {
 			}
 		},
 
+		async "other folders' chats are read only when asked for, and one continued here is listed here from then on"() {
+			const logged = fakeLog().length;
+			const lists = () => fakeLog().slice(logged).filter(e => e.event === "session/list");
+			const opening = () => {
+				const picking = vscode.commands.executeCommand("omp.openPreviousChat");
+				return { picking, listed: lists().length };
+			};
+			const loaded = id => waitFor(() => api.sessions.all.find(s => s.controller.sessionId === id), `the chat ${id} to open`);
+
+			let { picking, listed } = opening();
+			await waitFor(() => lists().length > listed, "this folder's chats to be listed");
+			await sleep(500); // let the list appear
+			assert.deepEqual(lists().map(e => e.cwd), [root], "only this folder's chats are read at first");
+			await vscode.commands.executeCommand("quickInput.last"); // "Show chats from other folders…"
+			await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+			await waitFor(() => lists().some(e => e.cwd === undefined), "every folder's chats to be listed");
+			await sleep(500);
+			// This folder: Fix the parser, Oldest chat; moved or deleted folders: the renamed folder's chat.
+			await vscode.commands.executeCommand("quickInput.next");
+			await vscode.commands.executeCommand("quickInput.next");
+			await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+			await picking;
+			const moved = await loaded("moved-1");
+			assert.equal(moved.panel.chatTitle, "Chat from a renamed folder", "the tab keeps the chat's own name");
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "session/load" && e.sessionId === "moved-1"), "omp to load it");
+			moved.panel.dispose();
+
+			({ picking, listed } = opening());
+			await waitFor(() => lists().length >= listed + 2, "this folder's chats and every folder's (for the continued one) to be listed");
+			await sleep(500);
+			assert.deepEqual(lists().slice(listed).map(e => e.cwd), [root, undefined]);
+			// Newest first: Fix the parser, then the renamed folder's chat.
+			await vscode.commands.executeCommand("quickInput.next");
+			await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+			await picking;
+			(await loaded("moved-1")).panel.dispose();
+		},
+
 		async "omp names a new chat after its first reply, and an untitled saved chat when it is opened"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);

@@ -26,6 +26,7 @@ export { applyDecisions, describeHunk, diffFile, splitLines } from "./review/hun
 export { RpcError } from "./acp/rpc";
 export { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery } from "./mentions";
 export { mergeChunk } from "./chatHistory";
+export { chatsToShow, continuedIn, forgetDeleted, otherFolderChats } from "./savedChats";
 export {
 	attachedChipOf,
 	chipOf,
