@@ -286,6 +286,11 @@
           "default": true,
           "description": "Skip omp's yes/no prompt for the edit and write tools, because every change is reviewed as a diff before it is saved anyway."
         },
+        "omp.autoAllowReadsInFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run shell commands that only read (ls, cat, head, tail, wc, grep, rg, find, cd, pwd, echo) without asking when everything they read is inside the open folder. Reading outside it asks, unless you chose \"Always allow\" for those programs in the chat. Secrets (.env files, keys, ~/.ssh, ~/.aws and similar) always ask."
+        },
         "omp.warnOnShellFileChanges": {
           "type": "boolean",
           "default": true,

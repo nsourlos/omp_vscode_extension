@@ -43,6 +43,7 @@ import {
 	commandParts,
 	fileChangeWarning,
 	parseApprovalMessage,
+	readScope,
 	rejectedCommandMessage,
 	rejectionMessage,
 	staleFileMessage,
@@ -878,11 +879,21 @@ export class Controller implements vscode.Disposable {
 		const allowOnce = params.options.find(option => option.kind === "allow_once");
 		const parts = command !== undefined && allowOnce !== undefined ? commandParts(command) : undefined;
 		const readOnly = parts !== undefined && parts.every(part => part.readOnly);
-		if (readOnly && parts.every(part => this.#allowedReadOnly.has(part.name))) {
-			const names = [...new Set(parts.map(part => part.name))];
-			this.log(`auto-allowed a read-only command: ${command}`);
-			this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId, names });
-			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
+		// omp's shell can run a command in another folder (its `cwd` option) instead of using `cd`.
+		const cwd = typeof params.toolCall.rawInput?.cwd === "string" ? params.toolCall.rawInput.cwd : undefined;
+		const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const scope = readOnly && folder !== undefined ? readScope(command!, folder, cwd) : undefined;
+		// A secret (a key, token or password file) is read only when asked, every time.
+		const sensitive = scope?.sensitive ?? false;
+		if (readOnly && !sensitive) {
+			const config = vscode.workspace.getConfiguration("omp");
+			const inFolder = scope?.inside === true && config.get<boolean>("autoAllowReadsInFolder", true);
+			if (inFolder || parts.every(part => this.#allowedReadOnly.has(part.name))) {
+				const names = [...new Set(parts.map(part => part.name))];
+				this.log(`auto-allowed a read-only command${inFolder ? " inside the folder" : ""}: ${command}`);
+				this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId, names, inFolder });
+				return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
+			}
 		}
 		// The read-only programs in this command not allowed yet, which "always allow" would add.
 		const toAllow = [...new Set((parts ?? []).filter(part => part.readOnly && !this.#allowedReadOnly.has(part.name)).map(part => part.name))];
@@ -898,12 +909,13 @@ export class Controller implements vscode.Disposable {
 		for (const option of params.options) {
 			if (command !== undefined && (option.kind === "allow_always" || option.kind === "reject_always")) continue;
 			options.push(option);
-			if (readOnly && option === allowOnce) {
+			// Not on a command that reads a secret: those ask every time.
+			if (readOnly && !sensitive && toAllow.length > 0 && option === allowOnce) {
 				options.push({
 					optionId: ALLOW_READ_ONLY,
 					name: `Always allow ${toAllow.join(", ")}`,
 					kind: "allow_always",
-					description: `Allow this, and later commands in this chat made only of ${[...this.#allowedReadOnly, ...toAllow].join(", ")}, when they only read. Any other program, or an option that writes or runs one, still asks.`,
+					description: `Allow this, and later commands in this chat made only of ${[...this.#allowedReadOnly, ...toAllow].join(", ")}, when they only read, in any folder. Any other program, an option that writes or runs one, or a secret (.env, keys, ~/.ssh, …) still asks.`,
 				});
 			}
 		}
@@ -915,9 +927,12 @@ export class Controller implements vscode.Disposable {
 				title: params.toolCall.title ?? "omp wants to run a tool",
 				kind: params.toolCall.kind,
 				command,
-				// omp's shell can run a command in another folder (its `cwd` option) instead of using `cd`.
-				cwd: typeof params.toolCall.rawInput?.cwd === "string" ? params.toolCall.rawInput.cwd : undefined,
-				warning: command && warn ? fileChangeWarning(command) : undefined,
+				cwd,
+				warning: sensitive
+					? "This command reads a secret (a key, token or password file), so it asks every time."
+					: command && warn
+						? fileChangeWarning(command)
+						: undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
 				options,
 				// The checkbox: the read-only programs to allow from now on, whatever this command's answer.

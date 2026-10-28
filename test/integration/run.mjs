@@ -36,7 +36,12 @@ if (offline) {
 	mkdirSync(join(workspace, ".vscode"));
 	writeFileSync(
 		join(workspace, ".vscode", "settings.json"),
-		JSON.stringify({ "omp.path": join(root, "test", "fixtures", "fake-omp.mjs"), "omp.extraArgs": ["--log", fakeLog] }),
+		// Most tests use `ls` as a command that asks; one test turns automatic reads in the folder back on.
+		JSON.stringify({
+			"omp.path": join(root, "test", "fixtures", "fake-omp.mjs"),
+			"omp.extraArgs": ["--log", fakeLog],
+			"omp.autoAllowReadsInFolder": false,
+		}),
 	);
 }
 

@@ -1163,6 +1163,47 @@ exports.run = async function run() {
 			session.panel.dispose();
 		},
 
+		async "read-only commands inside the folder run without asking; outside it they ask, and secrets always ask"() {
+			const config = vscode.workspace.getConfiguration("omp");
+			await config.update("autoAllowReadsInFolder", true, vscode.ConfigurationTarget.Workspace);
+			const session = await newSession();
+			try {
+				const posts = postsOf(session.panel);
+				const cards = () => posts.filter(m => m.type === "permission");
+				const answered = () => fakeLog().slice(logged).filter(e => e.event === "permission").map(e => e.result.outcome.optionId);
+				const logged = fakeLog().length;
+
+				await session.controller.send(steps({ permission: "ls -la; grep -rn foo . 2>/dev/null | head" }));
+				assert.equal(cards().length, 0, "inside the folder: no card");
+				assert.equal(answered().at(-1), "allow_once");
+				assert.equal(posts.find(m => m.type === "autoAllowed")?.inFolder, true, "and its row says why");
+
+				const outside = session.controller.send(steps({ permission: "ls /usr" }));
+				const outsideCard = await waitFor(() => cards()[0], "a card for reading outside the folder");
+				assert.deepEqual(outsideCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
+				respond(session.panel, outsideCard, outsideCard.options[1].optionId, "Always allow ls");
+				await outside;
+				await session.controller.send(steps({ permission: "ls /var" }));
+				assert.equal(cards().length, 1, "ls is now allowed outside the folder too");
+
+				const secret = session.controller.send(steps({ permission: "ls ~/.ssh" }));
+				const secretCard = await waitFor(() => cards()[1], "a secret asks even with ls allowed");
+				assert.deepEqual(secretCard.options.map(o => o.name), ["Allow once", "Reject"], "and can't be always allowed");
+				assert.match(secretCard.warning, /secret/);
+				respond(session.panel, secretCard, "reject_once", "Reject");
+				await secret;
+
+				const env = session.controller.send(steps({ permission: "cat .env" }));
+				const envCard = await waitFor(() => cards()[2], "a secret inside the folder asks too");
+				assert.deepEqual(envCard.options.map(o => o.name), ["Allow once", "Reject"]);
+				respond(session.panel, envCard, "reject_once", "Reject");
+				await env;
+			} finally {
+				session.panel.dispose();
+				await config.update("autoAllowReadsInFolder", false, vscode.ConfigurationTarget.Workspace);
+			}
+		},
+
 		async "a command omp runs in another folder says which folder on its permission card"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);
