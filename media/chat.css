@@ -16,6 +16,45 @@ body {
 	padding: 8px 12px;
 }
 
+/* Above the chat: the question whose answer is on screen, and buttons to move between questions. */
+#question-bar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	font-size: 0.9em;
+}
+
+#question-bar[hidden] {
+	display: none;
+}
+
+#question-bar button {
+	padding: 1px 6px;
+}
+
+#current-question {
+	flex: 1;
+	min-width: 0;
+	text-align: left;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	color: var(--vscode-foreground);
+	background: none;
+}
+
+#current-question::before {
+	content: "You: ";
+	font-weight: 600;
+	color: var(--vscode-textLink-foreground);
+}
+
+#current-question:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
 #activity {
 	padding: 4px 12px;
 	font-size: 0.9em;
@@ -259,15 +298,50 @@ button:disabled {
 	overflow-wrap: anywhere;
 }
 
-.msg.user {
-	white-space: pre-wrap;
-	background: var(--vscode-input-background);
-	border-left: 3px solid var(--vscode-focusBorder);
-	padding: 6px 8px;
-}
-
+/*
+ * The user's messages stand apart from omp's: a tinted, framed box headed "You", with a line and
+ * some space above it, so each question starts a new section of the chat.
+ */
 .msg.user {
 	position: relative;
+	margin-top: 22px;
+	white-space: pre-wrap;
+	background: color-mix(in srgb, var(--vscode-focusBorder) 12%, var(--vscode-sideBar-background));
+	border: 1px solid color-mix(in srgb, var(--vscode-focusBorder) 60%, transparent);
+	border-radius: 6px;
+	padding: 6px 10px;
+}
+
+.msg.user:first-child {
+	margin-top: 4px;
+}
+
+.msg.user:not(:first-child)::before {
+	content: "";
+	position: absolute;
+	top: -12px;
+	left: 0;
+	right: 0;
+	border-top: 1px solid var(--vscode-panel-border);
+}
+
+.user-head {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	margin-bottom: 2px;
+	font-size: 0.85em;
+}
+
+.user-head::before {
+	content: "You";
+	font-weight: 600;
+	color: var(--vscode-textLink-foreground);
+}
+
+.user-head[data-time]::after {
+	content: attr(data-time);
+	opacity: 0.65;
 }
 
 /* A long message shows its first three lines until opened with "Show more". */
@@ -446,11 +520,33 @@ details.thought summary,
 	overflow-y: auto;
 }
 
+/* Quieter than the conversation around them: smaller, dimmer text, and long commands and output scroll. */
 .tool {
 	margin: 6px 0;
 	padding: 4px 8px;
 	border-left: 3px solid var(--vscode-panel-border);
-	font-size: 0.92em;
+	font-size: 0.88em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.tool-output pre {
+	max-height: 240px;
+	overflow-y: auto;
+}
+
+/* A command waiting for an answer is shown in full, to be read before it runs. */
+.tool:not(:has(.tool-ask:not(.resolved))) .tool-command {
+	max-height: 6.5em;
+	overflow-y: auto;
+}
+
+.tool-ask:not(.resolved) {
+	color: var(--vscode-foreground);
+}
+
+/* Its answer says whether it was ticked ("… allowed from now on"), so the greyed-out box can go. */
+.tool-ask.resolved .always-read-only {
+	display: none;
 }
 
 .tool[data-status="completed"] {

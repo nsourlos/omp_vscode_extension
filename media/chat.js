@@ -15,6 +15,11 @@
 	const queueEl = document.getElementById("queue");
 	const attachmentsEl = document.getElementById("attachments");
 	const attachButton = document.getElementById("attach");
+	const questionBar = document.getElementById("question-bar");
+	const currentQuestion = document.getElementById("current-question");
+	const prevQuestion = document.getElementById("prev-question");
+	const nextQuestion = document.getElementById("next-question");
+	const listQuestions = document.getElementById("list-questions");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -58,6 +63,7 @@
 	function append(node) {
 		const stick = nearBottom();
 		log.appendChild(node);
+		contentSizes?.observe(node);
 		if (stick) log.scrollTop = log.scrollHeight;
 		return node;
 	}
@@ -259,9 +265,18 @@
 				})
 			: null;
 
-	/** One of the user's messages, with its attachments and an edit button that puts its text back in the input. */
-	function userMessage(text, attachments = []) {
+	/**
+	 * One of the user's messages, with its attachments and an edit button that puts its text back in the input.
+	 * Headed "You" and, when known, the time it was sent (omp keeps no times, so a replayed one has none).
+	 * The stylesheet writes the heading, so copying the message copies only what was typed.
+	 */
+	function userMessage(text, attachments = [], sentAt) {
 		const node = el("div", "msg user");
+		const head = node.appendChild(el("div", "user-head"));
+		if (typeof sentAt === "number") {
+			head.dataset.time = sentTime(sentAt);
+			head.title = new Date(sentAt).toLocaleString();
+		}
 		const body = node.appendChild(el("div", "user-text clamped", text));
 		// Its label comes from the stylesheet (Show more / Show less), so it adds no text to the message.
 		const more = node.appendChild(el("button", "more"));
@@ -288,6 +303,118 @@
 		if (!body || !more || !body.classList.contains("clamped")) return; // e.g. turned into an image's description
 		more.hidden = body.scrollHeight <= body.clientHeight + 1;
 	}
+
+	/** The time of day; with the date too when it was not today. */
+	function sentTime(ms) {
+		const date = new Date(ms);
+		const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+		if (date.toDateString() === new Date().toDateString()) return time;
+		return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
+	}
+
+	// ---------- your questions ----------
+	// The bar above the chat names the question whose answer is on screen (click it to go back up to
+	// it); ▲ and ▼ step between questions, ☰ lists them all in VS Code's search box.
+	const QUESTION_SLACK = 8; // px: a question this close to the top counts as at the top
+	let questionBarFrame = 0;
+
+	function questionNodes() {
+		return [...log.querySelectorAll(".msg.user")];
+	}
+
+	/** Where each question starts in the chat's scrolled content: measured once per update, not once per use. */
+	function questionTops(nodes) {
+		const offset = log.scrollTop - log.getBoundingClientRect().top;
+		return nodes.map(node => node.getBoundingClientRect().top + offset);
+	}
+
+	/** Its first line, or for a message of files only, their names. */
+	function questionText(node) {
+		const text = node.querySelector(".user-text")?.textContent.trim().split("\n")[0];
+		return text || [...node.querySelectorAll(".attachment-name")].map(name => name.textContent).join(", ") || "(empty)";
+	}
+
+	/**
+	 * The question being read: the last one starting at or above the top of the view, else the first.
+	 * At the end of the chat, the last one on screen: a short last answer never brings its question to the top.
+	 */
+	function readingIndex(tops) {
+		const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight <= 1;
+		const top = log.scrollTop + (atEnd ? log.clientHeight : QUESTION_SLACK);
+		let index = 0;
+		for (let i = 1; i < tops.length && tops[i] <= top; i++) index = i;
+		return index;
+	}
+
+	/** The scroll position that puts a question at the top of the view, as far as the chat can scroll. */
+	function scrollTopFor(top) {
+		return Math.max(0, Math.min(top - 4, log.scrollHeight - log.clientHeight));
+	}
+
+	/** Inside an answer, ▲ goes back to its question; at a question, to the one before. */
+	function previousTop(tops) {
+		for (let i = tops.length - 1; i >= 0; i--) {
+			const at = scrollTopFor(tops[i]);
+			if (at < log.scrollTop - 1) return at;
+		}
+		return undefined;
+	}
+
+	/** The next question, and after the last one, the end of the chat. */
+	function nextTop(tops) {
+		for (const top of tops) {
+			const at = scrollTopFor(top);
+			if (at > log.scrollTop + 1) return at;
+		}
+		const end = log.scrollHeight - log.clientHeight;
+		return end > log.scrollTop + 1 ? end : undefined;
+	}
+
+	function updateQuestionBar() {
+		const nodes = questionNodes();
+		questionBar.hidden = nodes.length === 0;
+		if (!nodes.length) return;
+		const tops = questionTops(nodes);
+		const index = readingIndex(tops);
+		currentQuestion.textContent = questionText(nodes[index]);
+		currentQuestion.title = `Go to this question (${index + 1} of ${nodes.length})`;
+		prevQuestion.disabled = previousTop(tops) === undefined;
+		nextQuestion.disabled = nextTop(tops) === undefined;
+	}
+
+	function updateQuestionBarSoon() {
+		if (!questionBarFrame) {
+			questionBarFrame = requestAnimationFrame(() => {
+				questionBarFrame = 0;
+				updateQuestionBar();
+			});
+		}
+	}
+
+	/** Scroll to a position worked out from where the questions are now (nothing when it gives none). */
+	function goTo(position) {
+		const at = position(questionTops(questionNodes()));
+		if (at !== undefined) log.scrollTop = at;
+		updateQuestionBar();
+	}
+
+	currentQuestion.addEventListener("click", () => goTo(tops => scrollTopFor(tops[readingIndex(tops)])));
+	prevQuestion.addEventListener("click", () => goTo(previousTop));
+	nextQuestion.addEventListener("click", () => goTo(nextTop));
+	listQuestions.addEventListener("click", () => {
+		const nodes = questionNodes();
+		const questions = nodes.map(node => ({ text: questionText(node), time: node.querySelector(".user-head")?.dataset.time }));
+		vscode.postMessage({ type: "pickQuestion", questions, current: readingIndex(questionTops(nodes)) });
+	});
+	log.addEventListener("scroll", updateQuestionBarSoon);
+	window.addEventListener("resize", updateQuestionBarSoon);
+	// What is in the chat can grow or shrink without a scroll (Show more, a tool's output opened, a
+	// diagram drawn), moving the questions: each item is watched, and the bar redone once per frame.
+	const contentSizes = typeof ResizeObserver === "function" ? new ResizeObserver(updateQuestionBarSoon) : null;
+	// A page in the background gets no frames, so the bar is brought up to date when it is seen again.
+	document.addEventListener("visibilitychange", () => {
+		if (!document.hidden) updateQuestionBar();
+	});
 
 	// ---------- attachments ----------
 	const ATTACHMENT_ICONS = { image: "🖼️", text: "📄", document: "📑", folder: "📁", path: "🔗" };
@@ -397,6 +524,7 @@
 			// Taken for a description until more of it came: a message of the user's after all.
 			const node = userMessage("");
 			message.node.replaceWith(node);
+			contentSizes?.observe(node);
 			message.node = node;
 		}
 		const { text, files } = splitAttachments(message.raw);
@@ -677,6 +805,7 @@
 				else replayedUser.raw += text;
 				const message = replayedUser;
 				keepScrolled(() => fillReplayed(message));
+				updateQuestionBarSoon();
 				return;
 			}
 			case "agent_message_chunk": {
@@ -1138,7 +1267,8 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				fitUserText(append(userMessage(msg.text, msg.attachments)));
+				fitUserText(append(userMessage(msg.text, msg.attachments, msg.sentAt)));
+				updateQuestionBarSoon(); // once per frame: a reloaded tab replays every message at once
 				return;
 			case "attached":
 				drafts.push(msg.attachment);
@@ -1159,6 +1289,7 @@
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
 			case "restoreInput": return restoreInput(msg.text, msg.attachments);
+			case "showQuestion": return goTo(tops => (tops[msg.index] === undefined ? undefined : scrollTopFor(tops[msg.index])));
 			case "mentions": return onMentions(msg);
 			case "notice":
 				breakFlow();

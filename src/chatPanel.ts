@@ -172,6 +172,12 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.U
 <title>OMP</title>
 </head>
 <body data-chime="${chime}" data-mermaid="${mermaidScript}">
+<div id="question-bar" hidden>
+  <button id="current-question" title="Go to this question"></button>
+  <button id="prev-question" class="secondary" title="Previous question" aria-label="Previous question">▲</button>
+  <button id="next-question" class="secondary" title="Next question" aria-label="Next question">▼</button>
+  <button id="list-questions" class="secondary" title="All your questions in this chat" aria-label="All your questions in this chat">☰</button>
+</div>
 <div id="log" role="log" aria-live="polite"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>

@@ -614,6 +614,44 @@ exports.run = async function run() {
 			assert.ok(!notified.slice(seenNotified).some(m => m.type === "chime"), "no chime after Stop");
 		},
 
+		async "a sent message carries its time, and ☰ lists the chat's questions with the one being read picked"() {
+			const panel = api.sessions.all[0].panel;
+			const posts = postsOf(panel);
+			const notified = notificationsOf(panel);
+			const seen = posts.length;
+			await controller.send(steps({ say: "noted" }));
+			const sentAt = posts.slice(seen).find(m => m.type === "user").sentAt;
+			assert.ok(typeof sentAt === "number" && Math.abs(Date.now() - sentAt) < 60_000, "sent just now");
+
+			const questions = [{ text: "First", time: "10:00" }, { text: "why does $(pwd) print /tmp?" }, { text: "and $(echo hi)" }];
+			let seenNotified = notified.length;
+			const { createQuickPick } = vscode.window;
+			let pick;
+			vscode.window.createQuickPick = () => (pick = createQuickPick());
+			try {
+				panel.receive({ type: "pickQuestion", questions, current: 1 });
+			} finally {
+				vscode.window.createQuickPick = createQuickPick;
+			}
+			assert.deepEqual(
+				pick.items.map(item => [item.label, item.description]),
+				[["1. First", "10:00"], ["2. why does \\$(pwd) print /tmp?", undefined], ["3. and $(echo hi)", undefined]],
+				"numbered; $(pwd) escaped so it isn't drawn as an icon, $(echo hi) (no icon name) left as typed",
+			);
+			await sleep(500); // let the list appear
+			await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+			await waitFor(() => notified.slice(seenNotified).find(m => m.type === "showQuestion"), "the picked question");
+			assert.deepEqual(notified.slice(seenNotified).filter(m => m.type === "showQuestion"), [{ type: "showQuestion", index: 1 }], "the one being read is picked at first");
+
+			seenNotified = notified.length;
+			panel.receive({ type: "pickQuestion", questions, current: 1 });
+			await sleep(500);
+			await vscode.commands.executeCommand("quickInput.next");
+			await vscode.commands.executeCommand("workbench.action.acceptSelectedQuickOpenItem");
+			await waitFor(() => notified.slice(seenNotified).find(m => m.type === "showQuestion"), "the picked question");
+			assert.equal(notified.slice(seenNotified).find(m => m.type === "showQuestion").index, 2);
+		},
+
 		async "Stop puts queued messages back in the input, and a removed one is never sent"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);

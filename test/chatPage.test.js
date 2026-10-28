@@ -12,7 +12,10 @@ const markdown = fs.readFileSync(path.join(__dirname, "..", "dist", "markdown.js
 const CHIME_SRC = "media/staplebops-01.mp3";
 
 /** The page's markup, as built by chatHtml() in src/chatPanel.ts. */
-const BODY = `<div id="log"></div>
+const BODY = `<div id="question-bar" hidden>
+  <button id="current-question"></button><button id="prev-question"></button><button id="next-question"></button><button id="list-questions"></button>
+</div>
+<div id="log"></div>
 <div id="activity" hidden></div>
 <div id="queue"></div>
 <footer>
@@ -389,6 +392,127 @@ test("a sent or replayed message of the user's can be put back in the input to e
 	replayed.querySelector("button.edit").click();
 	assert.equal(input.value, "Earlier question");
 	assert.deepEqual(chat.posted.filter(m => m.type === "send"), [], "nothing is sent until the user presses Enter");
+});
+
+test("a sent message is headed with the time it was sent; a replayed one, which omp keeps no time for, is not", () => {
+	const chat = openChat();
+	const sentAt = new Date().setHours(14, 32);
+	chat.deliver({ type: "user", text: "Fix the parser", sentAt });
+	chat.deliver({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "Earlier question" } } });
+	const [sent, replayed] = chat.log.querySelectorAll(".msg.user .user-head");
+	assert.equal(sent.dataset.time, new Date(sentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+	assert.equal(replayed.dataset.time, undefined);
+	const yesterday = new Date(sentAt - 24 * 3600 * 1000);
+	chat.deliver({ type: "user", text: "Older", sentAt: yesterday.getTime() });
+	assert.match(chat.log.querySelectorAll(".msg.user .user-head")[2].dataset.time, /, /, "with the date when it was not today");
+});
+
+/**
+ * A chat whose layout is made up: each question starts where `tops` says, the view is 100px tall
+ * and the chat 1000px long (the simulated page lays nothing out).
+ */
+function laidOutChat(tops) {
+	// Stands in for the browser's ResizeObserver: resize() reports that something in the chat changed size.
+	const observers = [];
+	const chat = openChat(window => {
+		window.ResizeObserver = class {
+			constructor(callback) {
+				observers.push(callback);
+			}
+			observe() {}
+			unobserve() {}
+		};
+	});
+	const { log } = chat;
+	let scrollTop = 0;
+	let height = 1000;
+	Object.defineProperty(log, "scrollTop", { get: () => scrollTop, set: value => (scrollTop = value), configurable: true });
+	Object.defineProperty(log, "scrollHeight", { get: () => height, configurable: true });
+	Object.defineProperty(log, "clientHeight", { value: 100, configurable: true });
+	log.getBoundingClientRect = () => ({ top: 0 });
+	tops.forEach((top, index) => {
+		chat.deliver({ type: "user", text: `Question ${index + 1}\nmore detail` }, chunk("An answer."));
+		chat.log.querySelectorAll(".msg.user")[index].getBoundingClientRect = () => ({ top: top - scrollTop });
+	});
+	const scrollTo = value => {
+		scrollTop = value;
+		chat.deliver({ type: "status", state: "idle" }); // any message; the bar is brought up to date below
+		log.dispatchEvent(new chat.window.Event("scroll"));
+	};
+	const bar = id => chat.window.document.getElementById(id);
+	const resize = newHeight => {
+		height = newHeight;
+		for (const callback of observers) callback([]);
+	};
+	return { ...chat, scrollTo, bar, resize, scrollTop: () => scrollTop };
+}
+
+test("the bar above the chat names the question whose answer is on screen, and clicking it goes back to it", async () => {
+	const chat = laidOutChat([0, 300, 600]);
+	await chat.nextFrame();
+	assert.equal(chat.bar("question-bar").hidden, false);
+	chat.scrollTo(0);
+	await chat.nextFrame();
+	assert.equal(chat.bar("current-question").textContent, "Question 1", "its first line");
+	chat.scrollTo(450);
+	await chat.nextFrame();
+	assert.equal(chat.bar("current-question").textContent, "Question 2", "reading the second answer");
+	chat.bar("current-question").click();
+	assert.equal(chat.scrollTop(), 296, "back to the question, at the top of the view");
+	chat.scrollTo(900);
+	await chat.nextFrame();
+	assert.equal(chat.bar("current-question").textContent, "Question 3");
+});
+
+test("▲ and ▼ step between questions: inside an answer ▲ goes to its question, after the last ▼ goes to the end", () => {
+	const chat = laidOutChat([0, 300, 600]);
+	const prev = chat.bar("prev-question");
+	const next = chat.bar("next-question");
+	chat.scrollTo(0);
+	prev.click();
+	assert.equal(chat.scrollTop(), 0, "nothing before the first question");
+	next.click();
+	assert.equal(chat.scrollTop(), 296);
+	next.click();
+	assert.equal(chat.scrollTop(), 596);
+	next.click();
+	assert.equal(chat.scrollTop(), 900, "the end of the chat");
+	assert.equal(next.disabled, true);
+	chat.scrollTo(450);
+	prev.click();
+	assert.equal(chat.scrollTop(), 296, "back up to the question of the answer being read");
+	prev.click();
+	assert.equal(chat.scrollTop(), 0);
+	assert.equal(prev.disabled, true);
+});
+
+test("the bar catches up when the chat grows without a scroll, e.g. an output opened at the end", async () => {
+	const chat = laidOutChat([0, 300, 600]);
+	chat.scrollTo(900);
+	await chat.nextFrame();
+	assert.equal(chat.bar("next-question").disabled, true, "at the end");
+	chat.resize(1400);
+	await chat.nextFrame();
+	assert.equal(chat.bar("next-question").disabled, false, "more below now");
+});
+
+test("☰ asks the extension to list the questions; the one picked is scrolled to", () => {
+	const chat = laidOutChat([0, 300, 600]);
+	chat.scrollTo(450);
+	chat.bar("list-questions").click();
+	assert.deepEqual(chat.posted.at(-1), {
+		type: "pickQuestion",
+		questions: [{ text: "Question 1" }, { text: "Question 2" }, { text: "Question 3" }],
+		current: 1,
+	});
+	chat.deliver({ type: "showQuestion", index: 2 });
+	assert.equal(chat.scrollTop(), 596);
+});
+
+test("the question bar stays hidden until the user has asked something", () => {
+	const chat = openChat();
+	chat.deliver(chunk("Hello."));
+	assert.equal(chat.window.document.getElementById("question-bar").hidden, true);
 });
 
 test("a reply is drawn in full when its turn ends, without waiting for a screen frame", () => {
