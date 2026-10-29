@@ -166,7 +166,7 @@ export class Controller implements vscode.Disposable {
 		this.#lastNotice = undefined;
 		this.#runningCode.clear();
 		attachments = await this.#withinTextBudget(attachments);
-		this.chat.post({ type: "user", text, attachments: attachments.map(chipOf) });
+		this.chat.post({ type: "user", text, attachments: attachments.map(chipOf), sentAt: Date.now() });
 		this.chat.post({ type: "status", state: "busy" });
 		let agent: OmpAgent | undefined;
 		let finished = false;
@@ -329,6 +329,32 @@ export class Controller implements vscode.Disposable {
 			title: "Attach files to your message",
 		});
 		for (const uri of uris ?? []) void this.#attach(() => this.#sourceOf(uri));
+	}
+
+	/** The user's questions in this chat (sent by the page), in a list to search; the page scrolls to the one picked. */
+	#pickQuestion(questions: unknown, current: unknown): void {
+		if (!Array.isArray(questions) || questions.length === 0) return;
+		const items = questions.map((question, index) => ({
+			// VS Code draws "$(name)" in a label as an icon; a question about `$(pwd)` must keep it as typed.
+			// The pattern VS Code draws icons by; other "$(" text is shown as it is.
+			label: `${index + 1}. ${String(question?.text ?? "").slice(0, 200)}`.replace(/(\\)?\$\([a-z0-9-]+(?:~[a-z]+)?\)/gi, (icon, escaped) => (escaped ? icon : `\\${icon}`)),
+			description: typeof question?.time === "string" ? question.time : undefined,
+			index,
+		}));
+		const pick = vscode.window.createQuickPick<(typeof items)[number]>();
+		pick.title = "Your questions in this chat";
+		pick.placeholder = "Pick a question to scroll to it";
+		pick.matchOnDescription = true;
+		pick.items = items;
+		const active = typeof current === "number" ? items[current] : undefined;
+		if (active) pick.activeItems = [active];
+		pick.onDidAccept(() => {
+			const picked = pick.selectedItems[0];
+			if (picked) this.chat.notify({ type: "showQuestion", index: picked.index });
+			pick.hide();
+		});
+		pick.onDidHide(() => pick.dispose());
+		pick.show();
 	}
 
 	/** Attach files from outside the chat page (the Explorer's menu), once the page can show their chips. */
@@ -733,6 +759,9 @@ export class Controller implements vscode.Disposable {
 				break;
 			case "pickFiles":
 				void this.#pickFiles();
+				break;
+			case "pickQuestion":
+				this.#pickQuestion(message.questions, message.current);
 				break;
 			case "attachUris":
 				this.#attachUris(message.uris);

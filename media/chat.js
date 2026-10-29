@@ -15,6 +15,11 @@
 	const queueEl = document.getElementById("queue");
 	const attachmentsEl = document.getElementById("attachments");
 	const attachButton = document.getElementById("attach");
+	const questionBar = document.getElementById("question-bar");
+	const currentQuestion = document.getElementById("current-question");
+	const prevQuestion = document.getElementById("prev-question");
+	const nextQuestion = document.getElementById("next-question");
+	const listQuestions = document.getElementById("list-questions");
 
 	const KIND_ICONS = {
 		read: "📄", edit: "✏️", delete: "🗑️", move: "↔️", search: "🔍",
@@ -58,6 +63,7 @@
 	function append(node) {
 		const stick = nearBottom();
 		log.appendChild(node);
+		contentSizes?.observe(node);
 		if (stick) log.scrollTop = log.scrollHeight;
 		return node;
 	}
@@ -259,9 +265,18 @@
 				})
 			: null;
 
-	/** One of the user's messages, with its attachments and an edit button that puts its text back in the input. */
-	function userMessage(text, attachments = []) {
+	/**
+	 * One of the user's messages, with its attachments and an edit button that puts its text back in the input.
+	 * Headed "You" and, when known, the time it was sent (omp keeps no times, so a replayed one has none).
+	 * The stylesheet writes the heading, so copying the message copies only what was typed.
+	 */
+	function userMessage(text, attachments = [], sentAt) {
 		const node = el("div", "msg user");
+		const head = node.appendChild(el("div", "user-head"));
+		if (typeof sentAt === "number") {
+			head.dataset.time = sentTime(sentAt);
+			head.title = new Date(sentAt).toLocaleString();
+		}
 		const body = node.appendChild(el("div", "user-text clamped", text));
 		// Its label comes from the stylesheet (Show more / Show less), so it adds no text to the message.
 		const more = node.appendChild(el("button", "more"));
@@ -288,6 +303,118 @@
 		if (!body || !more || !body.classList.contains("clamped")) return; // e.g. turned into an image's description
 		more.hidden = body.scrollHeight <= body.clientHeight + 1;
 	}
+
+	/** The time of day; with the date too when it was not today. */
+	function sentTime(ms) {
+		const date = new Date(ms);
+		const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+		if (date.toDateString() === new Date().toDateString()) return time;
+		return `${date.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
+	}
+
+	// ---------- your questions ----------
+	// The bar above the chat names the question whose answer is on screen (click it to go back up to
+	// it); ▲ and ▼ step between questions, ☰ lists them all in VS Code's search box.
+	const QUESTION_SLACK = 8; // px: a question this close to the top counts as at the top
+	let questionBarFrame = 0;
+
+	function questionNodes() {
+		return [...log.querySelectorAll(".msg.user")];
+	}
+
+	/** Where each question starts in the chat's scrolled content: measured once per update, not once per use. */
+	function questionTops(nodes) {
+		const offset = log.scrollTop - log.getBoundingClientRect().top;
+		return nodes.map(node => node.getBoundingClientRect().top + offset);
+	}
+
+	/** Its first line, or for a message of files only, their names. */
+	function questionText(node) {
+		const text = node.querySelector(".user-text")?.textContent.trim().split("\n")[0];
+		return text || [...node.querySelectorAll(".attachment-name")].map(name => name.textContent).join(", ") || "(empty)";
+	}
+
+	/**
+	 * The question being read: the last one starting at or above the top of the view, else the first.
+	 * At the end of the chat, the last one on screen: a short last answer never brings its question to the top.
+	 */
+	function readingIndex(tops) {
+		const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight <= 1;
+		const top = log.scrollTop + (atEnd ? log.clientHeight : QUESTION_SLACK);
+		let index = 0;
+		for (let i = 1; i < tops.length && tops[i] <= top; i++) index = i;
+		return index;
+	}
+
+	/** The scroll position that puts a question at the top of the view, as far as the chat can scroll. */
+	function scrollTopFor(top) {
+		return Math.max(0, Math.min(top - 4, log.scrollHeight - log.clientHeight));
+	}
+
+	/** Inside an answer, ▲ goes back to its question; at a question, to the one before. */
+	function previousTop(tops) {
+		for (let i = tops.length - 1; i >= 0; i--) {
+			const at = scrollTopFor(tops[i]);
+			if (at < log.scrollTop - 1) return at;
+		}
+		return undefined;
+	}
+
+	/** The next question, and after the last one, the end of the chat. */
+	function nextTop(tops) {
+		for (const top of tops) {
+			const at = scrollTopFor(top);
+			if (at > log.scrollTop + 1) return at;
+		}
+		const end = log.scrollHeight - log.clientHeight;
+		return end > log.scrollTop + 1 ? end : undefined;
+	}
+
+	function updateQuestionBar() {
+		const nodes = questionNodes();
+		questionBar.hidden = nodes.length === 0;
+		if (!nodes.length) return;
+		const tops = questionTops(nodes);
+		const index = readingIndex(tops);
+		currentQuestion.textContent = questionText(nodes[index]);
+		currentQuestion.title = `Go to this question (${index + 1} of ${nodes.length})`;
+		prevQuestion.disabled = previousTop(tops) === undefined;
+		nextQuestion.disabled = nextTop(tops) === undefined;
+	}
+
+	function updateQuestionBarSoon() {
+		if (!questionBarFrame) {
+			questionBarFrame = requestAnimationFrame(() => {
+				questionBarFrame = 0;
+				updateQuestionBar();
+			});
+		}
+	}
+
+	/** Scroll to a position worked out from where the questions are now (nothing when it gives none). */
+	function goTo(position) {
+		const at = position(questionTops(questionNodes()));
+		if (at !== undefined) log.scrollTop = at;
+		updateQuestionBar();
+	}
+
+	currentQuestion.addEventListener("click", () => goTo(tops => scrollTopFor(tops[readingIndex(tops)])));
+	prevQuestion.addEventListener("click", () => goTo(previousTop));
+	nextQuestion.addEventListener("click", () => goTo(nextTop));
+	listQuestions.addEventListener("click", () => {
+		const nodes = questionNodes();
+		const questions = nodes.map(node => ({ text: questionText(node), time: node.querySelector(".user-head")?.dataset.time }));
+		vscode.postMessage({ type: "pickQuestion", questions, current: readingIndex(questionTops(nodes)) });
+	});
+	log.addEventListener("scroll", updateQuestionBarSoon);
+	window.addEventListener("resize", updateQuestionBarSoon);
+	// What is in the chat can grow or shrink without a scroll (Show more, a tool's output opened, a
+	// diagram drawn), moving the questions: each item is watched, and the bar redone once per frame.
+	const contentSizes = typeof ResizeObserver === "function" ? new ResizeObserver(updateQuestionBarSoon) : null;
+	// A page in the background gets no frames, so the bar is brought up to date when it is seen again.
+	document.addEventListener("visibilitychange", () => {
+		if (!document.hidden) updateQuestionBar();
+	});
 
 	// ---------- attachments ----------
 	const ATTACHMENT_ICONS = { image: "🖼️", text: "📄", document: "📑", folder: "📁", path: "🔗" };
@@ -397,6 +524,7 @@
 			// Taken for a description until more of it came: a message of the user's after all.
 			const node = userMessage("");
 			message.node.replaceWith(node);
+			contentSizes?.observe(node);
 			message.node = node;
 		}
 		const { text, files } = splitAttachments(message.raw);
@@ -677,6 +805,7 @@
 				else replayedUser.raw += text;
 				const message = replayedUser;
 				keepScrolled(() => fillReplayed(message));
+				updateQuestionBarSoon();
 				return;
 			}
 			case "agent_message_chunk": {
@@ -736,13 +865,23 @@
 			const status = head.appendChild(el("span", "tool-status"));
 			const icon = head.appendChild(el("span", "tool-icon"));
 			const title = head.appendChild(el("span", "tool-title"));
+			// For a command, whose title is the command itself: what it is, and the folder it runs in.
+			const label = head.appendChild(el("span", "tool-label"));
+			label.hidden = true;
+			// Once its question is answered (approvals), the answer.
+			const answer = head.appendChild(el("span", "tool-answer"));
+			answer.hidden = true;
 			const command = card.appendChild(el("pre", "tool-command"));
 			command.hidden = true;
+			// An answered command shows on one line; a click shows all of it (not when text was being selected).
+			command.addEventListener("click", () => {
+				if (card.classList.contains("answered") && !window.getSelection()?.toString()) command.classList.toggle("open");
+			});
 			const details = card.appendChild(el("details", "tool-output"));
 			details.hidden = true;
 			details.appendChild(el("summary", "", "Output"));
 			const output = details.appendChild(el("pre"));
-			tool = { card, status, icon, title, command, details, output, kind: "other" };
+			tool = { card, status, icon, title, label, answer, command, details, output, kind: "other", commandText: "", cwd: "" };
 			tools.set(update.toolCallId, tool);
 		}
 		keepScrolled(() => {
@@ -760,12 +899,13 @@
 			}
 			showActivity();
 			const command = update.rawInput?.command;
-			if (typeof command === "string") {
-				tool.command.textContent = "$ " + command;
+			if (typeof command === "string" && command !== tool.commandText) {
+				tool.commandText = command;
+				showCommand(tool.command, command);
 				tool.command.hidden = false;
 			}
-			// A shell tool's title is its command, already shown in the command box: show it once.
-			tool.title.hidden = !tool.command.hidden && isCommandTitle(tool.title.textContent, tool.command.textContent.slice(2));
+			if (typeof update.rawInput?.cwd === "string") tool.cwd = update.rawInput.cwd;
+			labelTool(tool);
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -776,12 +916,36 @@
 		});
 	}
 
-	/** omp titles a shell call "$ <command>", cut to 4000 characters with "…". */
+	/**
+	 * A shell tool's title is its command, already shown in the command box: shown once, with a heading
+	 * in words instead; the folder it runs in, if not this one, either way.
+	 */
+	function labelTool(tool) {
+		tool.title.hidden = !tool.command.hidden && isCommandTitle(tool.title.textContent, tool.commandText);
+		const parts = [...(tool.title.hidden ? ["Command"] : []), ...(tool.cwd ? [`in ${tool.cwd}`] : [])];
+		tool.label.textContent = parts.join(" · ");
+		tool.label.hidden = parts.length === 0;
+	}
+
+	/**
+	 * omp titles a shell call "$ <command>", cut to 4000 characters with "…", and asks to run one
+	 * under the command's first 80 characters.
+	 */
 	function isCommandTitle(title, command) {
-		const text = title.trim().replace(/^\$\s+/, "");
-		command = command.trim();
-		if (text === command) return true;
-		return text.endsWith("…") && text.length > 1 && command.startsWith(text.slice(0, -1));
+		let text = title.trim().replace(/^\$\s+/, "");
+		if (text.endsWith("…")) text = text.slice(0, -1);
+		return text.length > 0 && command.trim().startsWith(text);
+	}
+
+	/** "$ " and the command, a line at a time: its comment lines (omp's notes to itself, "# …") dimmed, so the lines that run stand out. */
+	function showCommand(pre, command) {
+		pre.textContent = "";
+		pre.appendChild(el("span", "prompt", "$ "));
+		const lines = command.split("\n");
+		lines.forEach((line, i) => {
+			const text = i < lines.length - 1 ? `${line}\n` : line;
+			pre.appendChild(el("span", /^\s*#/.test(line) ? "line comment" : "line", text));
+		});
 	}
 
 	function onPlan(entries) {
@@ -814,6 +978,15 @@
 		for (const button of card.querySelectorAll("button, input, textarea, select")) button.disabled = true;
 		const result = card.querySelector(".card-result");
 		if (result) result.textContent = label;
+		// A command's question, answered: its row shrinks to the answer and one line of the command.
+		const row = card.classList.contains("tool-ask") ? card.closest(".tool") : null;
+		const answer = row?.querySelector(".tool-answer");
+		if (answer) {
+			row.classList.add("answered");
+			answer.textContent = `· ${label}`;
+			answer.hidden = false;
+			row.querySelector(".tool-command").title = "Click to show the whole command";
+		}
 	}
 
 	function card(requestId, heading) {
@@ -847,7 +1020,7 @@
 		let id = msg.toolCallId;
 		if (!id || !tools.has(id)) {
 			id = id || `permission-${msg.requestId}`;
-			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command } : undefined });
+			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command, cwd: msg.cwd } : undefined });
 			if (!msg.toolCallId) runningTools.delete(id); // no tool updates will follow for a made-up row
 		}
 		const tool = tools.get(id);
@@ -857,7 +1030,10 @@
 		requests.set(msg.requestId, node);
 		waitingCards.add(msg.requestId);
 		showActivity();
-		if (msg.cwd) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
+		if (isCommand && msg.cwd && !tool.cwd) {
+			tool.cwd = msg.cwd; // named in the row's heading
+			labelTool(tool);
+		} else if (msg.cwd && !isCommand) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		let readOnlyBox = null;
@@ -883,7 +1059,31 @@
 		}
 		const reject = (msg.options || []).find(option => option.kind === "reject_once");
 		if (reject) addRejectWithNote(node, buttons, msg, reject, id, readOnlyBox);
+		answerWithKeys(node, buttons);
 		finishCard(node);
+	}
+
+	/**
+	 * Answering from the keyboard, as in Claude Code: 1, 2, 3… press the buttons, Esc opens Reject with
+	 * note. Only while the question has focus, never from the message input, so typing there can't
+	 * answer it. It takes focus when it comes, unless the user is typing in the input.
+	 */
+	function answerWithKeys(node, buttons) {
+		const choices = [...buttons.querySelectorAll("button")];
+		choices.forEach((button, i) => {
+			if (i < 9) button.dataset.key = String(i + 1); // shown by the stylesheet, so the label stays the button's text
+		});
+		const withNote = choices.find(button => button.classList.contains("reject-with-note"));
+		node.appendChild(el("div", "keys-hint", `Keys: 1–${Math.min(choices.length, 9)} to answer${withNote ? " · Esc: reject with note" : ""}`));
+		node.tabIndex = 0;
+		node.addEventListener("keydown", event => {
+			if (event.target.closest("textarea, input") || buttons.hidden || node.classList.contains("resolved")) return;
+			const button = event.key === "Escape" ? withNote : choices.find(choice => choice.dataset.key === event.key);
+			if (!button || button.disabled || event.metaKey || event.ctrlKey || event.altKey) return;
+			event.preventDefault();
+			button.click();
+		});
+		if (document.activeElement !== input) node.focus({ preventScroll: true });
 	}
 
 	/**
@@ -1139,7 +1339,8 @@
 			case "user":
 				breakFlow();
 				planEl = null;
-				fitUserText(append(userMessage(msg.text, msg.attachments)));
+				fitUserText(append(userMessage(msg.text, msg.attachments, msg.sentAt)));
+				updateQuestionBarSoon(); // once per frame: a reloaded tab replays every message at once
 				return;
 			case "attached":
 				drafts.push(msg.attachment);
@@ -1160,6 +1361,7 @@
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
 			case "restoreInput": return restoreInput(msg.text, msg.attachments);
+			case "showQuestion": return goTo(tops => (tops[msg.index] === undefined ? undefined : scrollTopFor(tops[msg.index])));
 			case "mentions": return onMentions(msg);
 			case "notice":
 				breakFlow();
