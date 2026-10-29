@@ -185,6 +185,11 @@ function realPath(path: string): string {
 }
 
 /** `path` is `folder` or inside it. */
+/** A path with `/` between its parts, as the secret patterns are written: on Windows, real paths use `\\`. */
+export function forMatching(path: string, separator = sep): string {
+	return separator === "\\" ? path.replaceAll("\\", "/") : path;
+}
+
 function within(path: string, folder: string): boolean {
 	return path === folder || path.startsWith(folder.endsWith(sep) ? folder : folder + sep);
 }
@@ -218,15 +223,16 @@ export function readScope(command: string, folder: string, cwd?: string, home = 
 		if (expanded.startsWith("~") || (dir === undefined && !isAbsolute(expanded))) return undefined;
 		return realPath(resolve(dir ?? "/", expanded));
 	};
-	const read = (word: string, recursive: boolean): void => {
+	const read = (typed: string, recursive: boolean): void => {
+		const word = forMatching(typed);
 		if (SENSITIVE_FOLDER.test(word) || SENSITIVE_FILE.test(word) || (/[*?[{]/.test(word) && MAYBE_SENSITIVE.test(word))) sensitive = true;
-		const path = pathOf(word);
+		const path = pathOf(typed);
 		if (path === undefined) {
 			inside = false;
 			return;
 		}
 		if (!within(path, root)) inside = false;
-		if (SENSITIVE_FOLDER.test(path) || SENSITIVE_FILE.test(path)) sensitive = true;
+		if (SENSITIVE_FOLDER.test(forMatching(path)) || SENSITIVE_FILE.test(forMatching(path))) sensitive = true;
 		if (recursive && HOME_SECRETS.some(secret => within(join(realHome, secret), path))) sensitive = true;
 	};
 	for (const [name, ...args] of commands) {
@@ -244,10 +250,10 @@ export function readScope(command: string, folder: string, cwd?: string, home = 
 			if (followsLinks(name, arg)) inside = false;
 			if (!arg.startsWith("-")) read(arg, recursive);
 			else if (arg.includes("=")) read(arg.slice(arg.indexOf("=") + 1), recursive);
-			else if (/[/~]/.test(arg)) {
+			else if (/[/~\\]/.test(arg)) {
 				// A value stuck to a short option ("-f/etc/x") is not judged.
 				inside = false;
-				if (SENSITIVE_FOLDER.test(arg) || MAYBE_SENSITIVE.test(arg)) sensitive = true;
+				if (SENSITIVE_FOLDER.test(forMatching(arg)) || MAYBE_SENSITIVE.test(arg)) sensitive = true;
 			}
 		}
 	}

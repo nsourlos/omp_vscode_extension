@@ -18,6 +18,7 @@ export {
 	isReadOnlyCommand,
 	parseApprovalMessage,
 	rejectedCommandMessage,
+	forMatching,
 	readScope,
 	rejectionMessage,
 	urlsIn,

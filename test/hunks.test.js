@@ -8,6 +8,7 @@ const {
 	fileChangeWarning,
 	isReadOnlyCommand,
 	parseApprovalMessage,
+	forMatching,
 	readScope,
 	rejectedCommandMessage,
 	rejectionMessage,
@@ -275,4 +276,9 @@ test("passes the user's notes on rejected changes to the agent, and asks it to a
 	const fileNote = rejectionMessage("demo.py", diff.hunks, [false, false], { hunks: [], file: "Split this into two functions" });
 	assert.match(fileNote, /The user's note on this file: Split this into two functions/);
 	assert.match(fileNote, /Do what the user's notes ask/);
+});
+
+test("Windows paths are checked for secrets with / between their parts; elsewhere a \\ is part of a name", () => {
+	assert.equal(forMatching("C:\\Users\\me\\.ssh\\id_rsa", "\\"), "C:/Users/me/.ssh/id_rsa");
+	assert.equal(forMatching("odd\\name", "/"), "odd\\name");
 });
