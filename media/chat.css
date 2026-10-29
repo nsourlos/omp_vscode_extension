@@ -544,6 +544,72 @@ details.thought summary,
 	color: var(--vscode-foreground);
 }
 
+.tool-label {
+	opacity: 0.85;
+}
+
+.tool-answer {
+	font-style: italic;
+}
+
+.tool-label[hidden],
+.tool-answer[hidden] {
+	display: none;
+}
+
+/* omp's notes to itself in a command ("# …"): dimmed, so the lines that run stand out. */
+.tool-command .comment {
+	opacity: 0.55;
+}
+
+/* Answered: the answer is in the row's heading, and the command one line (the lines that run) until clicked. */
+.tool.answered > .tool-ask {
+	display: none;
+}
+
+.tool.answered .tool-command {
+	cursor: pointer;
+}
+
+.tool.answered .tool-command:not(.open) {
+	max-height: none;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tool.answered .tool-command:not(.open) .comment {
+	display: none;
+}
+
+.tool.answered .tool-command.open {
+	max-height: none;
+}
+
+/* Keyboard answers: each button's number, and a hint, while the question has focus. */
+.tool-ask:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.tool-ask button[data-key]::before {
+	content: attr(data-key);
+	margin-right: 6px;
+	opacity: 0.7;
+	font-size: 0.85em;
+}
+
+.keys-hint {
+	display: none;
+	margin-top: 4px;
+	font-size: 0.85em;
+	opacity: 0.7;
+}
+
+.tool-ask:focus-within:not(.resolved) .keys-hint {
+	display: block;
+}
+
 /* Its answer says whether it was ticked ("… allowed from now on"), so the greyed-out box can go. */
 .tool-ask.resolved .always-read-only {
 	display: none;

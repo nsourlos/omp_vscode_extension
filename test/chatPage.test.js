@@ -86,10 +86,16 @@ test("an answered permission stays answered when the chat is replayed", () => {
 	assert.equal(ask.querySelector(".card-result").textContent, "Allow once");
 });
 
-test("a permission for a command run in another folder names that folder", () => {
+test("a permission for a command run in another folder names that folder in the row's heading", () => {
 	const chat = openChat();
-	chat.deliver({ ...permission, cwd: "vendor/lib" });
-	assert.ok([...chat.log.querySelectorAll(".tool-ask .location")].some(node => node.textContent === "in folder: vendor/lib"));
+	chat.deliver({ ...permission, title: "ls", cwd: "vendor/lib" });
+	const label = chat.log.querySelector(".tool .tool-label");
+	assert.equal(label.hidden, false);
+	assert.equal(label.textContent, "Command · in vendor/lib");
+	assert.equal(chat.log.querySelectorAll(".tool-ask .location").length, 0, "said once");
+	chat.deliver({ ...permission, requestId: "8", toolCallId: "titled", title: "Check the logs", cwd: "vendor/lib" });
+	const titled = [...chat.log.querySelectorAll(".tool")].at(-1);
+	assert.equal(titled.querySelector(".tool-label").textContent, "in vendor/lib", "a title of its own keeps the folder");
 });
 
 test("a command's permission goes inside its tool row, and the command is shown once", () => {
@@ -111,7 +117,59 @@ test("a command's permission goes inside its tool row, and the command is shown 
 	chat.deliver({ ...tool("completed"), update: { ...tool("completed").update, rawOutput: { content: [{ type: "text", text: "src/a.ts:1:foo" }] } } });
 	assert.equal(rows[0].querySelector(".tool-status").textContent, "✓");
 	assert.equal(rows[0].querySelector(".tool-output pre").textContent, "src/a.ts:1:foo");
-	assert.equal(rows[0].querySelector(".tool-ask .card-result").textContent, "Allow once", "the answer stays visible in the row");
+	assert.equal(rows[0].querySelector(".tool-answer").textContent, "· Allow once", "the answer stays visible in the row's heading");
+	assert.ok(rows[0].classList.contains("answered"), "the row shrinks to one line of the command");
+});
+
+test("omp's approval title, the command's first 80 characters, isn't shown as well as the command", () => {
+	const chat = openChat();
+	const command = "# Map: the give-up at 08:52:54 — but all 5 r2 records show tools + answers. The 6 lines\nls results/r2; grep -l stall results/r2/*.json";
+	chat.deliver({ ...permission, toolCallId: "p80", title: command.slice(0, 80), command });
+	const row = chat.log.querySelector(".tool");
+	assert.equal(row.querySelector(".tool-title").hidden, true);
+	assert.equal(row.querySelector(".tool-label").textContent, "Command", "a heading in words instead");
+	assert.equal(row.querySelector(".tool-command").textContent, `$ ${command}`, "the whole command, as copied");
+	assert.deepEqual(
+		[...row.querySelectorAll(".tool-command .comment")].map(line => line.textContent.trim()),
+		[command.split("\n")[0]],
+		"its comment line is dimmed, the line that runs is not",
+	);
+});
+
+test("a command's question is answered with 1, 2, 3… or Esc while it has focus, never from the message input", () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	const key = (target, name) => target.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
+	input.focus();
+	chat.deliver({ ...permission, requestId: "k1", toolCallId: "k1" });
+	const ask = chat.log.querySelector(".tool-ask");
+	assert.equal(doc.activeElement, input, "someone typing keeps the input");
+	key(input, "1");
+	assert.ok(!chat.posted.some(m => m.type === "respond"), "a 1 typed in the input answers nothing");
+	assert.deepEqual([...ask.querySelectorAll(":scope > .buttons button")].map(button => button.dataset.key), ["1", "2", "3"]);
+	key(ask, "Escape");
+	assert.equal(ask.querySelector(".reject-note").hidden, false, "Esc opens Reject with note");
+
+	input.blur();
+	chat.deliver({ ...permission, requestId: "k2", toolCallId: "k2" });
+	const second = [...chat.log.querySelectorAll(".tool-ask")].at(-1);
+	assert.equal(doc.activeElement, second, "not typing: the question takes focus");
+	key(second, "1");
+	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "k2", value: "allow_once", label: "Allow once" });
+});
+
+test("an answered command shows on one line until clicked", () => {
+	const chat = openChat();
+	chat.deliver({ ...permission, toolCallId: "one", command: "# check\nls -la" });
+	const row = chat.log.querySelector(".tool");
+	row.querySelector(".tool-ask button").click();
+	const command = row.querySelector(".tool-command");
+	assert.ok(row.classList.contains("answered"));
+	command.click();
+	assert.ok(command.classList.contains("open"), "the whole command");
+	command.click();
+	assert.ok(!command.classList.contains("open"));
 });
 
 test("a shell call titled \"$ <command>\" by omp shows its command once, even when the title is cut short", () => {

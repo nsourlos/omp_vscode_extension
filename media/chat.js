@@ -865,13 +865,23 @@
 			const status = head.appendChild(el("span", "tool-status"));
 			const icon = head.appendChild(el("span", "tool-icon"));
 			const title = head.appendChild(el("span", "tool-title"));
+			// For a command, whose title is the command itself: what it is, and the folder it runs in.
+			const label = head.appendChild(el("span", "tool-label"));
+			label.hidden = true;
+			// Once its question is answered (approvals), the answer.
+			const answer = head.appendChild(el("span", "tool-answer"));
+			answer.hidden = true;
 			const command = card.appendChild(el("pre", "tool-command"));
 			command.hidden = true;
+			// An answered command shows on one line; a click shows all of it (not when text was being selected).
+			command.addEventListener("click", () => {
+				if (card.classList.contains("answered") && !window.getSelection()?.toString()) command.classList.toggle("open");
+			});
 			const details = card.appendChild(el("details", "tool-output"));
 			details.hidden = true;
 			details.appendChild(el("summary", "", "Output"));
 			const output = details.appendChild(el("pre"));
-			tool = { card, status, icon, title, command, details, output, kind: "other" };
+			tool = { card, status, icon, title, label, answer, command, details, output, kind: "other", commandText: "", cwd: "" };
 			tools.set(update.toolCallId, tool);
 		}
 		keepScrolled(() => {
@@ -889,12 +899,13 @@
 			}
 			showActivity();
 			const command = update.rawInput?.command;
-			if (typeof command === "string") {
-				tool.command.textContent = "$ " + command;
+			if (typeof command === "string" && command !== tool.commandText) {
+				tool.commandText = command;
+				showCommand(tool.command, command);
 				tool.command.hidden = false;
 			}
-			// A shell tool's title is its command, already shown in the command box: show it once.
-			tool.title.hidden = !tool.command.hidden && isCommandTitle(tool.title.textContent, tool.command.textContent.slice(2));
+			if (typeof update.rawInput?.cwd === "string") tool.cwd = update.rawInput.cwd;
+			labelTool(tool);
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -905,12 +916,36 @@
 		});
 	}
 
-	/** omp titles a shell call "$ <command>", cut to 4000 characters with "…". */
+	/**
+	 * A shell tool's title is its command, already shown in the command box: shown once, with a heading
+	 * in words instead; the folder it runs in, if not this one, either way.
+	 */
+	function labelTool(tool) {
+		tool.title.hidden = !tool.command.hidden && isCommandTitle(tool.title.textContent, tool.commandText);
+		const parts = [...(tool.title.hidden ? ["Command"] : []), ...(tool.cwd ? [`in ${tool.cwd}`] : [])];
+		tool.label.textContent = parts.join(" · ");
+		tool.label.hidden = parts.length === 0;
+	}
+
+	/**
+	 * omp titles a shell call "$ <command>", cut to 4000 characters with "…", and asks to run one
+	 * under the command's first 80 characters.
+	 */
 	function isCommandTitle(title, command) {
-		const text = title.trim().replace(/^\$\s+/, "");
-		command = command.trim();
-		if (text === command) return true;
-		return text.endsWith("…") && text.length > 1 && command.startsWith(text.slice(0, -1));
+		let text = title.trim().replace(/^\$\s+/, "");
+		if (text.endsWith("…")) text = text.slice(0, -1);
+		return text.length > 0 && command.trim().startsWith(text);
+	}
+
+	/** "$ " and the command, a line at a time: its comment lines (omp's notes to itself, "# …") dimmed, so the lines that run stand out. */
+	function showCommand(pre, command) {
+		pre.textContent = "";
+		pre.appendChild(el("span", "prompt", "$ "));
+		const lines = command.split("\n");
+		lines.forEach((line, i) => {
+			const text = i < lines.length - 1 ? `${line}\n` : line;
+			pre.appendChild(el("span", /^\s*#/.test(line) ? "line comment" : "line", text));
+		});
 	}
 
 	function onPlan(entries) {
@@ -943,6 +978,15 @@
 		for (const button of card.querySelectorAll("button, input, textarea, select")) button.disabled = true;
 		const result = card.querySelector(".card-result");
 		if (result) result.textContent = label;
+		// A command's question, answered: its row shrinks to the answer and one line of the command.
+		const row = card.classList.contains("tool-ask") ? card.closest(".tool") : null;
+		const answer = row?.querySelector(".tool-answer");
+		if (answer) {
+			row.classList.add("answered");
+			answer.textContent = `· ${label}`;
+			answer.hidden = false;
+			row.querySelector(".tool-command").title = "Click to show the whole command";
+		}
 	}
 
 	function card(requestId, heading) {
@@ -976,7 +1020,7 @@
 		let id = msg.toolCallId;
 		if (!id || !tools.has(id)) {
 			id = id || `permission-${msg.requestId}`;
-			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command } : undefined });
+			onToolCall({ toolCallId: id, title: msg.title, kind: msg.kind, status: "pending", rawInput: isCommand ? { command: msg.command, cwd: msg.cwd } : undefined });
 			if (!msg.toolCallId) runningTools.delete(id); // no tool updates will follow for a made-up row
 		}
 		const tool = tools.get(id);
@@ -986,7 +1030,10 @@
 		requests.set(msg.requestId, node);
 		waitingCards.add(msg.requestId);
 		showActivity();
-		if (msg.cwd) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
+		if (isCommand && msg.cwd && !tool.cwd) {
+			tool.cwd = msg.cwd; // named in the row's heading
+			labelTool(tool);
+		} else if (msg.cwd && !isCommand) node.appendChild(el("div", "location", `in folder: ${msg.cwd}`));
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		let readOnlyBox = null;
@@ -1012,7 +1059,31 @@
 		}
 		const reject = (msg.options || []).find(option => option.kind === "reject_once");
 		if (reject) addRejectWithNote(node, buttons, msg, reject, id, readOnlyBox);
+		answerWithKeys(node, buttons);
 		finishCard(node);
+	}
+
+	/**
+	 * Answering from the keyboard, as in Claude Code: 1, 2, 3… press the buttons, Esc opens Reject with
+	 * note. Only while the question has focus, never from the message input, so typing there can't
+	 * answer it. It takes focus when it comes, unless the user is typing in the input.
+	 */
+	function answerWithKeys(node, buttons) {
+		const choices = [...buttons.querySelectorAll("button")];
+		choices.forEach((button, i) => {
+			if (i < 9) button.dataset.key = String(i + 1); // shown by the stylesheet, so the label stays the button's text
+		});
+		const withNote = choices.find(button => button.classList.contains("reject-with-note"));
+		node.appendChild(el("div", "keys-hint", `Keys: 1–${Math.min(choices.length, 9)} to answer${withNote ? " · Esc: reject with note" : ""}`));
+		node.tabIndex = 0;
+		node.addEventListener("keydown", event => {
+			if (event.target.closest("textarea, input") || buttons.hidden || node.classList.contains("resolved")) return;
+			const button = event.key === "Escape" ? withNote : choices.find(choice => choice.dataset.key === event.key);
+			if (!button || button.disabled || event.metaKey || event.ctrlKey || event.altKey) return;
+			event.preventDefault();
+			button.click();
+		});
+		if (document.activeElement !== input) node.focus({ preventScroll: true });
 	}
 
 	/**
