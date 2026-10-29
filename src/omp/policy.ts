@@ -1,4 +1,7 @@
 /** Plain-logic rules shared by the extension: prompts, shell heuristics, agent-facing messages. */
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { describeHunk, type Hunk } from "../review/hunks";
 
 /** Appended to omp's system prompt when `omp.preferEditTool` is on. */
@@ -36,7 +39,7 @@ export function fileChangeWarning(command: string): string | undefined {
 /**
  * Commands that only read or navigate; anything not listed here is never auto-allowed. Not git:
  * even `git status` reads the repository settings of the folder it runs in (omp can pick that folder
- * with its `cwd` option, and its shell keeps an earlier `cd`), and a planted repository's settings
+ * with its `cwd` option, or a `cd` before it in the command), and a planted repository's settings
  * (core.fsmonitor, diff.external) run programs.
  */
 const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "echo"]);
@@ -118,7 +121,8 @@ function splitCommand(command: string): string[][] | undefined {
 			commands.push([]);
 		} else if (c === ">" || c === "<") {
 			if (c === "<") return undefined; // input redirection and here-docs: not judged
-			const target = /^>>?\s*\S+/.exec(command.slice(i))?.[0];
+			// The target ends where the word does, or at a ; | & right after it ("2>/dev/null;", "2>&1;").
+			const target = /^>>?\s*(&\d|[^\s;|&]+)/.exec(command.slice(i))?.[0];
 			if (!target) return undefined; // nothing to redirect to: not valid shell
 			const redirect = (inWord ? word : "") + target;
 			if (!HARMLESS_REDIRECT.test(redirect.replace(/\s+/g, ""))) return undefined;
@@ -150,6 +154,110 @@ export function commandParts(command: string): { name: string; readOnly: boolean
 	const commands = splitCommand(command);
 	if (!commands || commands.length === 0) return undefined;
 	return commands.map(words => ({ name: words[0], readOnly: isReadOnlyPart(words) }));
+}
+
+/** Folders and files of keys, tokens and passwords: reading one always asks, wherever it is. */
+const SENSITIVE_FOLDER = /(^|\/)(\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.azure|\.password-store|\.config\/(gh|gcloud)|Library\/Keychains)(\/|$)/i;
+const SENSITIVE_FILE =
+	/(^|\/)(\.env(\.(?!(example|sample|template|dist)$)[^/]+)?|[^/]*\.(pem|key|p12|pfx|keychain-db)|id_(rsa|dsa|ecdsa|ed25519)|\.netrc|\.npmrc|\.pypirc|\.git-credentials)$/i;
+/** In a word bash expands (a glob or brace), anything that might match one of those, or a hidden file. */
+const MAYBE_SENSITIVE = /\.(env|ssh|aws|gnupg|kube|docker|azure|netrc|npmrc|pypirc|pem|key|p12|pfx)|id_|credential|keychain|password|(^|\/)\.[^/]*[*?[{]/i;
+/** The secrets in a home folder, which a recursive search of any folder holding them reads. */
+const HOME_SECRETS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".password-store", ".config/gh", ".config/gcloud", "Library/Keychains", ".netrc", ".npmrc", ".pypirc", ".git-credentials"];
+
+/** Options that make a read-only program follow links, so it may read past the folder it was given. */
+function followsLinks(name: string, arg: string): boolean {
+	if (name === "grep") return arg === "--dereference-recursive" || /^-[a-zA-Z]*R/.test(arg);
+	if (name === "rg") return arg === "--follow" || /^-[a-zA-Z]*L/.test(arg);
+	if (name === "find") return arg === "-L" || arg === "-follow";
+	if (name === "ls") return /^-[a-zA-Z]*L/.test(arg) || arg === "--dereference";
+	return false;
+}
+
+/** The path with its links resolved, as far as it exists (the rest is kept as written). */
+function realPath(path: string): string {
+	try {
+		return realpathSync.native(path);
+	} catch {
+		const parent = dirname(path);
+		return parent === path ? path : join(realPath(parent), basename(path));
+	}
+}
+
+/** `path` is `folder` or inside it. */
+/** A path with `/` between its parts, as the secret patterns are written: on Windows, real paths use `\\`. */
+export function forMatching(path: string, separator = sep): string {
+	return separator === "\\" ? path.replaceAll("\\", "/") : path;
+}
+
+function within(path: string, folder: string): boolean {
+	return path === folder || path.startsWith(folder.endsWith(sep) ? folder : folder + sep);
+}
+
+export interface ReadScope {
+	/** Every path the read-only parts read is inside the folder. */
+	inside: boolean;
+	/** A read-only part reads a secret (a key, token or password file or folder), or may. */
+	sensitive: boolean;
+}
+
+/**
+ * Where a command's read-only parts read, compared with `folder`. omp starts each command in the
+ * session folder (or the folder of its `cwd` option): a `cd` in an earlier command does not carry
+ * over, and one in this command moves the parts after it. Every argument that may be a path is
+ * judged as one, so a search pattern like "/etc" makes the command ask, never the reverse.
+ * Undefined when the command can't be judged (see splitCommand).
+ */
+export function readScope(command: string, folder: string, cwd?: string, home = homedir()): ReadScope | undefined {
+	const commands = splitCommand(command);
+	if (!commands) return undefined;
+	const root = realPath(folder);
+	const realHome = realPath(home);
+	/** The folder the next part runs in; undefined after a `cd` that can't be followed. */
+	let dir: string | undefined = resolve(folder, cwd ?? ".");
+	let inside = true;
+	let sensitive = false;
+	/** The absolute path a word names, or undefined when it can't be told (`~user`, or after `cd -`). */
+	const pathOf = (word: string): string | undefined => {
+		const expanded = word === "~" || word.startsWith("~/") ? home + word.slice(1) : word;
+		if (expanded.startsWith("~") || (dir === undefined && !isAbsolute(expanded))) return undefined;
+		return realPath(resolve(dir ?? "/", expanded));
+	};
+	const read = (typed: string, recursive: boolean): void => {
+		const word = forMatching(typed);
+		if (SENSITIVE_FOLDER.test(word) || SENSITIVE_FILE.test(word) || (/[*?[{]/.test(word) && MAYBE_SENSITIVE.test(word))) sensitive = true;
+		const path = pathOf(typed);
+		if (path === undefined) {
+			inside = false;
+			return;
+		}
+		if (!within(path, root)) inside = false;
+		if (SENSITIVE_FOLDER.test(forMatching(path)) || SENSITIVE_FILE.test(forMatching(path))) sensitive = true;
+		if (recursive && HOME_SECRETS.some(secret => within(join(realHome, secret), path))) sensitive = true;
+	};
+	for (const [name, ...args] of commands) {
+		if (name === "cd") {
+			const target = args.find(arg => arg !== "--") ?? "~";
+			dir = target === "-" ? undefined : pathOf(target);
+			continue;
+		}
+		if (!READ_ONLY_COMMANDS.has(name) || name === "echo" || name === "pwd") continue;
+		// rg searches folders, as grep does with -r. With no path given, a part reads the folder it
+		// runs in (`ls`, `find`, `rg`), so that folder counts as read too.
+		const recursive = name === "rg" || (name === "grep" && args.some(arg => /^-[a-zA-Z]*[rR]/.test(arg) || /^--(recursive|dereference-recursive)$/.test(arg)));
+		read(".", recursive);
+		for (const arg of args) {
+			if (followsLinks(name, arg)) inside = false;
+			if (!arg.startsWith("-")) read(arg, recursive);
+			else if (arg.includes("=")) read(arg.slice(arg.indexOf("=") + 1), recursive);
+			else if (/[/~\\]/.test(arg)) {
+				// A value stuck to a short option ("-f/etc/x") is not judged.
+				inside = false;
+				if (SENSITIVE_FOLDER.test(forMatching(arg)) || MAYBE_SENSITIVE.test(arg)) sensitive = true;
+			}
+		}
+	}
+	return { inside, sensitive };
 }
 
 function isReadOnlyPart([name, ...args]: string[]): boolean {

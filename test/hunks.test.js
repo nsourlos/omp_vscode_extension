@@ -8,10 +8,15 @@ const {
 	fileChangeWarning,
 	isReadOnlyCommand,
 	parseApprovalMessage,
+	forMatching,
+	readScope,
 	rejectedCommandMessage,
 	rejectionMessage,
 	urlsIn,
 } = require("../dist/core.js");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const original = 'def greet():\n    print("Hi")\n\n\ndef add(a, b):\n    return a + b\n';
 const proposed = 'def greet():\n    print("Hello")\n\n\ndef add(a, b):\n    """Sum."""\n    return a + b\n';
@@ -74,6 +79,11 @@ test("judges which shell commands only read or navigate", () => {
 		"cat ./{a,b}.txt",
 		"grep -n 'x$' a.txt",
 		"find . -name '*.ts' -print",
+		// a discarding redirect right before ; | && (no space)
+		"ls a 2>/dev/null; echo ===; ls b 2>/dev/null | head -20",
+		"ls a >/dev/null|head",
+		"ls a 2>/dev/null&&ls b",
+		"ls a 2>&1;ls b",
 	];
 	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
 
@@ -124,12 +134,66 @@ test("judges which shell commands only read or navigate", () => {
 		"(rm x)",
 		"echo hi >",
 		"ls >  ",
+		"ls >/dev/null.txt",
+		"ls 2>/dev/nullx; ls",
+		"ls 2>/dev/null&", // backgrounding
+		"ls >|/dev/null",
+		"ls 2>/dev/null; rm -rf x",
 		// a line continuation, which bash deletes, joining "-ex" and "ec" into -exec
 		"find . -maxdepth 0 -ex\\\nec sh -c 'rm -rf ~' \\;",
 		"find . -de\\\nlete",
 		'find . "-de\\\nlete"',
 	];
 	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
+});
+
+test("judges whether a read-only command reads only inside the folder, and whether it reads a secret", () => {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-scope-")));
+	const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-home-")));
+	fs.mkdirSync(path.join(root, "src"));
+	fs.symlinkSync(os.tmpdir(), path.join(root, "outside-link"));
+	const scope = (command, cwd) => readScope(command, root, cwd, home);
+	const inside = { inside: true, sensitive: false };
+	const outside = { inside: false, sensitive: false };
+	const secret = (isInside = true) => ({ inside: isInside, sensitive: true });
+	const cases = [
+		["ls -la", inside],
+		["cat src/a.ts | head -5; wc -l src/b.ts", inside],
+		["grep -rn foo src", inside],
+		["rg -n 'a|b'", inside],
+		["cd src && cat a.ts", inside],
+		["find . -name '*.py' -not -path './node_modules/*'", inside],
+		["head -n 5 a.txt", inside],
+		["cat .env.example", inside],
+		["cat id_rsa.pub", inside],
+		["echo ~/.ssh; pwd", inside], // prints, reads nothing
+		["ls ~/Desktop", outside],
+		["cat ../x", outside],
+		["cd .. && ls", outside], // ls with no path reads the folder it runs in
+		["cd - && cat a.txt", outside], // a folder that can't be followed
+		["ls /usr", outside],
+		["cat outside-link/x", outside], // a link inside pointing out
+		["grep -R foo .", outside], // follows links
+		["find -L .", outside],
+		["grep -f/etc/x y", outside], // a value stuck to an option is not judged
+		["cat ~other/x", outside],
+		["cat .env", secret()],
+		["cat .env.local", secret()],
+		["cat src/key.pem", secret()],
+		["cat .e*", secret()], // a glob that may match .env
+		["cat config/id_rsa", secret()],
+		["cd src && cat ../.npmrc", secret()],
+		["ls ~/.ssh", secret(false)],
+		["cat ~/.aws/credentials", secret(false)],
+		["cd ~/.gnupg && ls", secret(false)],
+		["grep -r token ~", secret(false)], // a recursive search of a folder holding secrets
+		["cd ~ && rg token", secret(false)],
+		["rg token ~/.config", secret(false)],
+	];
+	for (const [command, expected] of cases) assert.deepEqual(scope(command), expected, command);
+	assert.deepEqual(scope("ls", "src"), inside, "omp's cwd option inside the folder");
+	assert.deepEqual(scope("ls", "/usr"), outside, "and outside it");
+	assert.equal(scope("cat $(echo x)"), undefined, "not judged at all");
 });
 
 test("a note on a rejected command goes to omp with the command, and the change asked for", () => {
@@ -212,4 +276,9 @@ test("passes the user's notes on rejected changes to the agent, and asks it to a
 	const fileNote = rejectionMessage("demo.py", diff.hunks, [false, false], { hunks: [], file: "Split this into two functions" });
 	assert.match(fileNote, /The user's note on this file: Split this into two functions/);
 	assert.match(fileNote, /Do what the user's notes ask/);
+});
+
+test("Windows paths are checked for secrets with / between their parts; elsewhere a \\ is part of a name", () => {
+	assert.equal(forMatching("C:\\Users\\me\\.ssh\\id_rsa", "\\"), "C:/Users/me/.ssh/id_rsa");
+	assert.equal(forMatching("odd\\name", "/"), "odd\\name");
 });

@@ -949,7 +949,8 @@
 	function onAutoAllowed(msg) {
 		const tool = tools.get(msg.toolCallId);
 		const names = Array.isArray(msg.names) && msg.names.length ? msg.names.join(", ") : "read-only commands";
-		if (tool) tool.card.insertBefore(el("div", "tool-note", `Allowed automatically: you always allow ${names} in this chat`), tool.details);
+		const why = msg.inFolder ? "it only reads inside this folder" : `you always allow ${names} in this chat`;
+		if (tool) tool.card.insertBefore(el("div", "tool-note", `Allowed automatically: ${why}`), tool.details);
 	}
 
 	function onApproval(msg) {
