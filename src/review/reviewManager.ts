@@ -105,7 +105,20 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 			vscode.commands.registerCommand("omp.review.open", (id?: string) => this.open(id)),
 			vscode.commands.registerCommand("omp.review.acceptAtCursor", () => this.#decideAtCursor("accepted")),
 			vscode.commands.registerCommand("omp.review.rejectAtCursor", () => this.#decideAtCursor("rejected")),
+			vscode.window.tabGroups.onDidChangeTabs(event => this.#closeLeftoverTabs(event.opened)),
 		);
+		this.#closeLeftoverTabs(vscode.window.tabGroups.all.flatMap(group => group.tabs));
+	}
+
+	/**
+	 * Close the diff tabs of reviews this window doesn't have: VS Code reopens them after a restart,
+	 * but the edit they showed waited in an omp that is gone, so they would only show an empty diff.
+	 */
+	#closeLeftoverTabs(tabs: readonly vscode.Tab[]): void {
+		const leftover = tabs.filter(
+			tab => tab.input instanceof vscode.TabInputTextDiff && tab.input.modified.scheme === REVIEW_SCHEME && !this.#byId.has(tab.input.modified.path.split("/")[1]),
+		);
+		if (leftover.length > 0) void vscode.window.tabGroups.close(leftover);
 	}
 
 	/** Queue a review in the owner's queue; resolves when the user has decided every hunk. */

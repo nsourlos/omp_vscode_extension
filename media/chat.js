@@ -420,6 +420,7 @@
 			);
 		}
 		attachmentsEl.hidden = drafts.length === 0;
+		saveTabState(); // the files' names, so a restart can say which to attach again
 	}
 
 	/** Chips are 28 px high (and up to 56 wide): twice that keeps a thumbnail sharp on a high-density screen. */
@@ -1111,14 +1112,22 @@
 		for (const item of [...queueEl.children]) if (ids.includes(item.dataset.id)) item.remove();
 	}
 
-	/** Put text (and its attachments) back in the input, ahead of what is there. */
-	function restoreInput(text, attachments = []) {
+	/** Put text (and its attachments) back in the input, ahead of what is there; with focus false, without taking the keyboard. */
+	function restoreInput(text, attachments = [], focus = true) {
 		if (text) input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+		saveTabState();
 		if (attachments.length) {
 			drafts = [...attachments, ...drafts];
 			renderDrafts();
 		}
-		input.focus();
+		if (focus) input.focus();
+	}
+
+	// What VS Code keeps for this tab across a restart (src/tabState.ts): the extension's part, sent
+	// whenever it changes, and what is typed in the input. Until the first arrives, the kept one stays.
+	let tabState = null;
+	function saveTabState() {
+		if (tabState) vscode.setState({ ...tabState, input: input.value, inputFiles: drafts.map(chip => chip.name) });
 	}
 
 	function setStatus(state) {
@@ -1155,6 +1164,11 @@
 			case "config": return onConfig(msg.options);
 			case "status": return setStatus(msg.state);
 			case "sound": return setSound(msg.on);
+			case "tabState":
+				tabState = msg.state;
+				return saveTabState();
+			// What wasn't sent before a restart: back in the input, without taking the keyboard from the file being edited.
+			case "restoreUnsent": return restoreInput(msg.text, [], false);
 			case "chime": return chime();
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
@@ -1284,6 +1298,7 @@
 
 	function pickSuggestion(item) {
 		item.pick();
+		saveTabState(); // a pick changes the input without an input event
 		input.focus();
 		updateSuggestions();
 	}
@@ -1329,6 +1344,7 @@
 		}
 		sendWhenThumbnailed({ type: "send", text, attachments: drafts.map(chip => chip.id) });
 		input.value = "";
+		saveTabState();
 		drafts = [];
 		renderDrafts();
 		updateSuggestions();
@@ -1408,6 +1424,7 @@
 	});
 
 	input.addEventListener("input", updateSuggestions);
+	input.addEventListener("input", saveTabState);
 	input.addEventListener("blur", hideSuggestions);
 	// A cursor moved off (or into) a mention changes what the suggestions are for. Up and Down move in the list instead.
 	const CURSOR_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
