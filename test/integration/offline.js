@@ -508,7 +508,7 @@ exports.run = async function run() {
 			const config = vscode.workspace.getConfiguration("omp");
 			try {
 				await controller.send(steps({ say: "done" }));
-				assert.deepEqual(notified.slice(seen), [{ type: "chime" }]);
+				assert.deepEqual(notified.slice(seen).filter(m => m.type !== "tabState"), [{ type: "chime" }]);
 				const ended = postsOf(panel).filter(m => m.type === "turnEnd").at(-1);
 				assert.equal(typeof ended.seconds, "number", "the turn's length goes to the reply's footer");
 				assert.ok(!postsOf(panel).some(m => m.type === "chime"), "not kept in the history a reloaded page replays");
@@ -1628,6 +1628,110 @@ exports.run = async function run() {
 			}
 		},
 	};
+
+	// VS Code can't be restarted in a test: these hand the extension a tab as VS Code does when it restores one.
+	const restoreTab = (state, label = "restored") =>
+		api.sessions.restore(vscode.window.createWebviewPanel("omp.chatPanel", label, vscode.ViewColumn.Active, {}), state);
+	const loggedSince = (logged, event) => fakeLog().slice(logged).filter(e => e.event === event);
+
+	Object.assign(tests, {
+		async "a restored tab loads its chat again, says a reply was cut short, and puts back what wasn't sent"() {
+			const logged = fakeLog().length;
+			const session = restoreTab({
+				label: "OMP 90",
+				sessionId: "saved-1",
+				title: "Fix the parser",
+				saved: true,
+				busy: true,
+				queued: [{ id: "4", text: "then this", files: ["shot.png"] }],
+				input: "half typed",
+			});
+			const posts = postsOf(session.panel);
+			const notified = notificationsOf(session.panel);
+			await waitFor(() => loggedSince(logged, "session/load").some(e => e.sessionId === "saved-1"), "omp to load the chat");
+			const note = await waitFor(() => posts.findIndex(m => m.type === "notice" && /VS Code closed during this reply/.test(m.text)) + 1, "the note");
+			assert.ok(posts.findIndex(m => m.type === "update" && m.update.sessionUpdate === "agent_message_chunk") < note - 1, "after the replayed conversation");
+			const restored = await waitFor(() => notified.find(m => m.type === "restoreUnsent"), "the unsent text");
+			assert.equal(restored.text, "then this\n\nhalf typed", "the queued message, then what was being typed");
+			await waitFor(() => posts.some(m => m.type === "notice" && /attach them again: shot\.png/.test(m.text)), "the note naming the file that wasn't kept");
+			assert.equal(session.panel.label, "OMP 90");
+			assert.equal(session.panel.chatTitle, "Fix the parser");
+			await waitFor(() => allTabs().some(tab => tab.label === "OMP 90: Fix the parser"), "the tab's name");
+			const kept = await waitFor(() => notified.filter(m => m.type === "tabState").at(-1)?.state.sessionId === "saved-1" && notified.filter(m => m.type === "tabState").at(-1), "the state kept for the next restart");
+			assert.deepEqual({ ...kept.state, queued: undefined }, { label: "OMP 90", sessionId: "saved-1", title: "Fix the parser", saved: true, busy: false, queued: undefined });
+
+			const next = await newSession();
+			assert.equal(next.panel.label, "OMP 91", "a new tab's number isn't one a restored tab has");
+			next.panel.dispose();
+			session.panel.dispose();
+		},
+
+		async "a restored tab where nothing was sent starts a new chat; one omp can't load stays, saying why"() {
+			let logged = fakeLog().length;
+			const fresh = restoreTab({ label: "OMP 92", sessionId: "never-sent", saved: false, busy: false, queued: [] });
+			const freshPosts = postsOf(fresh.panel);
+			await waitFor(() => loggedSince(logged, "session/new").length > 0, "a new chat");
+			await waitFor(() => freshPosts.some(m => m.type === "status" && m.state === "idle"), "the chat to be ready");
+			assert.deepEqual(loggedSince(logged, "session/load"), [], "nothing to load");
+			assert.ok(!freshPosts.some(m => m.type === "notice" && m.level === "error"));
+
+			logged = fakeLog().length;
+			const gone = restoreTab({ label: "OMP 93", sessionId: "missing-restored", saved: true, busy: true, queued: [] });
+			const gonePosts = postsOf(gone.panel);
+			await waitFor(() => gonePosts.some(m => m.type === "notice" && /could not open this saved chat/.test(m.text)), "the reason");
+			assert.ok(api.sessions.all.includes(gone), "the tab stays");
+			assert.ok(!gonePosts.some(m => m.type === "notice" && /VS Code closed/.test(m.text)), "no note about a reply that can't be shown");
+			const goneState = notificationsOf(gone.panel);
+			gone.panel.receive({ type: "ready" }); // the page (re)loads: it is sent the tab's state
+			const kept = goneState.filter(m => m.type === "tabState").at(-1).state;
+			assert.deepEqual([kept.sessionId, kept.saved], [undefined, false], "forgotten: the next restart opens it as a new chat, not this failure again");
+
+			const unreadable = restoreTab(undefined, "OMP ?");
+			assert.match(unreadable.panel.label, /^OMP \d+$/, "a tab with no state VS Code kept opens as a new chat");
+			for (const session of [fresh, gone, unreadable]) session.panel.dispose();
+		},
+
+		async "a restored chat with no name isn't named on startup, so a restart doesn't ask omp every time"() {
+			const logged = fakeLog().length;
+			const session = restoreTab({ label: "OMP 94", sessionId: "untitled-1", saved: true, busy: false, queued: [] });
+			const posts = postsOf(session.panel);
+			await waitFor(() => loggedSince(logged, "session/load").some(e => e.sessionId === "untitled-1"), "omp to load the chat");
+			await waitFor(() => posts.some(m => m.type === "status" && m.state === "idle"), "the chat to be ready");
+			assert.ok(!posts.some(m => m.type === "status" && m.state === "naming"));
+			assert.equal(session.panel.chatTitle, undefined, "named after its next reply instead");
+			session.panel.dispose();
+		},
+
+		async "a fresh chat started in a tab that had one counts as nothing sent, so a restart doesn't try to load it"() {
+			const session = await newSession();
+			const notified = notificationsOf(session.panel);
+			await session.controller.send(steps({ say: "hi" }));
+			const kept = () => notified.filter(m => m.type === "tabState").at(-1).state;
+			assert.equal(kept().saved, true);
+			session.panel.setSessionId("fresh-after-a-stop"); // as when omp starts again with a new, empty chat
+			assert.deepEqual([kept().sessionId, kept().saved], ["fresh-after-a-stop", false]);
+			session.panel.dispose();
+		},
+
+		async "a new tab's name is not one of a chat tab VS Code hasn't restored yet"() {
+			// Stands in for a tab behind another, which VS Code restores only once it is shown.
+			const unrestored = vscode.window.createWebviewPanel("omp.chatPanel", "OMP 95: Not shown yet", { viewColumn: vscode.ViewColumn.Active, preserveFocus: true }, {});
+			try {
+				await waitFor(() => allTabs().some(tab => tab.label === "OMP 95: Not shown yet"), "VS Code to list the tab");
+				const next = await newSession();
+				assert.equal(next.panel.label, "OMP 96");
+				next.panel.dispose();
+			} finally {
+				unrestored.dispose();
+			}
+		},
+
+		async "a diff tab of a review this window doesn't have, as VS Code reopens after a restart, is closed"() {
+			const side = name => vscode.Uri.from({ scheme: "omp-review", path: `/999/${name}/left.txt` });
+			await vscode.commands.executeCommand("vscode.diff", side("original"), side("proposed"), "left over");
+			await waitFor(() => reviewTabs().length === 0, "the leftover diff to close");
+		},
+	});
 
 	for (const [name, test] of Object.entries(tests)) {
 		try {

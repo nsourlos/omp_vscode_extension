@@ -7,14 +7,22 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, sep } from "node:path";
 import * as vscode from "vscode";
-import { ChatPanel, nonce } from "./chatPanel";
+import { CHAT_PANEL_TYPE, ChatPanel, nonce } from "./chatPanel";
 import type { SavedSession } from "./acp/types";
 import { Controller, withListingOmp } from "./controller";
 import type { ReviewManager } from "./review/reviewManager";
 import { chatsToShow, continuedIn, forgetDeleted, otherFolderChats, type ContinuedChats } from "./savedChats";
+import { newTabState, readTabState, unsentFiles, unsentText, type TabState } from "./tabState";
 
 /** The globalState key for the chats continued in another folder than they were saved under. */
 const CONTINUED_CHATS = "omp.continuedChats";
+/**
+ * The workspaceState key for which chat each open tab shows, by the tab's name. VS Code hands a tab
+ * back (with its state) only when it is first shown, so this is how a tab behind another is known.
+ */
+const OPEN_TABS = "omp.openChatTabs";
+/** VS Code's commands to focus the first to eighth editor group, counted by their place on screen (a group's column). */
+const FOCUS_GROUP = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"].map(n => `workbench.action.focus${n}EditorGroup`);
 
 export interface Session {
 	panel: ChatPanel;
@@ -27,6 +35,8 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 	#sessions: Session[] = [];
 	#active: Session | undefined;
 	#nextNumber = 1;
+	/** Waiting for VS Code to restore a tab brought forward, by the tab's name (see #showUnrestored). */
+	#restoreWaiters = new Map<string, (session: Session) => void>();
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -36,6 +46,8 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 		private readonly copiesRoot: string,
 		/** The extension's state for every folder: which saved chats were continued in which folder. */
 		private readonly globalState: vscode.Memento,
+		/** This folder's: which chat each open tab shows (OPEN_TABS). */
+		private readonly workspaceState: vscode.Memento,
 	) {}
 
 	get all(): readonly Session[] {
@@ -62,10 +74,46 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 
 	/** Open the chat tab, then show the Explorer again so files stay visible. */
 	async openFromSidebar(): Promise<void> {
-		this.open();
+		await this.show();
 		await vscode.commands.executeCommand("workbench.view.explorer");
 	}
 
+	/**
+	 * Like open(), but when no chat tab has been restored yet and one is open behind another (VS Code
+	 * restores a tab only when it is first shown), that one is brought forward instead of a new one opened.
+	 */
+	async show(): Promise<Session> {
+		if (!this.#active) {
+			// The one showing first: at startup VS Code may be about to restore it.
+			const tab = chatTabs().find(open => open.isActive) ?? chatTabs()[0];
+			const restored = tab && (await this.#showUnrestored(tab));
+			if (restored) return restored;
+		}
+		return this.open();
+	}
+
+	/** Bring a tab VS Code hasn't restored yet to the front, which makes VS Code restore it; its session, or undefined if that didn't happen. */
+	async #showUnrestored(tab: vscode.Tab): Promise<Session | undefined> {
+		const label = labelOf(tab);
+		const focusGroup = FOCUS_GROUP[tab.group.viewColumn - 1];
+		if (!label || !focusGroup) return undefined;
+		let resolveRestored: (session: Session | undefined) => void = () => {};
+		const restored = new Promise<Session | undefined>(resolve => (resolveRestored = resolve));
+		this.#restoreWaiters.set(label, resolveRestored);
+		const timer = setTimeout(() => resolveRestored(undefined), 5000);
+		try {
+			await vscode.commands.executeCommand(focusGroup);
+			// Only if the group focused holds the tab (one in another window doesn't count in the main window's
+			// numbers): opening by position elsewhere would bring another editor forward.
+			const index = vscode.window.tabGroups.activeTabGroup.tabs.findIndex(open => labelOf(open) === label);
+			if (index < 0) return undefined;
+			await vscode.commands.executeCommand("workbench.action.openEditorAtIndex", index);
+			return await restored;
+		} finally {
+			clearTimeout(timer);
+			if (this.#restoreWaiters.get(label) === resolveRestored) this.#restoreWaiters.delete(label);
+		}
+	}
 	/** Bring the last-used session's tab to the front, or open a first session. */
 	open(): Session {
 		if (this.#active) {
@@ -116,6 +164,14 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 		if (picked.cwd !== folder && !mine.some(chat => chat.sessionId === picked.sessionId)) {
 			await this.#updateContinued(continued => ({ ...continued, [picked.sessionId]: { folder } }));
 		}
+		// Open in a tab VS Code hasn't restored yet: that tab, not a second one on the same chat.
+		const label = Object.entries(this.workspaceState.get<Record<string, string>>(OPEN_TABS, {})).find(([, id]) => id === picked.sessionId)?.[0];
+		const tab = label && !this.#sessions.some(session => session.panel.label === label) ? chatTabs().find(open => labelOf(open) === label) : undefined;
+		if (tab) {
+			if (await this.#showUnrestored(tab)) return;
+			void vscode.window.showInformationMessage(`OMP: this chat is already open in the tab "${label}": click that tab to continue it.`);
+			return;
+		}
 		this.openSaved(picked);
 	}
 
@@ -139,15 +195,52 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 		return session;
 	}
 
-	/** Open a new session in its own tab, next to the current chat tab if there is one. */
-	create(saved?: SavedSession): Session {
-		const label = `OMP ${this.#nextNumber++}`;
+	/**
+	 * A chat tab VS Code brought back after a restart, where it was: its chat is loaded again (one
+	 * where nothing was sent starts afresh), and what wasn't sent goes back in the input.
+	 */
+	restore(webviewPanel: vscode.WebviewPanel, state: unknown): Session {
+		const tab = readTabState(state) ?? newTabState(this.#newLabel());
+		const saved = tab.saved && tab.sessionId ? { sessionId: tab.sessionId, cwd: "", title: tab.title } : undefined;
+		const session = this.create(saved, { panel: webviewPanel, tab });
+		if (!webviewPanel.active) this.#active = this.#sessions.find(other => other.panel.active) ?? session; // the tab in front stays the one used last
+		const text = unsentText(tab);
+		if (text) void session.panel.whenReady().then(() => session.panel.notify({ type: "restoreUnsent", text }));
+		const files = unsentFiles(tab);
+		const notes = files.length ? [`Files attached to what wasn't sent can't be kept when VS Code closes; attach them again: ${files.join(", ")}`] : [];
+		void session.controller.start(notes);
+		this.#restoreWaiters.get(session.panel.label)?.(session);
+		return session;
+	}
+
+	/** A name for a new tab that no open tab has, restored or not. */
+	#newLabel(): string {
+		const taken = chatTabs().map(tab => Number(labelOf(tab)?.slice(4) ?? 0));
+		const number = Math.max(this.#nextNumber, ...taken.map(n => n + 1));
+		this.#nextNumber = number + 1;
+		return `OMP ${number}`;
+	}
+
+	/** Note which chat the tab shows, for a restart (OPEN_TABS); tabs no longer open are dropped. */
+	#recordTab(label: string, sessionId: string | undefined): void {
+		const open = new Set(chatTabs().map(labelOf));
+		const before = this.workspaceState.get<Record<string, string>>(OPEN_TABS, {});
+		const after = Object.fromEntries(Object.entries(before).filter(([name]) => name !== label && open.has(name)));
+		if (sessionId) after[label] = sessionId;
+		if (JSON.stringify(after) !== JSON.stringify(before)) void this.workspaceState.update(OPEN_TABS, after);
+	}
+
+	/** Open a new session in its own tab, next to the current chat tab if there is one (or in the restored tab given). */
+	create(saved?: SavedSession, restored?: { panel: vscode.WebviewPanel; tab: TabState }): Session {
+		const label = restored?.tab.label ?? this.#newLabel();
 		const panel: ChatPanel = new ChatPanel(
 			this.extensionUri,
 			label,
 			this.#active?.panel.viewColumn ?? vscode.ViewColumn.Beside,
 			(): boolean =>
 				this.#sessions.some(other => other.panel !== panel && other.panel.visible && other.panel.viewColumn === panel.viewColumn),
+			saved?.sessionId,
+			restored?.panel,
 		);
 		const title = saved?.title?.trim();
 		if (title) panel.setChatTitle(title);
@@ -157,13 +250,27 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 			line => this.output.appendLine(`[${label}] ${line}`),
 			this.copiesRoot,
 			saved?.sessionId,
-			saved !== undefined && !title,
+			// A restored tab isn't named on startup (every restart would ask again): only after its next reply.
+			saved !== undefined && !title && !restored,
+			saved !== undefined && restored?.tab.busy === true,
 		);
 		const session: Session = { panel, controller };
 		this.#sessions.push(session);
 		this.#active = session;
 		panel.onDidBecomeActive(() => (this.#active = session));
+		// Only when the chat it shows changes, and never after the tab is closed (a late update would list it again).
+		let recorded = saved?.sessionId;
+		let closed = false;
+		panel.onDidChangeTabState(tab => {
+			const sessionId = tab.saved ? tab.sessionId : undefined;
+			if (closed || sessionId === recorded) return;
+			recorded = sessionId;
+			this.#recordTab(label, sessionId);
+		});
+		if (saved) this.#recordTab(label, saved.sessionId);
 		panel.onDidDispose(() => {
+			closed = true;
+			this.#recordTab(label, undefined); // closed by the user (VS Code closing leaves the tabs, see dispose)
 			controller.dispose();
 			this.#sessions = this.#sessions.filter(other => other !== session);
 			if (this.#active === session) this.#active = this.#sessions.at(-1);
@@ -173,13 +280,26 @@ export class Sessions implements vscode.WebviewViewProvider, vscode.Disposable {
 
 	/** Move the last-used session's tab into its own window. */
 	async openInWindow(): Promise<void> {
-		this.open();
+		await this.show();
 		await vscode.commands.executeCommand("workbench.action.moveEditorToNewWindow");
 	}
 
+	/** Stop every chat's omp. The tabs stay: when VS Code is closing, it brings them back next time (restore). */
 	dispose(): void {
-		for (const session of [...this.#sessions]) session.panel.dispose();
+		for (const session of this.#sessions) session.controller.dispose();
 	}
+}
+
+/** The OMP chat tabs VS Code has open, in every group, restored or not yet. */
+function chatTabs(): vscode.Tab[] {
+	return vscode.window.tabGroups.all
+		.flatMap(group => group.tabs)
+		.filter(tab => tab.input instanceof vscode.TabInputWebview && tab.input.viewType.endsWith(CHAT_PANEL_TYPE));
+}
+
+/** A chat tab's name ("OMP 2"), from its title ("● OMP 2: Fix the parser"). */
+function labelOf(tab: vscode.Tab): string | undefined {
+	return /^(?:● )?(OMP \d+)(?::|$)/.exec(tab.label)?.[1];
 }
 
 type ChatItem = vscode.QuickPickItem & { chat?: SavedSession; others?: true };

@@ -36,14 +36,20 @@ function openChat(setup = () => {}) {
 	windows.push(window);
 	setup(window);
 	const posted = [];
+	const states = []; // what the page kept for VS Code (setState), latest last
 	// Copied like the real VS Code bridge does, which also turns them into plain Node objects.
-	window.acquireVsCodeApi = () => ({ postMessage: message => posted.push(JSON.parse(JSON.stringify(message))) });
+	window.acquireVsCodeApi = () => ({
+		postMessage: message => posted.push(JSON.parse(JSON.stringify(message))),
+		getState: () => states.at(-1),
+		setState: state => states.push(JSON.parse(JSON.stringify(state))),
+	});
 	window.Element.prototype.scrollIntoView = () => {};
 	// The bundle is strict, so its top-level `var` stays inside an eval (on the page, a <script>, it is global).
 	window.eval(`${markdown}\nwindow.ompMarkdown = ompMarkdown;`);
 	window.eval(script);
 	return {
 		posted,
+		states,
 		log: window.document.getElementById("log"),
 		activity: window.document.getElementById("activity"),
 		window,
@@ -1458,4 +1464,48 @@ test("a replayed document attachment shows as a document chip", () => {
 	assert.equal(chip.querySelector(".attachment-icon").textContent, "📑");
 	assert.equal(chip.querySelector(".attachment-name").textContent, "plan.docx");
 	assert.equal(chat.log.querySelector(".user-text").textContent, "Summarise it");
+});
+
+test("the page keeps the tab's state for VS Code with what is typed, and nothing before the extension sends it", () => {
+	const chat = openChat();
+	const input = chat.window.document.getElementById("input");
+	input.value = "half";
+	input.dispatchEvent(new chat.window.Event("input"));
+	assert.deepEqual(chat.states, [], "the state kept from before a restart stays until the extension's arrives");
+	const state = { label: "OMP 2", sessionId: "s1", saved: true, busy: false, queued: [] };
+	chat.deliver({ type: "tabState", state });
+	assert.deepEqual(chat.states.at(-1), { ...state, input: "half", inputFiles: [] });
+	input.value = "half typed";
+	input.dispatchEvent(new chat.window.Event("input"));
+	assert.equal(chat.states.at(-1).input, "half typed");
+	chat.deliver({ type: "attached", attachment: { id: "a1", name: "notes.md", kind: "text" } });
+	assert.deepEqual(chat.states.at(-1).inputFiles, ["notes.md"], "the names of the files attached in the input");
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Enter" }));
+	assert.deepEqual([chat.states.at(-1).input, chat.states.at(-1).inputFiles], ["", []], "sent: nothing left unsent");
+	chat.deliver({ type: "restoreInput", text: "put back" });
+	assert.equal(chat.states.at(-1).input, "put back");
+});
+
+test("a picked suggestion is kept too, though it changes the input without an input event", async () => {
+	const chat = openChat();
+	const input = chat.window.document.getElementById("input");
+	chat.deliver({ type: "tabState", state: { label: "OMP 1", saved: false, busy: false, queued: [] } });
+	input.value = "look at @sr";
+	input.selectionStart = input.selectionEnd = input.value.length;
+	input.dispatchEvent(new chat.window.Event("input"));
+	await new Promise(resolve => setTimeout(resolve, 80));
+	chat.deliver({ type: "mentions", id: chat.posted.at(-1).id, items: [{ path: "src/parser.ts", folder: false }] });
+	input.dispatchEvent(new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+	assert.equal(chat.states.at(-1).input, "look at @src/parser.ts ");
+});
+
+test("unsent text put back in a restored tab doesn't take the keyboard; text put back after Stop does", () => {
+	const chat = openChat();
+	const doc = chat.window.document;
+	const input = doc.getElementById("input");
+	chat.deliver({ type: "restoreUnsent", text: "from before the restart" });
+	assert.equal(input.value, "from before the restart");
+	assert.notEqual(doc.activeElement, input);
+	chat.deliver({ type: "restoreInput", text: "queued", attachments: [] });
+	assert.equal(doc.activeElement, input);
 });

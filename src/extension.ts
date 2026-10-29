@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { removeStaleCopies } from "./attachments";
+import { CHAT_PANEL_TYPE } from "./chatPanel";
 import { registerMcpCommands } from "./mcpServers";
 import { ReviewManager } from "./review/reviewManager";
 import { Sessions } from "./sessions";
@@ -15,7 +16,7 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 	const reviews = new ReviewManager();
 	// In the extension's own storage, private to this user (a temp folder is shared by every user on Linux).
 	const copiesRoot = vscode.Uri.joinPath(context.globalStorageUri, "attachments").fsPath;
-	const sessions = new Sessions(context.extensionUri, reviews, output, copiesRoot, context.globalState);
+	const sessions = new Sessions(context.extensionUri, reviews, output, copiesRoot, context.globalState, context.workspaceState);
 	void removeStaleCopies(copiesRoot);
 
 	context.subscriptions.push(
@@ -23,7 +24,11 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 		reviews,
 		sessions,
 		vscode.window.registerWebviewViewProvider(Sessions.viewId, sessions),
-		vscode.commands.registerCommand("omp.openChat", () => sessions.open()),
+		// Chat tabs open when VS Code closed come back where they were, each with its chat.
+		vscode.window.registerWebviewPanelSerializer(CHAT_PANEL_TYPE, {
+			deserializeWebviewPanel: async (panel, state) => void sessions.restore(panel, state),
+		}),
+		vscode.commands.registerCommand("omp.openChat", () => sessions.show()),
 		vscode.commands.registerCommand("omp.newSession", () => {
 			const session = sessions.create();
 			session.panel.reveal();
@@ -39,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): OmpExtensionApi {
 		vscode.commands.registerCommand("omp.attachToChat", (uri?: vscode.Uri, selected?: vscode.Uri[]) => {
 			const files = selected?.length ? selected : uri instanceof vscode.Uri ? [uri] : [vscode.window.activeTextEditor?.document.uri].filter(Boolean);
 			if (files.length === 0) return void vscode.window.showInformationMessage("OMP: open or select a file to attach.");
-			sessions.open().controller.attachFiles(files as vscode.Uri[]);
+			void sessions.show().then(session => session.controller.attachFiles(files as vscode.Uri[]));
 		}),
 		registerMcpCommands(),
 	);

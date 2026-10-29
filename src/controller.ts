@@ -134,6 +134,8 @@ export class Controller implements vscode.Disposable {
 		private resumeSessionId?: string,
 		/** The saved chat has no name yet: name it once it has loaded. */
 		private readonly nameOnLoad = false,
+		/** A tab restored after VS Code closed while its reply was running: say so once the chat has loaded. */
+		private interrupted = false,
 	) {
 		this.copiesDir = join(copiesRoot, `${process.pid}-${this.id}`);
 		this.#disposables.push(
@@ -597,13 +599,14 @@ export class Controller implements vscode.Disposable {
 		if (message) this.#dequeue([message]);
 	}
 
-	/** Start omp ahead of the first message, so the chat shows Ready and the model settings. */
-	async start(): Promise<void> {
+	/** Start omp ahead of the first message, so the chat shows Ready and the model settings; then show `notes`. */
+	async start(notes: string[] = []): Promise<void> {
 		try {
 			await this.#ensureAgent();
 		} catch (error) {
 			this.#notice("error", errorText(error));
 		}
+		for (const note of notes) this.#notice("warning", note);
 	}
 
 	/** Post a notice, dropping an exact repeat of the previous one (e.g. an exit reported twice). */
@@ -680,7 +683,12 @@ export class Controller implements vscode.Disposable {
 			this.#loadingSessionId = undefined;
 			this.resumeSessionId = undefined;
 			this.#shownSessionId = session.sessionId;
+			this.chat.setSessionId(session.sessionId);
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
+			if (loadSessionId && this.interrupted) {
+				this.interrupted = false;
+				this.#notice("warning", "VS Code closed during this reply; it may be incomplete.");
+			}
 			if (mcp.servers.length > 0) this.log(`MCP servers passed to omp: ${mcp.servers.map(server => server.name).join(", ")}`);
 			for (const problem of agent.mcpProblems) {
 				const signIn = /\b401\b/.test(problem) ? " To sign in once, run `omp` in a terminal, then `/mcp reauth <server name>`." : "";
@@ -705,6 +713,7 @@ export class Controller implements vscode.Disposable {
 			if (loadSessionId && error instanceof AgentError && /session not found/i.test(error.message)) {
 				// omp no longer has the saved chat (e.g. deleted since it was listed): trying it again would fail the same way.
 				this.resumeSessionId = undefined;
+				this.chat.forgetSavedChat(); // and not after a restart either
 				throw new Error(`omp could not open this saved chat (${errorText(error)}). Your next message starts a new chat.`);
 			}
 			throw error;
