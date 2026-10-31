@@ -123,6 +123,8 @@ export class BackgroundWatch {
 			}
 			this.#report();
 		});
+		// A read that fails in an unforeseen way must not stop every later one (each waits on this chain).
+		this.#reading = this.#reading.catch(error => this.handlers.log(`following omp's file of the chat failed: ${error instanceof Error ? error.message : String(error)}`));
 		return this.#reading;
 	}
 

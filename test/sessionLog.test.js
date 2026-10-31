@@ -280,3 +280,37 @@ test("omp working on its own after a wake-up not followed here is seen from its 
 	watch.dispose();
 	fs.rmSync(agentDir, { recursive: true, force: true });
 });
+
+test("a read whose report fails in an unforeseen way doesn't stop the later ones", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-agent-"));
+	fs.mkdirSync(path.join(agentDir, "sessions", "-project"), { recursive: true });
+	const file = path.join(agentDir, "sessions", "-project", "2026-10-31T09-00-00-000Z_chat-6.jsonl");
+	const write = (...entries) => fs.appendFileSync(file, entries.map(value => `${JSON.stringify(value)}\n`).join(""));
+	let failNext = true;
+	const states = [];
+	const logged = [];
+	const watch = new BackgroundWatch(
+		"chat-6",
+		{
+			changed: state => {
+				if (failNext) {
+					failNext = false;
+					throw new Error("boom");
+				}
+				states.push(state);
+			},
+			ownTurn: () => {},
+			log: line => logged.push(line),
+		},
+		agentDir,
+		60_000,
+	);
+	write(user("run it"), bashCall("c1", "sleep 70"), backgrounded("c1", "bg_1"), reply([{ type: "text", text: "Running." }]));
+	await watch.turnEnded(); // its report throws
+	assert.match(logged.join("\n"), /boom/);
+	write(user("again"), result("x", "wait", "", { jobs: [{ id: "bg_1", status: "completed" }] }), reply([{ type: "text", text: "Done." }]));
+	await watch.turnEnded();
+	assert.deepEqual(states.at(-1), { jobs: [], continuing: false }, "read and reported");
+	watch.dispose();
+	fs.rmSync(agentDir, { recursive: true, force: true });
+});

@@ -17,6 +17,7 @@
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
 //   {"noSteering": true}            refuse steering for the rest of this turn ("promptRequired")
+//   {"exitOnSteer": true}           exit when asked to add a message to the turn, before answering
 //   {"busyFor": <n>}                answer the next n prompts "busy", like omp running a turn of its own
 //   {"background": {"jobId", "command", "after", "continueFor", "reply"}}  move a command to the background;
 //                                   `after` ms later (the turn has ended by then) its result comes back and omp
@@ -83,6 +84,8 @@ let cancelledBetweenSteps = false;
 /** A turn is running, so a steer can join it; and whether this turn refuses steering. */
 let turnRunning = false;
 let noSteering = false;
+/** The next steering request makes omp exit before it answers. */
+let exitOnSteer = false;
 /** How many more prompts get omp's "busy" answer. */
 let busyPrompts = 0;
 /** omp runs a turn of its own (a background job reported back): every prompt gets the "busy" answer. */
@@ -200,6 +203,8 @@ async function runSteps(steps) {
 			if (cancelled) return "cancelled";
 		} else if (step.noSteering) {
 			noSteering = true;
+		} else if (step.exitOnSteer) {
+			exitOnSteer = true;
 		} else if (step.busyFor) {
 			busyPrompts = step.busyFor;
 		} else if (step.background) {
@@ -319,6 +324,7 @@ async function handle(message) {
 			return send({ id: message.id, result: {} });
 		}
 		case "_session/steering": {
+			if (exitOnSteer) process.exit(4);
 			const text = message.params.prompt?.[0]?.text;
 			const outcome = turnRunning && !noSteering ? "injected" : "promptRequired";
 			record({ event: "steer", text, outcome });

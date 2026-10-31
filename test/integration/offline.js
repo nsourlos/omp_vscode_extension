@@ -1336,6 +1336,19 @@ exports.run = async function run() {
 			session.panel.dispose();
 		},
 
+		async "a rejection's note goes back in the input when omp exits before taking it"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const notes = notificationsOf(session.panel);
+			const turn = session.controller.send(steps({ exitOnSteer: true }, { permission: "rm -rf build" }, { untilCancelled: true }));
+			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a note", note: "keep the build" });
+			await turn;
+			const back = await waitFor(() => notes.find(m => m.type === "restoreInput"), "the note back in the input");
+			assert.match(back.text, /My note: keep the build/);
+			session.panel.dispose();
+		},
+
 		async "a message omp refuses while busy with work of its own is sent once omp is free; Stop ends the wait"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);

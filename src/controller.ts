@@ -233,7 +233,10 @@ export class Controller implements vscode.Disposable {
 			}
 		} finally {
 			// Still busy meanwhile: what omp does in the background next is told before the queue moves on.
-			if (agent && agent === this.#agent) await this.#afterTurn();
+			if (agent && agent === this.#agent) {
+				// Whatever goes wrong there, the turn must end: else every later message would wait for good.
+				await this.#afterTurn().catch(error => this.log(`after the turn: ${errorText(error)}`));
+			}
 			this.#busy = false;
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
@@ -1172,7 +1175,11 @@ export class Controller implements vscode.Disposable {
 					const took = await steered;
 					clearTimeout(late);
 					if (!answered) answer();
-					if (!agent || agent !== this.#agent) return; // omp stopped meanwhile (and said so): its turn is gone
+					if (!agent || agent !== this.#agent) {
+						// omp stopped meanwhile (and said so): its turn is gone, and the note, not sent, goes back in the input.
+						if (!took) this.#returnToInput(text, []);
+						return;
+					}
 					if (took) {
 						this.log(`a command was rejected with a note: added to the running turn${answered ? " (omp was slow to take it)" : ""}`);
 						this.chat.post({ type: "user", text, attachments: [], sentAt: Date.now() });
