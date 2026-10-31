@@ -17,6 +17,7 @@ const BODY = `<div id="question-bar" hidden>
 </div>
 <div id="log"></div>
 <div id="activity" hidden></div>
+<div id="background" hidden></div>
 <div id="queue"></div>
 <footer>
   <div id="settings"></div>
@@ -1508,4 +1509,75 @@ test("unsent text put back in a restored tab doesn't take the keyboard; text put
 	assert.notEqual(doc.activeElement, input);
 	chat.deliver({ type: "restoreInput", text: "queued", attachments: [] });
 	assert.equal(doc.activeElement, input);
+});
+
+test("work omp still runs in the background shows above the input, with Send now once a message waits; its command's card says so", () => {
+	const chat = openChat();
+	const bar = chat.window.document.getElementById("background");
+	const jobId = "bg_1";
+	const details = { async: { state: "running", jobId, type: "bash" } };
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "c1", title: "$ python eval.py", kind: "execute", status: "pending", rawInput: { command: "python eval.py" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed", rawOutput: { content: [], details } } },
+	);
+	const badge = chat.log.querySelector(".tool-background");
+	assert.equal(badge.textContent, "moved to background", "whether it still runs is told once the reply ends");
+	assert.equal(bar.hidden, true, "nothing said before the reply ends");
+
+	chat.deliver({ type: "background", jobs: [{ id: jobId, kind: "command", label: "python eval.py", startedAt: Date.now() - 185_000 }], continuing: false });
+	assert.equal(badge.textContent, "⏳ running in background");
+	assert.equal(bar.hidden, false);
+	assert.equal(
+		bar.textContent,
+		"⏳ omp is still running 1 command in the background: $ python eval.py (3 min). It will report back and carry on by itself. A message you send now will wait until it's done.",
+	);
+	assert.equal(bar.querySelector("button"), null, "no Send now with nothing waiting");
+	chat.deliver({ type: "status", state: "busy" }, { type: "queued", id: "1", text: "and then?", attachments: [] });
+	assert.equal(bar.querySelector("button"), null, "nor while a turn of the user's runs: the message goes after it anyway");
+	chat.deliver({ type: "status", state: "idle" });
+	bar.querySelector("button").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "sendNow" });
+	chat.deliver({ type: "background", jobs: [], continuing: true });
+	assert.match(bar.textContent, /^⏳ A background job finished: omp is continuing with the results…/);
+	assert.equal(bar.querySelector("button"), null, "no Send now while omp carries on by itself: it takes no message then");
+	chat.deliver({ type: "dequeued", ids: ["1"] });
+	assert.equal(badge.textContent, "finished in background");
+	chat.deliver({ type: "backgroundTurn", jobs: ["python eval.py"] }, chunk("The eval passed."), { type: "turnEnd", stopReason: "end_turn" }, { type: "background", jobs: [], continuing: false });
+	assert.equal(bar.hidden, true);
+	const divider = chat.log.querySelector(".background-divider");
+	assert.equal(divider.textContent, "Background job finished: omp carried on by itself");
+	assert.equal(divider.nextElementSibling.textContent.trim(), "The eval passed.");
+
+	// omp restarts: a job still running ended with it, and a new omp's bg_1 is another job.
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "c2", title: "$ sleep 600", kind: "execute", status: "pending", rawInput: { command: "sleep 600" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "c2", status: "completed", rawOutput: { content: [], details: { async: { state: "running", jobId: "bg_2", type: "bash" } } } } },
+		{ type: "background", jobs: [{ id: "bg_2", kind: "command", label: "sleep 600", startedAt: Date.now() }], continuing: false },
+	);
+	const second = chat.log.querySelectorAll(".tool-background")[1];
+	assert.equal(second.textContent, "⏳ running in background");
+	chat.deliver({ type: "background", jobs: [], continuing: false, ompStopped: true });
+	assert.equal(second.textContent, "stopped with omp");
+	assert.equal(badge.textContent, "finished in background", "a finished one stays so");
+	chat.deliver({ type: "background", jobs: [{ id: "bg_1", kind: "command", label: "make", startedAt: Date.now() }], continuing: false });
+	assert.equal(badge.textContent, "finished in background", "the new omp's bg_1 is not this card's job");
+});
+
+test("a message that never reached omp is marked so", () => {
+	const chat = openChat();
+	chat.deliver({ type: "user", text: "first", attachments: [], sentAt: Date.now() }, { type: "user", text: "fix X", attachments: [], sentAt: Date.now() }, { type: "notSent" });
+	const [first, second] = chat.log.querySelectorAll(".msg.user");
+	assert.equal(first.classList.contains("not-sent"), false);
+	assert.equal(second.classList.contains("not-sent"), true);
+});
+
+test("a loaded chat's replayed command cards forget their jobs, whose names a new omp uses afresh", () => {
+	const chat = openChat();
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "old-1", title: "$ make", kind: "execute", status: "completed", rawInput: { command: "make" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "old-1", status: "completed", rawOutput: { content: [], details: { async: { state: "running", jobId: "bg_1", type: "bash" } } } } },
+		{ type: "background", jobs: [], continuing: false, forget: true },
+		{ type: "background", jobs: [{ id: "bg_1", kind: "command", label: "sleep 9", startedAt: Date.now() }], continuing: false },
+	);
+	assert.equal(chat.log.querySelector(".tool-background").textContent, "moved to background", "not the new omp's bg_1");
 });

@@ -13,6 +13,7 @@
 	const settingsEl = document.getElementById("settings");
 	const activityEl = document.getElementById("activity");
 	const queueEl = document.getElementById("queue");
+	const backgroundEl = document.getElementById("background");
 	const attachmentsEl = document.getElementById("attachments");
 	const attachButton = document.getElementById("attach");
 	const questionBar = document.getElementById("question-bar");
@@ -878,11 +879,14 @@
 			command.addEventListener("click", () => {
 				if (card.classList.contains("answered") && !window.getSelection()?.toString()) command.classList.toggle("open");
 			});
+			// A command omp moved to the background: it goes on after the call has returned.
+			const background = head.appendChild(el("span", "tool-background"));
+			background.hidden = true;
 			const details = card.appendChild(el("details", "tool-output"));
 			details.hidden = true;
 			details.appendChild(el("summary", "", "Output"));
 			const output = details.appendChild(el("pre"));
-			tool = { card, status, icon, title, label, answer, command, details, output, kind: "other", commandText: "", cwd: "" };
+			tool = { card, status, icon, title, label, answer, background, command, details, output, kind: "other", commandText: "", cwd: "", jobId: "" };
 			tools.set(update.toolCallId, tool);
 		}
 		keepScrolled(() => {
@@ -907,6 +911,11 @@
 			}
 			if (typeof update.rawInput?.cwd === "string") tool.cwd = update.rawInput.cwd;
 			labelTool(tool);
+			const job = update.rawOutput?.details?.async;
+			if (job?.state === "running" && typeof job.jobId === "string" && !tool.jobId) {
+				tool.jobId = job.jobId;
+				markBackground(tool, "moved"); // whether it still runs, the extension says once the reply ends
+			}
 			const diff = update.rawOutput?.details?.diff;
 			const text = typeof diff === "string" && diff ? diff : textOf(update.rawOutput?.content) || textOf(update.content);
 			if (text && update.sessionUpdate === "tool_call_update") {
@@ -1075,7 +1084,6 @@
 			if (i < 9) button.dataset.key = String(i + 1); // shown by the stylesheet, so the label stays the button's text
 		});
 		const withNote = choices.find(button => button.classList.contains("reject-with-note"));
-		node.appendChild(el("div", "keys-hint", `Keys: 1–${Math.min(choices.length, 9)} to answer${withNote ? " · Esc: reject with note" : ""}`));
 		node.tabIndex = 0;
 		node.addEventListener("keydown", event => {
 			if (event.target.closest("textarea, input") || buttons.hidden || node.classList.contains("resolved")) return;
@@ -1088,8 +1096,8 @@
 	}
 
 	/**
-	 * "Reject with note…": a note for omp and, for a command, the command to change. The extension
-	 * stops the turn and sends them as the next message, since omp's answer can only say "rejected".
+	 * "Reject with note…": a note for omp and, for a command, the command to change. omp's answer can only
+	 * say "rejected", so the extension adds them to the running turn (or, if it can't, sends them next).
 	 */
 	function addRejectWithNote(node, buttons, msg, reject, toolCallId, readOnlyBox) {
 		const open = buttons.appendChild(el("button", "reject-with-note", "Reject with note…"));
@@ -1307,10 +1315,94 @@
 		const remove = item.appendChild(el("button", "secondary", "✕"));
 		remove.title = "Remove from the queue";
 		remove.addEventListener("click", () => vscode.postMessage({ type: "unqueue", id: msg.id }));
+		if (!backgroundEl.hidden) showBackground(); // with "Send now"
 	}
 
 	function onDequeued(ids) {
 		for (const item of [...queueEl.children]) if (ids.includes(item.dataset.id)) item.remove();
+		showBackground(); // "Send now" goes with the last waiting message
+	}
+
+	// ---------- background work ----------
+	// What omp does after a reply has ended (src/omp/background.ts): commands it moved to the background,
+	// and the turn it runs by itself when one reports back. Shown above the input while it lasts; messages
+	// sent meanwhile wait in the queue, unless sent now.
+	let background = { jobs: [], continuing: false, untracked: false };
+	let backgroundTimer = 0;
+
+	function onBackground(msg) {
+		background = { jobs: Array.isArray(msg.jobs) ? msg.jobs : [], continuing: msg.continuing === true, untracked: msg.untracked === true };
+		showBackground();
+		if (background.untracked) return;
+		if (msg.ompStopped || msg.forget) {
+			// The next omp names its jobs afresh (bg_1…): the cards let go of theirs. When omp stopped, a job
+			// still running ended with it; a loaded chat's replayed cards keep "moved to background".
+			for (const tool of tools.values()) {
+				if (msg.ompStopped && tool.jobId && tool.backgroundState !== "finished") markBackground(tool, "stopped");
+				tool.jobId = "";
+			}
+			return;
+		}
+		// A command whose job is no longer listed has finished.
+		const running = new Set(background.jobs.map(job => job.id));
+		for (const tool of tools.values()) if (tool.jobId) markBackground(tool, running.has(tool.jobId) ? "running" : "finished");
+	}
+
+	const BACKGROUND_LABELS = {
+		moved: "moved to background",
+		running: "⏳ running in background",
+		finished: "finished in background",
+		stopped: "stopped with omp",
+	};
+
+	function markBackground(tool, state) {
+		tool.backgroundState = state;
+		tool.background.textContent = BACKGROUND_LABELS[state];
+		tool.background.hidden = false;
+		tool.card.classList.toggle("in-background", state === "running");
+	}
+
+	function showBackground() {
+		clearInterval(backgroundTimer);
+		backgroundTimer = 0;
+		const { jobs, continuing, untracked } = background;
+		backgroundEl.textContent = "";
+		backgroundEl.hidden = jobs.length === 0 && !continuing;
+		if (backgroundEl.hidden) return;
+		const text = backgroundEl.appendChild(el("span", "background-text"));
+		describeBackground(text);
+		if (jobs.length && !continuing && !untracked) backgroundTimer = setInterval(() => describeBackground(text), 5000); // its time
+		// Not while omp carries on by itself: it takes no message until it's done.
+		// Nor during a turn of the user's: the waiting messages go after it anyway.
+		if (!untracked && !continuing && statusEl.dataset.state === "idle" && queueEl.children.length) {
+			const now = backgroundEl.appendChild(el("button", "secondary", "Send now"));
+			now.title = "Send the waiting messages now, without waiting for the background work to finish";
+			now.addEventListener("click", () => vscode.postMessage({ type: "sendNow" }));
+		}
+	}
+
+	function describeBackground(node) {
+		const { jobs, continuing, untracked } = background;
+		node.textContent = "";
+		const say = text => node.appendChild(document.createTextNode(text));
+		if (continuing) {
+			say("⏳ A background job finished: omp is continuing with the results… A message you send now will wait until it's done.");
+			return;
+		}
+		const agents = jobs.every(job => job.kind === "agent");
+		const noun = `${jobs.length} ${agents ? "helper agent" : "command"}${jobs.length === 1 ? "" : "s"}`;
+		if (untracked) {
+			say(`⏳ omp moved ${noun} to the background and may still be running ${jobs.length === 1 ? "it" : "them"}. It reports back by itself; a message sent before then may have to wait.`);
+			return;
+		}
+		const [first] = jobs;
+		say(`⏳ omp is still running ${noun} in the background: `);
+		const firstLine = String(first.label || "").split("\n")[0];
+		const label = (first.kind === "agent" ? "" : "$ ") + (firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine);
+		node.appendChild(el("code", "", label)).title = first.label || "";
+		const more = jobs.length > 1 ? ` and ${jobs.length - 1} more` : "";
+		const seconds = Math.max(0, Math.round((Date.now() - (first.startedAt || Date.now())) / 1000));
+		say(`${more} (${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)} min`}). It will report back and carry on by itself. A message you send now will wait until it's done.`);
 	}
 
 	/** Put text (and its attachments) back in the input, ahead of what is there; with focus false, without taking the keyboard. */
@@ -1340,6 +1432,7 @@
 		stopButton.hidden = !(state === "busy" || state === "naming" || (state === "starting" && busySince));
 		if (state === "busy") startActivity();
 		else if (state !== "starting") stopActivity();
+		if (!backgroundEl.hidden) showBackground(); // "Send now" only while idle
 	}
 
 	window.addEventListener("message", event => {
@@ -1374,6 +1467,22 @@
 			case "chime": return chime();
 			case "queued": return onQueued(msg);
 			case "dequeued": return onDequeued(msg.ids);
+			case "background": return onBackground(msg);
+			case "notSent": {
+				// The last message shown as sent never reached omp (it is back in the input).
+				const sent = [...log.querySelectorAll(".msg.user")].at(-1);
+				sent?.classList.add("not-sent");
+				return;
+			}
+			case "backgroundTurn": {
+				// What omp did by itself once a background job reported back, which follows below.
+				flushRender();
+				breakFlow();
+				const jobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+				const divider = append(el("div", "background-divider", jobs.length ? "Background job finished: omp carried on by itself" : "omp carried on by itself"));
+				if (jobs.length) divider.title = jobs.join("\n");
+				return;
+			}
 			case "restoreInput": return restoreInput(msg.text, msg.attachments);
 			case "showQuestion": return goTo(tops => (tops[msg.index] === undefined ? undefined : scrollTopFor(tops[msg.index])));
 			case "mentions": return onMentions(msg);

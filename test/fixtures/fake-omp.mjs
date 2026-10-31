@@ -16,6 +16,15 @@
 //   {"untilCancelled": true}        the same, but a cancel that already came during this turn counts
 //   {"exit": <code>}                exit immediately
 //   {"closeStdin": true}            stop reading, so the editor's next write hits a closed pipe
+//   {"noSteering": true}            refuse steering for the rest of this turn ("promptRequired")
+//   {"busyFor": <n>}                answer the next n prompts "busy", like omp running a turn of its own
+//   {"background": {"jobId", "command", "after", "continueFor", "reply"}}  move a command to the background;
+//                                   `after` ms later (the turn has ended by then) its result comes back and omp
+//                                   replies by itself `continueFor` ms later, refusing prompts meanwhile: seen
+//                                   only in the chat's file; with "askDuring": "<command>", omp asks to run it
+//                                   meanwhile (and replies once answered)
+// With PI_CODING_AGENT_DIR set, the chat is written to a file there as omp keeps it (sessions/<folder>/<time>_<id>.jsonl).
+// _session/steering (adding a message to the running turn) is logged as "steer", and taken while a turn runs.
 // Flags: --init-delay <ms> delays the initialize reply; --log <file> appends one JSON line per outcome;
 // --fail-new <message> makes every session/new fail with that message (an error that isn't about MCP);
 // --page-size <n> lists saved chats n per page, with a cursor for the next;
@@ -24,8 +33,9 @@
 // one starting with "flaky" fails with another error ("rate limited"), every time.
 // Loading "untitled-crash" makes the "/rename" that names it exit omp.
 // session/list without a cwd also lists a chat from MOVED_FOLDER (which doesn't exist) and one from the home folder.
-import { appendFileSync, closeSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const MOVED_FOLDER = "/no-such-folder/renamed-project";
@@ -66,6 +76,24 @@ let crashOnRename = false;
 let cancelTurn;
 /** A cancel that came between a turn's steps, when no step waited for one: only "untilCancelled" counts it. */
 let cancelledBetweenSteps = false;
+/** A turn is running, so a steer can join it; and whether this turn refuses steering. */
+let turnRunning = false;
+let noSteering = false;
+/** How many more prompts get omp's "busy" answer. */
+let busyPrompts = 0;
+/** omp runs a turn of its own (a background job reported back): every prompt gets the "busy" answer. */
+let ownTurnRunning = false;
+
+const chatFile = process.env.PI_CODING_AGENT_DIR
+	? join(process.env.PI_CODING_AGENT_DIR, "sessions", "-fake", `${new Date().toISOString().replace(/[:.]/g, "-")}_${sessionId}.jsonl`)
+	: undefined;
+let nextEntryId = 1;
+const writeEntry = fields => {
+	if (!chatFile) return;
+	mkdirSync(dirname(chatFile), { recursive: true });
+	appendFileSync(chatFile, `${JSON.stringify({ id: `f${nextEntryId++}`, timestamp: new Date().toISOString(), ...fields })}\n`);
+};
+const writeMessage = message => writeEntry({ type: "message", message });
 
 const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const record = entry => logFile && appendFileSync(logFile, `${JSON.stringify({ sessionId, ...entry })}\n`);
@@ -76,8 +104,24 @@ const request = (method, params) =>
 		send({ id, method, params });
 	});
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const PERMISSION_OPTIONS = [
+	{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+	{ optionId: "allow_always", name: "Always allow", kind: "allow_always" },
+	{ optionId: "reject_once", name: "Reject", kind: "reject_once" },
+	{ optionId: "reject_always", name: "Always reject", kind: "reject_always" },
+];
 
 async function runTurn(steps) {
+	turnRunning = true;
+	noSteering = false;
+	try {
+		return await runSteps(steps);
+	} finally {
+		turnRunning = false;
+	}
+}
+
+async function runSteps(steps) {
 	cancelledBetweenSteps = false;
 	cancelTurn = undefined; // left by an earlier turn's step or "/rename"
 	for (const step of steps) {
@@ -100,12 +144,7 @@ async function runTurn(steps) {
 			const reply = await request("session/request_permission", {
 				sessionId,
 				toolCall: { toolCallId: step.toolCallId ?? `call-${nextId}`, title: "Run a command", kind: "execute", rawInput: { command: step.permission, ...(step.cwd ? { cwd: step.cwd } : {}) } },
-				options: [
-					{ optionId: "allow_once", name: "Allow once", kind: "allow_once" },
-					{ optionId: "allow_always", name: "Always allow", kind: "allow_always" },
-					{ optionId: "reject_once", name: "Reject", kind: "reject_once" },
-					{ optionId: "reject_always", name: "Always reject", kind: "reject_always" },
-				],
+				options: PERMISSION_OPTIONS,
 			});
 			record({ event: "permission", result: reply.result });
 		} else if (step.approve) {
@@ -131,6 +170,38 @@ async function runTurn(steps) {
 			const cancelled = await new Promise(resolve => (cancelTurn = resolve));
 			cancelTurn = undefined;
 			if (cancelled) return "cancelled";
+		} else if (step.noSteering) {
+			noSteering = true;
+		} else if (step.busyFor) {
+			busyPrompts = step.busyFor;
+		} else if (step.background) {
+			const { jobId, command, after = 1000, continueFor = 0, reply = "Done.", askDuring } = step.background;
+			const toolCallId = `call-${jobId}`;
+			const content = [{ type: "text", text: `Moved to the background as ${jobId}.` }];
+			const details = { async: { state: "running", jobId, type: "bash" } };
+			writeMessage({ role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command } }], stopReason: "toolUse" });
+			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId, title: `$ ${command}`, kind: "execute", status: "pending", rawInput: { command } } } });
+			writeMessage({ role: "toolResult", toolCallId, toolName: "bash", content, details });
+			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { content, details } } } });
+			setTimeout(async () => {
+				writeEntry({ type: "custom_message", customType: "async-result", content: `Background job ${jobId} has completed.`, details: { jobs: [{ jobId, type: "bash", label: command }] } });
+				ownTurnRunning = true;
+				record({ event: "ownTurnStart", jobId });
+				if (askDuring) {
+					// Asked while omp carries on by itself: no turn of the editor's is running.
+					const answer = await request("session/request_permission", {
+						sessionId,
+						toolCall: { toolCallId: `own-${jobId}`, title: "Run a command", kind: "execute", rawInput: { command: askDuring } },
+						options: PERMISSION_OPTIONS,
+					});
+					record({ event: "ownPermission", result: answer.result });
+				}
+				setTimeout(() => {
+					writeMessage({ role: "assistant", content: [{ type: "text", text: reply }], stopReason: "stop" });
+					ownTurnRunning = false;
+					record({ event: "backgroundDone", jobId });
+				}, continueFor);
+			}, after);
 		} else if (step.exit !== undefined) {
 			process.exit(step.exit);
 		} else if (step.closeStdin) {
@@ -163,6 +234,7 @@ async function handle(message) {
 				const details = broken.map(server => `${server.name}: connection refused${server.url ? ` (${server.url})` : ""}`).join("; ");
 				return send({ id: message.id, error: { code: -32603, message: "Internal error", data: { details } } });
 			}
+			writeEntry({ type: "session", version: 3, cwd: message.params.cwd }); // like omp, the chat's file exists from the start
 			return send({ id: message.id, result: { sessionId } });
 		}
 		case "session/list": {
@@ -219,7 +291,19 @@ async function handle(message) {
 			}
 			return send({ id: message.id, result: {} });
 		}
+		case "_session/steering": {
+			const text = message.params.prompt?.[0]?.text;
+			const outcome = turnRunning && !noSteering ? "injected" : "promptRequired";
+			record({ event: "steer", text, outcome });
+			return send({ id: message.id, result: { outcome, queue: "steering" } });
+		}
 		case "session/prompt": {
+			if (busyPrompts > 0 || ownTurnRunning) {
+				if (!ownTurnRunning) busyPrompts--;
+				record({ event: "busy" });
+				const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.";
+				return send({ id: message.id, error: { code: -32003, message: busy, data: { reason: "session_busy", hint: "steer|followUp|wait" } } });
+			}
 			// A message with attachments (a text block per file, an image block per image) is logged whole and ends the turn.
 			const blocks = message.params.prompt;
 			if (blocks.length > 1 || blocks[0].text?.startsWith("<attached-file")) {
@@ -249,18 +333,23 @@ async function handle(message) {
 			}
 			// Queued messages arrive joined by a blank line: one JSON list each. Any other text (like a
 			// rejected command's note, which the extension writes) is logged and ends the turn.
+			writeMessage({ role: "user", content: [{ type: "text", text }] });
 			let steps;
 			try {
 				steps = text.split("\n\n").flatMap(part => JSON.parse(part));
 			} catch {
 				record({ event: "text", text });
+				writeMessage({ role: "assistant", content: [], stopReason: "stop" });
 				return send({ id: message.id, result: { stopReason: "end_turn" } });
 			}
 			const stopReason = await runTurn(steps);
+			writeMessage({ role: "assistant", content: [], stopReason: stopReason === "cancelled" ? "aborted" : "stop" });
 			return send({ id: message.id, result: { stopReason } });
 		}
 		case "session/cancel":
 			if (cancelTurn) return cancelTurn(true);
+			// A cancel with no turn of the editor's running: in omp, it would stop omp's own work.
+			if (!turnRunning) record({ event: "idleCancel" });
 			cancelledBetweenSteps = true;
 			return;
 	}

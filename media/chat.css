@@ -82,6 +82,50 @@ body {
 	}
 }
 
+/* omp still works in the background after a reply: what, and that a message sent now waits for it. */
+#background {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	margin: 0 12px 4px;
+	padding: 4px 8px;
+	border-left: 3px solid var(--vscode-charts-orange);
+	background: var(--vscode-input-background);
+	font-size: 0.92em;
+}
+
+#background[hidden] {
+	display: none;
+}
+
+.background-text {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+#background button {
+	padding: 0 6px;
+	white-space: nowrap;
+}
+
+/* What omp did by itself once a background job reported back follows this line. */
+.background-divider {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 12px 0 6px;
+	font-size: 0.85em;
+	opacity: 0.75;
+}
+
+.background-divider::before,
+.background-divider::after {
+	content: "";
+	flex: 1;
+	border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
 .queued {
 	display: flex;
 	align-items: baseline;
@@ -344,6 +388,17 @@ button:disabled {
 	opacity: 0.65;
 }
 
+/* A message that never reached omp: it went back to the input. */
+.msg.user.not-sent .user-text {
+	opacity: 0.55;
+}
+
+.msg.user.not-sent .user-head::after {
+	content: attr(data-time) " · not sent";
+	color: var(--vscode-editorWarning-foreground);
+	opacity: 1;
+}
+
 /* A long message shows its first three lines until opened with "Show more". */
 .msg.user .user-text.clamped {
 	display: -webkit-box;
@@ -552,8 +607,19 @@ details.thought summary,
 	font-style: italic;
 }
 
+.tool-background {
+	font-size: 0.9em;
+	opacity: 0.85;
+}
+
+.tool.in-background .tool-background {
+	color: var(--vscode-charts-orange);
+	opacity: 1;
+}
+
 .tool-label[hidden],
-.tool-answer[hidden] {
+.tool-answer[hidden],
+.tool-background[hidden] {
 	display: none;
 }
 
@@ -586,7 +652,7 @@ details.thought summary,
 	max-height: none;
 }
 
-/* Keyboard answers: each button's number, and a hint, while the question has focus. */
+/* Keyboard answers: each button shows its number (1, 2, 3…), the key that presses it while the question has focus. */
 .tool-ask:focus {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: 1px;
@@ -597,17 +663,6 @@ details.thought summary,
 	margin-right: 6px;
 	opacity: 0.7;
 	font-size: 0.85em;
-}
-
-.keys-hint {
-	display: none;
-	margin-top: 4px;
-	font-size: 0.85em;
-	opacity: 0.7;
-}
-
-.tool-ask:focus-within:not(.resolved) .keys-hint {
-	display: block;
 }
 
 /* Its answer says whether it was ticked ("… allowed from now on"), so the greyed-out box can go. */

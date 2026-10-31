@@ -22,9 +22,11 @@ import {
 } from "./attachments";
 import type {
 	ConfigOption,
+	ContentBlock,
 	ElicitationParams,
 	ElicitationResult,
 	PermissionOption,
+	PromptResult,
 	ReadTextFileParams,
 	RequestPermissionParams,
 	RequestPermissionResult,
@@ -35,6 +37,7 @@ import type {
 import type { ChatPanel } from "./chatPanel";
 import { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery, type MentionItem } from "./mentions";
 import { OmpAgent, REPLAYED_UPDATES, bunCertificateProblem, bunVersion, ompSavedToken, resolveOmpCommand } from "./omp/agent";
+import { BackgroundWatch } from "./omp/background";
 import { addSavedLogins, loadMcpServers, mcpConfigFiles } from "./omp/mcp";
 import {
 	DIFF_REVIEWED_TOOLS,
@@ -49,6 +52,7 @@ import {
 	staleFileMessage,
 	urlsIn,
 } from "./omp/policy";
+import { ownTurnJobs, ownTurnStopReason, ownTurnUpdates, type BackgroundState } from "./omp/sessionLog";
 import { applyDecisions } from "./review/hunks";
 import type { ReviewManager } from "./review/reviewManager";
 
@@ -57,14 +61,19 @@ interface PendingRequest {
 	cancelValue: unknown;
 	/** A command's card: allows its read-only programs from now on (the checkbox). */
 	allowReadOnly?: () => void;
-	/** A permission's card: sends the note given with "Reject with note…", and the command as changed there. */
-	rejectNote?: (note: string, changed: string | undefined) => void;
+	/**
+	 * A permission's card: sends the note given with "Reject with note…", and the command as changed
+	 * there; `answer` gives omp the rejection, once the note is on its way.
+	 */
+	rejectNote?: (note: string, changed: string | undefined, answer: () => void) => Promise<void>;
 }
 
 interface QueuedMessage {
 	id: string;
 	text: string;
 	attachments: Attachment[];
+	/** Goes without waiting for omp's background work (see send). */
+	now?: boolean;
 }
 
 /** How many replies may be followed by an attempt to name an untitled chat. */
@@ -73,6 +82,10 @@ const MAX_NAMING_ATTEMPTS = 3;
 /** The most files the @ suggestions search, and how long their list is reused while one types. */
 const MAX_MENTION_FILES = 20_000;
 const FILE_LIST_TTL_MS = 10_000;
+/** How long a message waits for omp to finish a turn of its own (see #promptWhenFree). */
+const BUSY_WAIT_MS = 5 * 60_000;
+/** How long the rejection of a command waits for omp to take the note that goes with it (see rejectNote). */
+const STEER_WAIT_MS = 10_000;
 
 /** The extension's own permission option; answered to omp as "allow once". */
 const ALLOW_READ_ONLY = "omp-vscode:allow-read-only";
@@ -89,6 +102,8 @@ export class Controller implements vscode.Disposable {
 	#starting: Promise<OmpAgent> | undefined;
 	#pending = new Map<string, PendingRequest>();
 	#busy = false;
+	/** Counts the user's turns, so a late answer can tell whether the turn it was about still runs. */
+	#turnCount = 0;
 	#stopRequested = false;
 	/** The read-only programs (cd, grep…) the user chose to always allow; for as long as this chat tab is open. */
 	#allowedReadOnly = new Set<string>();
@@ -122,6 +137,13 @@ export class Controller implements vscode.Disposable {
 	/** omp's last word on its context window, which sets how much text a message may attach. */
 	#context: { used: number; size: number } | undefined;
 	#lastNotice: string | undefined;
+	/** What omp does outside the turns asked for (background jobs, turns of its own), from its file of the chat. */
+	#background: BackgroundWatch | undefined;
+	/** Jobs omp said it moved to the background during the turn (ACP), by id: shown as such when its file can't be followed. */
+	#movedToBackground = new Set<string>();
+	#showingUnfollowed = false;
+	/** A message is waiting for omp to finish work of its own (#promptWhenFree). */
+	#waitingForFree = false;
 	#disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -149,24 +171,39 @@ export class Controller implements vscode.Disposable {
 	/**
 	 * Run one turn. A message sent while a turn runs waits in a queue, because omp's ACP mode
 	 * cancels the running turn when a second prompt arrives; queued messages go together as
-	 * the next turn, and the chime waits for that one.
+	 * the next turn, and the chime waits for that one. While omp works in the background, messages wait
+	 * too, unless sent `now` (the page's "Send now").
 	 */
-	async send(text: string, attachments: Attachment[] = []): Promise<void> {
+	async send(text: string, attachments: Attachment[] = [], now = false): Promise<void> {
 		// Until a saved chat has loaded (or while it loads again after omp stopped), a message shows as
 		// queued at once and is sent after the replayed conversation; if the chat can't load, it goes back to the input.
 		// One typed while a queued message still waits (e.g. while the loaded chat is named) queues behind it, in order.
 		const loading = this.resumeSessionId !== undefined || this.#waitingForLoad;
-		if (this.#busy || loading) {
+		if (this.#busy || loading || (!now && this.#background?.busy)) {
 			const id = String(nextQueuedId++);
-			this.#queue.push({ id, text, attachments });
+			this.#queue.push({ id, text, attachments, now });
 			this.chat.post({ type: "queued", id, text, attachments: attachments.map(chipOf) });
-			if (!this.#busy) void this.#sendWhenLoaded();
+			if (!this.#busy && loading) void this.#sendWhenLoaded();
 			return;
 		}
 		this.#busy = true;
+		this.#turnCount++;
 		this.#stopRequested = false;
 		this.#lastNotice = undefined;
 		this.#runningCode.clear();
+		// omp may have just started work of its own (a background job reported back): its file says so, and
+		// the message then waits in the queue rather than showing as sent to an omp that refuses it.
+		const watch = now ? undefined : this.#background;
+		if (watch) {
+			await watch.refresh();
+			if (watch.busy && !this.#stopRequested) {
+				this.#busy = false;
+				const id = String(nextQueuedId++);
+				this.#queue.unshift({ id, text, attachments }); // ahead of any sent while the file was read
+				this.chat.post({ type: "queued", id, text, attachments: attachments.map(chipOf) });
+				return;
+			}
+		}
 		attachments = await this.#withinTextBudget(attachments);
 		this.chat.post({ type: "user", text, attachments: attachments.map(chipOf), sentAt: Date.now() });
 		this.chat.post({ type: "status", state: "busy" });
@@ -176,7 +213,7 @@ export class Controller implements vscode.Disposable {
 			agent = await this.#ensureAgent();
 			const started = Date.now();
 			// omp ignores a cancel before its session exists, so a Stop pressed during startup is applied here.
-			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await agent.prompt(promptBlocks(text, attachments));
+			const result = this.#stopRequested ? { stopReason: "cancelled" as const } : await this.#promptWhenFree(agent, promptBlocks(text, attachments));
 			this.chat.post({
 				type: "turnEnd",
 				stopReason: result.stopReason,
@@ -185,20 +222,35 @@ export class Controller implements vscode.Disposable {
 			});
 			finished = result.stopReason !== "cancelled" && !this.#stopRequested;
 		} catch (error) {
-			if (!agent || agent === this.#agent) this.#notice("error", errorText(error));
+			if (error instanceof NotSentError) {
+				// Back in the input, ahead of the messages queued after it: after a Stop those are back already, else they follow (below).
+				this.chat.post({ type: "notSent" }); // its message in the chat is marked so
+				this.#notice(this.#stopRequested ? "info" : "warning", error.message);
+				if (this.#stopRequested) this.#returnToInput(text, attachments);
+				else this.#queue.unshift({ id: String(nextQueuedId++), text, attachments });
+			} else if (!agent || agent === this.#agent) {
+				this.#notice("error", errorText(error));
+			}
 		} finally {
+			// Still busy meanwhile: what omp does in the background next is told before the queue moves on.
+			if (agent && agent === this.#agent) await this.#afterTurn();
 			this.#busy = false;
 			// If this turn's omp exited, #onAgentExit has already reported it.
 			if (!agent || agent === this.#agent) this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 		}
 		// Stop empties the queue, so anything queued after a Stop was typed to replace the stopped turn.
-		if ((finished || this.#stopRequested) && this.#queue.length > 0) return this.#sendTurn(this.#takeNextTurn());
-		this.#returnQueueToInput();
+		// While omp works in the background, the queue waits for it (#onBackground sends it), unless sent now.
+		if ((finished || this.#stopRequested) && this.#queue.length > 0) {
+			if (!this.#background?.busy || this.#queue[0].now) return this.#sendTurn(this.#takeNextTurn());
+		} else {
+			this.#returnQueueToInput();
+		}
 		this.chat.markFinished();
 		if (finished && vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) {
 			this.chat.notify({ type: "chime" });
 		}
-		if (!finished || !this.#agent || !this.#needsName()) return;
+		// Not while omp works on its own, which it would refuse: the chat is named after a later reply.
+		if (!finished || !this.#agent || !this.#needsName() || this.#background?.continuing) return;
 		this.#busy = true; // a message sent while the chat is being named waits in the queue
 		this.chat.post({ type: "status", state: "naming" });
 		await this.#nameIfUntitled(this.#agent);
@@ -207,13 +259,106 @@ export class Controller implements vscode.Disposable {
 			this.#returnQueueToInput(); // omp exited while naming: queued messages must not start a fresh, empty chat
 			return;
 		}
-		if (this.#queue.length > 0) return this.#sendTurn(this.#takeNextTurn());
+		if (this.#queue.length > 0 && (!this.#background?.busy || this.#queue[0].now)) return this.#sendTurn(this.#takeNextTurn());
 		this.chat.post({ type: "status", state: this.#agent ? "idle" : "stopped" });
 	}
 
+	/**
+	 * A turn asked for has ended: catch up with what omp does in the background. When omp's file of the
+	 * chat can't be followed, the jobs it said it moved there are shown until the next turn ends.
+	 */
+	async #afterTurn(): Promise<void> {
+		await this.#background?.turnEnded();
+		const jobs = [...this.#movedToBackground];
+		this.#movedToBackground.clear();
+		if (this.#background?.following) {
+			// Also when nothing changed: a job started and finished within the turn leaves its card to be told so.
+			this.chat.post({ type: "background", ...this.#background.state });
+			this.#showingUnfollowed = false; // replaced by what the file tells
+			return;
+		}
+		if (jobs.length === 0 && !this.#showingUnfollowed) return;
+		this.#showingUnfollowed = jobs.length > 0;
+		this.chat.post({ type: "background", jobs: jobs.map(id => ({ id, kind: "command", label: "", startedAt: Date.now() })), continuing: false, untracked: true });
+	}
+
+	/** Follow what omp does outside the turns asked for in this omp session (see BackgroundWatch). */
+	#watchBackground(sessionId: string): void {
+		this.#stopWatchingBackground();
+		this.#movedToBackground.clear(); // e.g. from a loaded chat's replayed history
+		const watch = new BackgroundWatch(sessionId, {
+			changed: state => this.#onBackground(watch, state),
+			ownTurn: entries => this.#showOwnTurn(entries),
+			log: this.log,
+		});
+		this.#background = watch;
+		// A loaded chat's cards replayed jobs of an earlier omp, whose names (bg_1…) this one uses afresh.
+		this.chat.post({ type: "background", jobs: [], continuing: false, forget: true });
+	}
+
+	/** omp has stopped, so its background work has too. */
+	#stopWatchingBackground(): void {
+		if (!this.#background) return;
+		const wasBusy = this.#background.busy;
+		this.#background.dispose();
+		this.#background = undefined;
+		this.#movedToBackground.clear();
+		this.#showingUnfollowed = false;
+		// Its jobs ended with it; the next omp names its own jobs afresh (bg_1…), so the page forgets these.
+		this.chat.post({ type: "background", jobs: [], continuing: false, ompStopped: true });
+		if (wasBusy && !this.#busy) this.#returnQueueToInput();
+	}
+
+	#onBackground(watch: BackgroundWatch, state: BackgroundState): void {
+		if (watch !== this.#background) return;
+		this.chat.post({ type: "background", ...state });
+		// omp is free again: the messages that waited for it go now (after a turn asked for, send() sends them).
+		// Sent now, so they start before a message typed meanwhile, which looks at omp's file first.
+		if (!watch.busy && !this.#busy && this.#queue.length > 0) void this.#sendTurn(this.#takeNextTurn(), true);
+	}
+
+	/** omp ran a turn by itself (a background job reported back): shown below the chat, as when the chat is opened again. */
+	#showOwnTurn(entries: any[]): void {
+		this.log("omp ran a turn of its own (a background job reported back)");
+		this.chat.post({ type: "backgroundTurn", jobs: ownTurnJobs(entries) });
+		for (const update of ownTurnUpdates(entries)) this.chat.post({ type: "update", update });
+		this.chat.post({ type: "turnEnd", stopReason: ownTurnStopReason(entries) });
+		if (this.#busy) return; // a message of the user's is on its way: the chime is for its reply
+		this.chat.markFinished();
+		if (vscode.workspace.getConfiguration("omp").get<boolean>("soundOnFinish", true)) this.chat.notify({ type: "chime" });
+	}
+
+	/**
+	 * omp refuses a message while it runs a turn of its own: a background job reporting back, or
+	 * compacting the conversation right after a turn stopped. The message is sent once omp is free
+	 * (up to BUSY_WAIT_MS); Stop ends the wait.
+	 */
+	async #promptWhenFree(agent: OmpAgent, prompt: ContentBlock[]): Promise<PromptResult> {
+		const started = Date.now();
+		for (let told = false; ; told = true) {
+			try {
+				return await agent.prompt(prompt);
+			} catch (error) {
+				if (!isSessionBusy(error) || agent !== this.#agent) throw error;
+				if (Date.now() - started > BUSY_WAIT_MS) {
+					throw new NotSentError(`omp stayed busy with work of its own for ${BUSY_WAIT_MS / 60_000} minutes, so your message wasn't sent: it is back in the input.`);
+				}
+				if (!told) this.#notice("info", "omp is busy with work of its own (a background job reporting back, or tidying up the conversation): your message goes as soon as it's done.");
+				// Stop now ends only this wait: omp's own work isn't the user's to stop (see cancel()).
+				this.#waitingForFree = true;
+				try {
+					await new Promise(resolve => setTimeout(resolve, 1000));
+				} finally {
+					this.#waitingForFree = false;
+				}
+				if (this.#stopRequested) throw new NotSentError("Stopped while waiting for omp: your message wasn't sent, and is back in the input.");
+			}
+		}
+	}
+
 	/** Send queued messages as one turn: their texts together, and all their attachments. */
-	#sendTurn(messages: QueuedMessage[]): Promise<void> {
-		return this.send(joinTexts(messages), messages.flatMap(message => message.attachments));
+	#sendTurn(messages: QueuedMessage[], now = messages.some(message => message.now)): Promise<void> {
+		return this.send(joinTexts(messages), messages.flatMap(message => message.attachments), now);
 	}
 
 	/** Send what was queued while a saved chat loaded, once it has; if it can't load, the messages go back to the input. */
@@ -267,7 +412,8 @@ export class Controller implements vscode.Disposable {
 	cancel(): void {
 		this.#stopRequested = true;
 		this.#returnQueueToInput();
-		this.#agent?.cancel();
+		// A message still waiting for omp to be free has no turn to stop, and omp's cancel would stop its own work.
+		if (!this.#waitingForFree) this.#agent?.cancel();
 		this.#cancelPending("Stopped by user");
 	}
 
@@ -302,10 +448,13 @@ export class Controller implements vscode.Disposable {
 	/** Put the queued messages back in the input, their attachments back on it. */
 	#returnQueueToInput(): void {
 		const queued = this.#takeQueue();
-		if (queued.length === 0) return;
-		const attachments = queued.flatMap(message => message.attachments);
+		if (queued.length > 0) this.#returnToInput(joinTexts(queued), queued.flatMap(message => message.attachments));
+	}
+
+	/** Put a message back in the input, ahead of what is there, its attachments back on it. */
+	#returnToInput(text: string, attachments: Attachment[]): void {
 		for (const attachment of attachments) this.#drafts.set(attachment.id, attachment);
-		this.chat.notify({ type: "restoreInput", text: joinTexts(queued), attachments: attachments.map(chipOf) });
+		this.chat.notify({ type: "restoreInput", text, attachments: attachments.map(chipOf) });
 	}
 
 	/** The attachments with these ids (from the chat page), taken out of the input's drafts. */
@@ -684,6 +833,7 @@ export class Controller implements vscode.Disposable {
 			this.resumeSessionId = undefined;
 			this.#shownSessionId = session.sessionId;
 			this.chat.setSessionId(session.sessionId);
+			this.#watchBackground(session.sessionId);
 			this.log(`omp session ${session.sessionId} started in ${folder.uri.fsPath}`);
 			if (loadSessionId && this.interrupted) {
 				this.interrupted = false;
@@ -726,6 +876,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	#stopAgent(reason: string): void {
+		this.#stopWatchingBackground();
 		this.#cancelPending(reason);
 		const agent = this.#agent;
 		this.#agent = undefined;
@@ -736,6 +887,7 @@ export class Controller implements vscode.Disposable {
 	#onAgentExit(agent: OmpAgent, message: string): void {
 		if (this.#agent !== agent) return;
 		this.#agent = undefined;
+		this.#stopWatchingBackground();
 		this.#cancelPending(message);
 		this.#notice("error", message);
 		this.chat.post({ type: "status", state: "stopped" });
@@ -797,17 +949,25 @@ export class Controller implements vscode.Disposable {
 			case "unqueue":
 				this.#unqueue(message.id);
 				break;
+			case "sendNow":
+				// The queue waits for omp's background work; the user doesn't want to wait. Not while omp
+				// carries on by itself, which it does before taking any message.
+				if (!this.#busy && this.#queue.length > 0 && !this.#background?.continuing && this.resumeSessionId === undefined && !this.#waitingForLoad) {
+					void this.#sendTurn(this.#takeNextTurn(), true);
+				}
+				break;
 			case "respond": {
 				const pending = this.#pending.get(message.requestId);
 				if (!pending) return;
 				this.#pending.delete(message.requestId);
 				// Ticked on a command's card: its read-only programs are allowed from now on, whatever this one's answer.
 				if (message.allowReadOnly === true) pending.allowReadOnly?.();
-				pending.resolve(message.value);
 				this.chat.post({ type: "resolved", requestId: message.requestId, label: message.label });
 				const note = typeof message.note === "string" ? message.note.trim() : "";
 				const changed = typeof message.changedCommand === "string" && message.changedCommand.trim() ? message.changedCommand.trim() : undefined;
-				if (note || changed) pending.rejectNote?.(note, changed);
+				const answer = () => pending.resolve(message.value);
+				if ((note || changed) && pending.rejectNote) void pending.rejectNote(note, changed, answer);
+				else answer();
 				break;
 			}
 			case "openReview":
@@ -863,6 +1023,9 @@ export class Controller implements vscode.Disposable {
 			const code = codeOfToolInput(update.rawInput);
 			if (update.status === "completed" || update.status === "failed") this.#runningCode.delete(update.toolCallId);
 			else if (code) this.#runningCode.set(update.toolCallId, code);
+			// A command omp moved to the background: it goes on after the call has returned.
+			const moved = (update.rawOutput as any)?.details?.async;
+			if (moved?.state === "running" && typeof moved.jobId === "string" && !this.#loadingSessionId) this.#movedToBackground.add(moved.jobId);
 		}
 		this.chat.post({ type: "update", update });
 	}
@@ -979,12 +1142,41 @@ export class Controller implements vscode.Disposable {
 			undefined,
 			{
 				allowReadOnly: allowThem,
-				// omp tells the model only "rejected by user", and takes no message during a turn: so the turn
-				// stops, and the note follows as the next message (queued until the stopped turn ends).
-				rejectNote: (note, changed) => {
+				// omp tells the model only "rejected by user". The note is added to the running turn first, so the
+				// model reads it with the rejection and carries on. If omp can't take it there (an omp without
+				// steering, or the turn has ended), the turn stops and the note follows as the next message.
+				// omp takes it at once while it waits for this answer; if it is slow, the rejection goes after
+				// STEER_WAIT_MS so the turn isn't held up, and the note when omp has taken it.
+				rejectNote: async (note, changed, answer) => {
 					const text = rejectedCommandMessage({ command, title: params.toolCall.title }, note, command !== undefined ? changed : undefined);
-					this.log("a command was rejected with a note: stopping the turn to send it");
-					this.cancel();
+					const agent = this.#agent;
+					// The user's turn this card came from; none when omp asked during work of its own, also while a
+					// message of the user's waits for that work to end (#busy then, but omp refused it).
+					const turn = this.#busy && !this.#background?.continuing ? this.#turnCount : undefined;
+					const steered = agent ? agent.steer(text) : Promise.resolve(false);
+					let answered = false;
+					const late = setTimeout(() => {
+						answered = true;
+						answer();
+					}, STEER_WAIT_MS);
+					const took = await steered;
+					clearTimeout(late);
+					if (!answered) answer();
+					if (!agent || agent !== this.#agent) return; // omp stopped meanwhile (and said so): its turn is gone
+					if (took) {
+						this.log(`a command was rejected with a note: added to the running turn${answered ? " (omp was slow to take it)" : ""}`);
+						this.chat.post({ type: "user", text, attachments: [], sentAt: Date.now() });
+						return;
+					}
+					if (turn !== undefined && this.#busy && this.#turnCount === turn) {
+						this.log("a command was rejected with a note: stopping the turn to send it");
+						this.cancel();
+						void this.send(text, [], true); // the stopped turn's follow-up: not held back by background work
+						return;
+					}
+					// From omp's own work, or answered after its turn ended: nothing of the user's is stopped, and the
+					// note goes as a message once omp is free (after the turn running now, or omp's own work).
+					this.log("a command was rejected with a note: sending it as the next message");
 					void this.send(text);
 				},
 			},
@@ -1068,6 +1260,14 @@ function currentModelName(options: ConfigOption[]): string | undefined {
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** A message never reached omp, which was busy with work of its own (see #promptWhenFree): it goes back to the input. */
+class NotSentError extends Error {}
+
+/** omp's answer to a message while it is busy with a turn of its own ("Agent is already processing…"). */
+function isSessionBusy(error: unknown): boolean {
+	return error instanceof AgentError && (error.code === -32003 || error.reason === "session_busy" || /already processing/i.test(error.message));
 }
 
 /** Queued messages' texts as one message. */

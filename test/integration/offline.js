@@ -1284,25 +1284,167 @@ exports.run = async function run() {
 			session.panel.dispose();
 		},
 
-		async "Reject with note rejects the command, stops the turn and sends the note, with the command as changed, next"() {
+		async "Reject with note adds the note, with the command as changed, to the running turn, which carries on"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);
 			const logged = fakeLog().length;
-			const turn = session.controller.send(steps({ permission: "cd /repo && gh auth status 2>&1 | head -5" }, { untilCancelled: true }));
+			const turn = session.controller.send(steps({ permission: "cd /repo && gh auth status 2>&1 | head -5" }, { say: "Doing it the other way." }));
 			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
 			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a changed command", note: "no need to cd", changedCommand: "gh auth status" });
 			await turn;
-			const sent = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the note to reach omp");
 			const events = fakeLog().slice(logged).map(e => e.event).filter(event => event !== "session/new");
-			assert.deepEqual(events, ["prompt", "permission", "hang", "prompt", "text"], "rejected, stopped, then the note as the next message");
-			assert.equal(fakeLog().slice(logged).find(e => e.event === "permission").result.outcome.optionId, "reject_once", "omp is told the command was rejected");
+			assert.deepEqual(events, ["prompt", "steer", "permission"], "the note joins the turn before omp hears of the rejection, and nothing is stopped");
+			const steer = fakeLog().slice(logged).find(e => e.event === "steer");
+			assert.equal(steer.outcome, "injected");
 			assert.equal(
-				sent.text,
+				steer.text,
 				"I rejected this command, so it did not run:\n```\ncd /repo && gh auth status 2>&1 | head -5\n```\nRun this instead:\n```\ngh auth status\n```\nMy note: no need to cd\nDo what I ask here instead of what I rejected, then continue with the task.",
 			);
+			assert.equal(fakeLog().slice(logged).find(e => e.event === "permission").result.outcome.optionId, "reject_once", "omp is told the command was rejected");
+			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["end_turn"], "one turn, which went on");
+			assert.ok(posts.some(m => m.type === "user" && m.text === steer.text), "the note shows in the chat as the user's message");
+			session.panel.dispose();
+		},
+
+		async "an omp that can't take the note in the running turn gets it as the next message, after the turn stops"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const logged = fakeLog().length;
+			const turn = session.controller.send(steps({ noSteering: true }, { permission: "rm -rf build" }, { untilCancelled: true }));
+			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a note", note: "keep the build" });
+			await turn;
+			const sent = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the note to reach omp");
+			const events = fakeLog().slice(logged).map(e => e.event).filter(event => event !== "session/new");
+			assert.deepEqual(events, ["prompt", "steer", "permission", "hang", "prompt", "text"], "refused, then rejected, stopped, and the note as the next message");
+			assert.match(sent.text, /My note: keep the build/);
 			await waitFor(() => posts.filter(m => m.type === "turnEnd").length === 2, "the note's own turn to end");
-			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["cancelled", "end_turn"], "the turn that asked was stopped");
-			assert.ok(posts.some(m => m.type === "user" && m.text === sent.text), "the note shows in the chat as the user's message");
+			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["cancelled", "end_turn"]);
+
+			// The same while omp runs a command in the background: the note still goes at once.
+			session.panel.setChatTitle("Note"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ background: { jobId: "bg_9", command: "sleep 600", after: 60_000 } }));
+			const before = fakeLog().length;
+			const cards = posts.filter(m => m.type === "permission").length;
+			// Sent now (as with "Send now"): messages otherwise wait for the background job.
+			const next = session.controller.send(steps({ noSteering: true }, { permission: "rm -rf dist" }, { untilCancelled: true }), [], true);
+			const second = await waitFor(() => posts.filter(m => m.type === "permission")[cards], "the second card");
+			session.panel.receive({ type: "respond", requestId: second.requestId, value: "reject_once", label: "Rejected with a note", note: "keep dist" });
+			await next;
+			const note = await waitFor(() => fakeLog().slice(before).find(e => e.event === "text"), "the note to reach omp despite the background job");
+			assert.match(note.text, /My note: keep dist/);
+			session.panel.dispose();
+		},
+
+		async "a message omp refuses while busy with work of its own is sent once omp is free; Stop ends the wait"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Busy omp"); // named: no "/rename" after a turn to use up a refusal
+			await session.controller.send(steps({ busyFor: 2 }));
+			let logged = fakeLog().length;
+			await session.controller.send(steps({ say: "got it" }));
+			assert.deepEqual(fakeLog().slice(logged).map(e => e.event), ["busy", "busy", "prompt"], "tried again until omp took it");
+			assert.equal(posts.filter(m => m.type === "notice" && /busy with work of its own/.test(m.text)).length, 1, "said once");
+			assert.equal(posts.filter(m => m.type === "turnEnd").at(-1).stopReason, "end_turn");
+			assert.ok(!posts.some(m => m.type === "notice" && m.level === "error"), "no error");
+
+			await session.controller.send(steps({ busyFor: 3 }));
+			const notes = notificationsOf(session.panel);
+			const waiting = session.controller.send(steps({ say: "never" }));
+			await waitFor(() => fakeLog().slice(logged).filter(e => e.event === "busy").length >= 3, "a refusal");
+			session.controller.cancel();
+			await waiting;
+			assert.ok(posts.some(m => m.type === "notice" && /Stopped while waiting for omp/.test(m.text)), "stopped while waiting");
+			assert.ok(notes.some(m => m.type === "restoreInput" && m.text === steps({ say: "never" })), "the message omp never got is back in the input");
+			assert.ok(posts.some(m => m.type === "notSent"), "and marked so in the chat");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work is not cancelled: only the wait ends");
+			logged = fakeLog().length;
+			await session.controller.send(steps({ say: "after" })); // the fake still refuses the rest
+			assert.equal(fakeLog().slice(logged).filter(e => e.event === "prompt").length, 1);
+			session.panel.dispose();
+		},
+
+		async "work omp moved to the background shows above the input; a message sent meanwhile waits, then follows what omp did by itself"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Background work"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ background: { jobId: "bg_1", command: "python eval.py", after: 2500, reply: "The eval passed." } }));
+			const running = posts.filter(m => m.type === "background").at(-1);
+			assert.deepEqual(running.jobs.map(job => [job.id, job.label]), [["bg_1", "python eval.py"]]);
+			assert.equal(running.continuing, false);
+			assert.ok(!posts.some(m => m.type === "backgroundTurn"), "the chat's first turn, which omp wrote to its file at once, is not taken for omp's own");
+
+			let logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "and then?", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "and then?"), "the message to wait in the queue");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "text"), "not sent while omp works in the background");
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "and then?"), "the message to go once omp is free");
+			const at = check => posts.findIndex(check);
+			const divider = at(m => m.type === "backgroundTurn");
+			const ownReply = at(m => m.type === "update" && m.update.content?.text === "The eval passed.");
+			const sent = at(m => m.type === "user" && m.text === "and then?");
+			assert.ok(divider !== -1 && divider < ownReply && ownReply < sent, "what omp did by itself comes first, then the message");
+			assert.deepEqual(posts[divider].jobs, ["python eval.py"]);
+			assert.deepEqual(posts.filter(m => m.type === "background").at(-1), { type: "background", jobs: [], continuing: false });
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "the message's turn to end");
+
+			// A message sent just as omp starts on a job's result waits for it, rather than going to an omp that refuses it.
+			await session.controller.send(steps({ background: { jobId: "bg_3", command: "make", after: 200, continueFor: 2500, reply: "Built." } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_3"), "omp to start on the job's result");
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "how did it go?", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "how did it go?"), "the message to wait in the queue");
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "how did it go?"), "the message to go once omp is done");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "busy"), "omp never had to refuse it");
+			const built = at(m => m.type === "update" && m.update.content?.text === "Built.");
+			assert.ok(built !== -1 && built < at(m => m.type === "user" && m.text === "how did it go?"), "omp's own work first");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "the message's turn to end");
+
+			// omp asks about a command while carrying on by itself: a note on its rejection stops nothing, and goes once omp is done.
+			const notes = notificationsOf(session.panel);
+			await session.controller.send(steps({ background: { jobId: "bg_4", command: "make", after: 200, askDuring: "rm -rf out" } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_4"), "omp to start on the job's result");
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "waiting one", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "waiting one"), "the message to wait in the queue");
+			const ask = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "rm -rf out"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask.requestId, value: "reject_once", label: "Rejected with a note", note: "keep out" });
+			const both = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the waiting message and the note, once omp is done");
+			assert.match(both.text, /^waiting one\n\n/);
+			assert.match(both.text, /My note: keep out/);
+			assert.deepEqual(fakeLog().slice(logged).find(e => e.event === "ownPermission").result, { outcome: { outcome: "selected", optionId: "reject_once" } });
+			assert.ok(!notes.some(m => m.type === "restoreInput"), "the waiting message stayed in the queue");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work was not stopped");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "their turn to end");
+
+			// The same while a message of the user's waits for omp's own work (omp refused it): still nothing is stopped.
+			await session.controller.send(steps({ background: { jobId: "bg_5", command: "make", after: 200, askDuring: "rm -rf tmp" } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_5"), "omp to start on the job's result");
+			await waitFor(() => posts.filter(m => m.type === "background").at(-1)?.continuing === true, "the extension to see omp carry on");
+			logged = fakeLog().length;
+			const shown = posts.length;
+			const waitingTwo = session.controller.send("waiting two", [], true); // as Send now would
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "busy"), "omp to refuse it");
+			const ask2 = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "rm -rf tmp"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask2.requestId, value: "reject_once", label: "Rejected with a note", note: "keep tmp" });
+			await waitingTwo;
+			const texts = await waitFor(() => {
+				const sent = fakeLog().slice(logged).filter(e => e.event === "text").map(e => e.text);
+				return sent.length === 2 && sent;
+			}, "the waiting message, then the note");
+			assert.equal(texts[0], "waiting two");
+			assert.match(texts[1], /My note: keep tmp/);
+			assert.ok(!posts.slice(shown).some(m => m.type === "notSent"), "the waiting message was not thrown back");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work was not stopped");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "their turns to end");
+
+			// "Send now" doesn't wait for the background work.
+			await session.controller.send(steps({ background: { jobId: "bg_2", command: "sleep 600", after: 60_000 } }));
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "right away", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "right away"), "the message to wait in the queue");
+			session.panel.receive({ type: "sendNow" });
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "right away"), "the message sent now");
 			session.panel.dispose();
 		},
 
