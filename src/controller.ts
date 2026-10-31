@@ -317,6 +317,14 @@ export class Controller implements vscode.Disposable {
 		if (!watch.busy && !this.#busy && this.#queue.length > 0) void this.#sendTurn(this.#takeNextTurn(), true);
 	}
 
+	/**
+	 * omp asks something (an approval, a question, a file to review) while no turn of the user's runs: it is
+	 * working on its own, whatever woke it, and its work is shown when it ends (see BackgroundWatch.ownWorkSeen).
+	 */
+	#noteOwnWork(): void {
+		if (!this.#busy) void this.#background?.ownWorkSeen();
+	}
+
 	/** omp ran a turn by itself (a background job reported back): shown below the chat, as when the chat is opened again. */
 	#showOwnTurn(entries: any[]): void {
 		this.log("omp ran a turn of its own (a background job reported back)");
@@ -1041,6 +1049,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	async #writeTextFile(params: WriteTextFileParams): Promise<void> {
+		this.#noteOwnWork();
 		const uri = vscode.Uri.file(params.path);
 		const displayPath = vscode.workspace.asRelativePath(uri);
 		const current = await this.#currentText(uri);
@@ -1075,6 +1084,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	async #requestPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {
+		this.#noteOwnWork();
 		const command: string | undefined =
 			typeof params.toolCall.rawInput?.command === "string" ? params.toolCall.rawInput.command : undefined;
 		const allowOnce = params.options.find(option => option.kind === "allow_once");
@@ -1189,6 +1199,7 @@ export class Controller implements vscode.Disposable {
 	}
 
 	async #elicit(params: ElicitationParams): Promise<ElicitationResult> {
+		this.#noteOwnWork();
 		if (params.mode === "url") {
 			// Not advertised in clientCapabilities; opening an agent-chosen URL unasked is unsafe.
 			this.log(`declined a request to open ${params.url}`);

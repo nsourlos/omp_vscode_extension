@@ -8,11 +8,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionUpdate } from "../acp/types";
 
-/** A command (or helper agent) omp runs in the background. */
+/**
+ * A command, helper agent or process omp runs in the background. A process (omp's supervised "service",
+ * often a server) can run for hours, so unlike the others it doesn't hold messages back (see BackgroundWatch).
+ */
 export interface BackgroundJob {
 	id: string;
-	kind: "command" | "agent";
-	/** The command, or what omp said it does. */
+	kind: "command" | "agent" | "process";
+	/** The command, what omp said it does, or the process's name. */
 	label: string;
 	/** When omp started it (ms). */
 	startedAt: number;
@@ -204,8 +207,10 @@ export class SessionTracker {
 			this.#turn = "none";
 			return undefined;
 		}
-		if (entry?.type === "custom_message" && entry.customType === "async-result") {
+		// A job's result, or a process that exited ("Supervised process a-verify exited with exit code 0."): omp carries on.
+		if (entry?.type === "custom_message" && (entry.customType === "async-result" || entry.customType === "launch-completion")) {
 			for (const job of arrayOf(entry.details?.jobs)) this.jobs.delete(String(job?.jobId ?? job?.id));
+			for (const process of arrayOf(entry.details?.daemons)) this.jobs.delete(String(process?.name));
 			if (this.#turn === "none") {
 				this.#startOwn();
 				this.#ownResultAt = timeOf(entry);
@@ -276,6 +281,15 @@ export class SessionTracker {
 			const id = job?.id ?? job?.jobId;
 			if (typeof id === "string" && FINISHED.has(job.status)) this.jobs.delete(id);
 		}
+		// A process omp started (bash as a "service"): "a-verify: running pid=5516", until it exits.
+		const service = message.details?.service;
+		if (typeof service?.name === "string") {
+			if (service.state === "running" || service.state === "ready") {
+				this.jobs.set(service.name, { id: service.name, kind: "process", label: service.name, startedAt: call?.at ?? at });
+			} else {
+				this.jobs.delete(service.name);
+			}
+		}
 		// Helper agents started in the background, as older omp lists them: "- `Name` (job `Name`)".
 		if (message.toolName === "task" && !async) {
 			for (const match of textOf(message.content).matchAll(/\(job `([^`]+)`\)/g)) {
@@ -341,8 +355,12 @@ export function ownTurnStopReason(entries: any[]): string {
 
 /** The jobs whose results started a turn omp ran by itself. */
 export function ownTurnJobs(entries: any[]): string[] {
-	const results = entries.filter(entry => entry?.type === "custom_message" && entry.customType === "async-result");
-	return results.flatMap(entry => arrayOf(entry.details?.jobs).map(job => String(job?.label ?? job?.jobId ?? "a job")));
+	return entries
+		.filter(entry => entry?.type === "custom_message")
+		.flatMap(entry => [
+			...arrayOf(entry.details?.jobs).map(job => String(job?.label ?? job?.jobId ?? "a job")),
+			...arrayOf(entry.details?.daemons).map(process => String(process?.name ?? "a process")),
+		]);
 }
 
 // As omp's ACP mode titles tool calls (buildToolTitle and mapToolKind in its acp-event-mapper).

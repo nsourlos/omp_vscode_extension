@@ -23,6 +23,10 @@
 //                                   replies by itself `continueFor` ms later, refusing prompts meanwhile: seen
 //                                   only in the chat's file; with "askDuring": "<command>", omp asks to run it
 //                                   meanwhile (and replies once answered)
+//   {"process": {"name", "command", "after", "continueFor", "reply", "askDuring"}}  the same with a process omp
+//                                   starts (a "service"), which reports back when it exits
+//   {"wake": {"after", "continueFor", "reply", "askDuring"}}  omp carries on by itself `after` ms later, woken
+//                                   by something the editor isn't told of
 // With PI_CODING_AGENT_DIR set, the chat is written to a file there as omp keeps it (sessions/<folder>/<time>_<id>.jsonl).
 // _session/steering (adding a message to the running turn) is logged as "steer", and taken while a turn runs.
 // Flags: --init-delay <ms> delays the initialize reply; --log <file> appends one JSON line per outcome;
@@ -111,6 +115,30 @@ const PERMISSION_OPTIONS = [
 	{ optionId: "reject_always", name: "Always reject", kind: "reject_always" },
 ];
 
+/** omp carrying on by itself after `wake` (an entry of its file), as after a background job or process reports back. */
+async function runOwnTurn(id, wake, { askDuring, continueFor = 0, reply = "Done." }) {
+	writeEntry(wake);
+	ownTurnRunning = true;
+	record({ event: "ownTurnStart", jobId: id });
+	if (askDuring) {
+		// Asked while no turn of the editor's runs. Like omp, the reply that calls the tool is written first.
+		const toolCallId = `own-${id}`;
+		writeMessage({ role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: askDuring } }], stopReason: "toolUse" });
+		const answer = await request("session/request_permission", {
+			sessionId,
+			toolCall: { toolCallId, title: "Run a command", kind: "execute", rawInput: { command: askDuring } },
+			options: PERMISSION_OPTIONS,
+		});
+		record({ event: "ownPermission", result: answer.result });
+		const ran = answer.result?.outcome?.optionId === "allow_once";
+		writeMessage({ role: "toolResult", toolCallId, toolName: "bash", content: [{ type: "text", text: ran ? `ran ${askDuring}` : "Rejected by user" }], isError: !ran });
+	}
+	await sleep(continueFor);
+	writeMessage({ role: "assistant", content: [{ type: "text", text: reply }], stopReason: "stop" });
+	ownTurnRunning = false;
+	record({ event: "backgroundDone", jobId: id });
+}
+
 async function runTurn(steps) {
 	turnRunning = true;
 	noSteering = false;
@@ -183,25 +211,24 @@ async function runSteps(steps) {
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId, title: `$ ${command}`, kind: "execute", status: "pending", rawInput: { command } } } });
 			writeMessage({ role: "toolResult", toolCallId, toolName: "bash", content, details });
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { content, details } } } });
-			setTimeout(async () => {
-				writeEntry({ type: "custom_message", customType: "async-result", content: `Background job ${jobId} has completed.`, details: { jobs: [{ jobId, type: "bash", label: command }] } });
-				ownTurnRunning = true;
-				record({ event: "ownTurnStart", jobId });
-				if (askDuring) {
-					// Asked while omp carries on by itself: no turn of the editor's is running.
-					const answer = await request("session/request_permission", {
-						sessionId,
-						toolCall: { toolCallId: `own-${jobId}`, title: "Run a command", kind: "execute", rawInput: { command: askDuring } },
-						options: PERMISSION_OPTIONS,
-					});
-					record({ event: "ownPermission", result: answer.result });
-				}
-				setTimeout(() => {
-					writeMessage({ role: "assistant", content: [{ type: "text", text: reply }], stopReason: "stop" });
-					ownTurnRunning = false;
-					record({ event: "backgroundDone", jobId });
-				}, continueFor);
-			}, after);
+			const result = { type: "custom_message", customType: "async-result", content: `Background job ${jobId} has completed.`, details: { jobs: [{ jobId, type: "bash", label: command }] } };
+			setTimeout(() => void runOwnTurn(jobId, result, { askDuring, continueFor, reply }), after);
+		} else if (step.process) {
+			const { name, command, after = 1000, continueFor = 0, reply = "Done.", askDuring } = step.process;
+			const toolCallId = `call-${name}`;
+			const content = [{ type: "text", text: `${name}: running pid=4242` }];
+			const details = { service: { name, state: "running", ready: true, pid: 4242 } };
+			writeMessage({ role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command } }], stopReason: "toolUse" });
+			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId, title: `$ ${command}`, kind: "execute", status: "pending", rawInput: { command } } } });
+			writeMessage({ role: "toolResult", toolCallId, toolName: "bash", content, details });
+			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { content, details } } } });
+			const exited = { type: "custom_message", customType: "launch-completion", content: `Supervised process ${name} exited with exit code 0.`, details: { daemons: [{ name, state: "exited", exitCode: 0 }] } };
+			setTimeout(() => void runOwnTurn(name, exited, { askDuring, continueFor, reply }), after);
+		} else if (step.wake) {
+			// Woken by something the editor isn't told of (here an IRC message): only its question shows.
+			const { after = 1000, continueFor = 0, reply = "Done.", askDuring } = step.wake;
+			const ping = { type: "custom_message", customType: "irc-message", content: "ping" };
+			setTimeout(() => void runOwnTurn("wake", ping, { askDuring, continueFor, reply }), after);
 		} else if (step.exit !== undefined) {
 			process.exit(step.exit);
 		} else if (step.closeStdin) {

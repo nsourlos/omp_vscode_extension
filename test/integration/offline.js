@@ -1448,6 +1448,30 @@ exports.run = async function run() {
 			session.panel.dispose();
 		},
 
+		async "a process omp started shows without holding messages; what omp does once it exits, or when woken by anything else, is shown"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Processes"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ process: { name: "a-verify", command: "python3 verify.py", after: 2500, reply: "Verification reproduced." } }));
+			assert.deepEqual(posts.filter(m => m.type === "background").at(-1).jobs.map(job => [job.id, job.kind]), [["a-verify", "process"]]);
+			let logged = fakeLog().length;
+			await session.controller.send("meanwhile");
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "text" && e.text === "meanwhile"), "not held back by a process");
+			await waitFor(() => posts.some(m => m.type === "update" && m.update.content?.text === "Verification reproduced."), "what omp did once the process exited");
+			assert.deepEqual(posts.find(m => m.type === "backgroundTurn").jobs, ["a-verify"]);
+			await waitFor(() => posts.filter(m => m.type === "background").at(-1).jobs.length === 0, "the process gone from the bar");
+
+			// Woken by something the extension isn't told of: its question shows, then, once it's done, its work.
+			logged = fakeLog().length;
+			await session.controller.send(steps({ wake: { after: 300, askDuring: "python3 compare.py", reply: "A verification complete." } }));
+			const ask = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "python3 compare.py"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask.requestId, value: "allow_once", label: "Allow once" });
+			await waitFor(() => posts.some(m => m.type === "update" && m.update.content?.text === "A verification complete."), "omp's work after it");
+			const ran = posts.find(m => m.type === "update" && m.update.sessionUpdate === "tool_call_update" && m.update.toolCallId === "own-wake");
+			assert.equal(ran.update.status, "completed", "the approved command's card is told it ran");
+			session.panel.dispose();
+		},
+
 		async "@ suggests the project's files and folders, and attaches the ones a message mentions"() {
 			const session = await newSession();
 			const notes = notificationsOf(session.panel);

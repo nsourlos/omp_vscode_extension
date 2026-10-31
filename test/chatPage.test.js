@@ -1568,7 +1568,7 @@ test("work omp still runs in the background shows above the input, with Send now
 	bar.querySelector("button").click();
 	assert.deepEqual(chat.posted.at(-1), { type: "sendNow" });
 	chat.deliver({ type: "background", jobs: [], continuing: true });
-	assert.match(bar.textContent, /^⏳ A background job finished: omp is continuing with the results…/);
+	assert.match(bar.textContent, /^⏳ omp is carrying on by itself after background work reported back…/);
 	assert.equal(bar.querySelector("button"), null, "no Send now while omp carries on by itself: it takes no message then");
 	chat.deliver({ type: "dequeued", ids: ["1"] });
 	assert.equal(badge.textContent, "finished in background");
@@ -1610,4 +1610,27 @@ test("a loaded chat's replayed command cards forget their jobs, whose names a ne
 		{ type: "background", jobs: [{ id: "bg_1", kind: "command", label: "sleep 9", startedAt: Date.now() }], continuing: false },
 	);
 	assert.equal(chat.log.querySelector(".tool-background").textContent, "moved to background", "not the new omp's bg_1");
+});
+
+test("a process omp runs in the background is shown, and messages don't wait for it", () => {
+	const chat = openChat();
+	const bar = chat.window.document.getElementById("background");
+	chat.deliver(
+		{ type: "status", state: "idle" },
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "$ python3 run.py", kind: "execute", status: "pending", rawInput: { command: "python3 run.py" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed", rawOutput: { content: [], details: { service: { name: "a-verify", state: "running", pid: 5516 } } } } },
+		{ type: "background", jobs: [{ id: "a-verify", kind: "process", label: "a-verify", startedAt: Date.now() - 12 * 60_000 }], continuing: false },
+	);
+	assert.equal(bar.textContent, "⏳ omp is running 1 process in the background: a-verify (12 min). It reports back when it ends; you can keep chatting.");
+	assert.equal(chat.log.querySelector(".tool-background").textContent, "⏳ running in background");
+
+	chat.deliver({
+		type: "background",
+		jobs: [
+			{ id: "bg_1", kind: "command", label: "make", startedAt: Date.now() },
+			{ id: "a-verify", kind: "process", label: "a-verify", startedAt: Date.now() },
+		],
+		continuing: false,
+	});
+	assert.match(bar.textContent, /^⏳ omp is still running 1 command in the background: \$ make \(0s\)\. It will report back.* omp also runs 1 process in the background\.$/);
 });

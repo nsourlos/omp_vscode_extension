@@ -912,8 +912,10 @@
 			if (typeof update.rawInput?.cwd === "string") tool.cwd = update.rawInput.cwd;
 			labelTool(tool);
 			const job = update.rawOutput?.details?.async;
-			if (job?.state === "running" && typeof job.jobId === "string" && !tool.jobId) {
-				tool.jobId = job.jobId;
+			const service = update.rawOutput?.details?.service; // a process omp started, named
+			const jobId = job?.state === "running" ? job.jobId : service?.state === "running" || service?.state === "ready" ? service.name : undefined;
+			if (typeof jobId === "string" && !tool.jobId) {
+				tool.jobId = jobId;
 				markBackground(tool, "moved"); // whether it still runs, the extension says once the reply ends
 			}
 			const diff = update.rawOutput?.details?.diff;
@@ -1391,27 +1393,34 @@
 	}
 
 	function describeBackground(node) {
-		const { jobs, continuing, untracked } = background;
+		const { continuing, untracked } = background;
 		node.textContent = "";
 		const say = text => node.appendChild(document.createTextNode(text));
 		if (continuing) {
-			say("⏳ A background job finished: omp is continuing with the results… A message you send now will wait until it's done.");
+			say("⏳ omp is carrying on by itself after background work reported back… A message you send now will wait until it's done.");
 			return;
 		}
-		const agents = jobs.every(job => job.kind === "agent");
-		const noun = `${jobs.length} ${agents ? "helper agent" : "command"}${jobs.length === 1 ? "" : "s"}`;
+		// Commands and helper agents hold messages back; processes (often servers, running for hours) don't.
+		const held = background.jobs.filter(job => job.kind !== "process");
+		const processes = background.jobs.filter(job => job.kind === "process");
+		const jobs = held.length ? held : processes;
+		const kind = !held.length ? "process" : held.every(job => job.kind === "agent") ? "helper agent" : "command";
+		const plural = (count, word) => `${count} ${word}${count === 1 ? "" : word === "process" ? "es" : "s"}`;
 		if (untracked) {
-			say(`⏳ omp moved ${noun} to the background and may still be running ${jobs.length === 1 ? "it" : "them"}. It reports back by itself; a message sent before then may have to wait.`);
+			say(`⏳ omp moved ${plural(jobs.length, kind)} to the background and may still be running ${jobs.length === 1 ? "it" : "them"}. It reports back by itself; a message sent before then may have to wait.`);
 			return;
 		}
 		const [first] = jobs;
-		say(`⏳ omp is still running ${noun} in the background: `);
+		say(`⏳ omp is ${held.length ? "still " : ""}running ${plural(jobs.length, kind)} in the background: `);
 		const firstLine = String(first.label || "").split("\n")[0];
-		const label = (first.kind === "agent" ? "" : "$ ") + (firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine);
+		const label = (first.kind === "command" ? "$ " : "") + (firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine);
 		node.appendChild(el("code", "", label)).title = first.label || "";
 		const more = jobs.length > 1 ? ` and ${jobs.length - 1} more` : "";
 		const seconds = Math.max(0, Math.round((Date.now() - (first.startedAt || Date.now())) / 1000));
-		say(`${more} (${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)} min`}). It will report back and carry on by itself. A message you send now will wait until it's done.`);
+		say(`${more} (${seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)} min`}).`);
+		if (!held.length) return say(" It reports back when it ends; you can keep chatting.");
+		say(" It will report back and carry on by itself. A message you send now will wait until it's done.");
+		if (processes.length) say(` omp also runs ${plural(processes.length, "process")} in the background.`);
 	}
 
 	/** Put text (and its attachments) back in the input, ahead of what is there; with focus false, without taking the keyboard. */

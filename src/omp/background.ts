@@ -43,8 +43,16 @@ export class BackgroundWatch {
 		return this.#reader !== undefined;
 	}
 
-	/** omp works in the background, as far as its file tells: a job runs, or a turn of its own. */
+	/**
+	 * omp works in the background in a way messages wait for, as far as its file tells: a command or helper
+	 * agent runs, or a turn of its own. A process (often a server, running for hours) doesn't count.
+	 */
 	get busy(): boolean {
+		return this.#tracker.continuing || [...this.#tracker.jobs.values()].some(job => job.kind !== "process");
+	}
+
+	/** Anything runs in the background, so the file is read every second to see it end. */
+	get #watching(): boolean {
 		return this.#tracker.jobs.size > 0 || this.#tracker.continuing;
 	}
 
@@ -64,6 +72,16 @@ export class BackgroundWatch {
 
 	/** Catch up with the file now, e.g. before a message is sent: omp may have just started work of its own. */
 	refresh(): Promise<void> {
+		return this.#read();
+	}
+
+	/**
+	 * omp asked the user something (an approval, a question, a file to review) while no turn of the user's
+	 * ran: it is working on its own, woken by something not followed here. Its file says so already (omp
+	 * writes the reply that calls the tool before running it), and is then read until that work ends.
+	 */
+	ownWorkSeen(): Promise<void> {
+		this.#searchedAt = 0; // looked for at once, if not found yet
 		return this.#read();
 	}
 
@@ -118,8 +136,8 @@ export class BackgroundWatch {
 			this.#reported = key;
 			this.handlers.changed(state);
 		}
-		if (this.busy && !this.#timer) this.#timer = setInterval(() => void this.#read(), this.pollMs);
-		else if (!this.busy && this.#timer) this.#stopTimer();
+		if (this.#watching && !this.#timer) this.#timer = setInterval(() => void this.#read(), this.pollMs);
+		else if (!this.#watching && this.#timer) this.#stopTimer();
 	}
 
 	#stopTimer(): void {

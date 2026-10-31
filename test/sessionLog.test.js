@@ -225,3 +225,58 @@ test("a job's result after which omp writes nothing for three minutes is taken a
 	assert.equal(tracker.endSilentTurn(Date.now()), false);
 	assert.equal(tracker.continuing, true);
 });
+
+test("a process omp starts runs until it exits, and its exit starts a turn of omp's own; it holds no message back", async () => {
+	const tracker = new SessionTracker();
+	const service = (toolCallId, name, state) =>
+		entry({ type: "message", message: { role: "toolResult", toolCallId, toolName: "bash", content: [{ type: "text", text: `${name}: ${state}` }], details: { service: { name, state, pid: 1 } } } });
+	tracker.apply([user("verify"), bashCall("c1", "python3 verify.py"), service("c1", "a-verify", "running"), reply([{ type: "text", text: "Started." }])]);
+	tracker.askedTurnEnded();
+	assert.deepEqual([...tracker.jobs.values()].map(({ id, kind, label }) => ({ id, kind, label })), [{ id: "a-verify", kind: "process", label: "a-verify" }]);
+	const exited = entry({ type: "custom_message", customType: "launch-completion", content: "Supervised process a-verify exited with exit code 0.", details: { daemons: [{ name: "a-verify", state: "exited", exitCode: 0 }] } });
+	const own = [exited, reply([{ type: "text", text: "Verification reproduced." }])];
+	assert.deepEqual(tracker.apply(own.slice(0, 1)), []);
+	assert.equal(tracker.jobs.size, 0);
+	assert.equal(tracker.continuing, true);
+	assert.deepEqual(tracker.apply(own.slice(1)), [own]);
+	assert.deepEqual(ownTurnJobs(own), ["a-verify"]);
+
+	// Stopped by omp in a later turn: gone too.
+	tracker.apply([user("serve"), bashCall("c2", "npm run dev"), service("c2", "web", "running"), service("c3", "web", "exited"), reply([])]);
+	assert.equal(tracker.jobs.size, 0);
+
+	// A process alone keeps the file followed, but messages don't wait for it.
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-agent-"));
+	fs.mkdirSync(path.join(agentDir, "sessions", "-project"), { recursive: true });
+	const file = path.join(agentDir, "sessions", "-project", "2026-10-31T09-00-00-000Z_chat-4.jsonl");
+	const states = [];
+	const watch = new BackgroundWatch("chat-4", { changed: state => states.push(state), ownTurn: () => {}, log: () => {} }, agentDir, 20);
+	fs.writeFileSync(file, [user("serve"), bashCall("c1", "npm run dev"), service("c1", "web", "running"), reply([])].map(value => `${JSON.stringify(value)}\n`).join(""));
+	await watch.turnEnded();
+	assert.equal(watch.busy, false, "messages go");
+	assert.deepEqual(states.at(-1).jobs.map(job => job.id), ["web"], "shown in the bar");
+	watch.dispose();
+	fs.rmSync(agentDir, { recursive: true, force: true });
+});
+
+test("omp working on its own after a wake-up not followed here is seen from its file once it asks something", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-agent-"));
+	fs.mkdirSync(path.join(agentDir, "sessions", "-project"), { recursive: true });
+	const file = path.join(agentDir, "sessions", "-project", "2026-10-31T09-00-00-000Z_chat-5.jsonl");
+	const write = (...entries) => fs.appendFileSync(file, entries.map(value => `${JSON.stringify(value)}\n`).join(""));
+	const turns = [];
+	const watch = new BackgroundWatch("chat-5", { changed: () => {}, ownTurn: turn => turns.push(turn), log: () => {} }, agentDir, 20);
+	write(user("hi"), reply([{ type: "text", text: "Hello." }]));
+	await watch.turnEnded();
+	write(entry({ type: "custom_message", customType: "irc-message", content: "ping" }), bashCall("c1", "python3 compare.py"));
+	await watch.ownWorkSeen(); // omp asks to run it
+	assert.equal(watch.continuing, true);
+	const rest = [result("c1", "bash", "done"), reply([{ type: "text", text: "Compared." }])];
+	write(...rest);
+	const end = Date.now() + 5000;
+	while (watch.continuing && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+	assert.equal(turns.length, 1);
+	assert.deepEqual(turns[0].map(entry => entry.id).slice(1), rest.map(entry => entry.id), "its work, from the reply that asked on");
+	watch.dispose();
+	fs.rmSync(agentDir, { recursive: true, force: true });
+});
