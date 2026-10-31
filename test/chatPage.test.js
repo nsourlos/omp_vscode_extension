@@ -235,6 +235,36 @@ test("Reject with note… sends a note and the command as changed, and needs one
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "reject_once", label: "Rejected with a note", note: "use rg" }, "an unchanged command is not sent as a change");
 });
 
+test("Reject with note… sends with Enter in the note (Shift+Enter: a new line), and with Cmd/Ctrl+Enter in the command", () => {
+	const chat = openChat();
+	const keydown = (target, init) => {
+		const event = new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true, ...init });
+		target.dispatchEvent(event);
+		return event.defaultPrevented;
+	};
+	const answers = () => chat.posted.filter(m => m.type === "respond");
+	const open = requestId => {
+		chat.deliver({ ...permission, requestId, toolCallId: `t${requestId}`, command: "make build" });
+		const ask = [...chat.log.querySelectorAll(".tool-ask")].at(-1);
+		[...ask.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
+		return ask.querySelectorAll(".reject-note textarea");
+	};
+
+	const [commandBox, note] = open("7");
+	note.value = "restart the container first";
+	assert.equal(keydown(note, { shiftKey: true }), false, "Shift+Enter: a new line");
+	assert.equal(keydown(note, { isComposing: true }), false, "Enter that confirms typed characters (Japanese, Chinese…) sends nothing");
+	assert.equal(keydown(commandBox, {}), false, "Enter in the command: a new line");
+	assert.equal(answers().length, 0);
+	assert.equal(keydown(note, {}), true);
+	assert.deepEqual(answers().at(-1), { type: "respond", requestId: "7", value: "reject_once", label: "Rejected with a note", note: "restart the container first" });
+
+	const [secondCommand] = open("8");
+	secondCommand.value = "make build-fast";
+	assert.equal(keydown(secondCommand, { metaKey: true }), true);
+	assert.equal(answers().at(-1).changedCommand, "make build-fast");
+});
+
 test("Reject with note… counts the read-only checkbox too", () => {
 	const chat = openChat();
 	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: ["cat"] });

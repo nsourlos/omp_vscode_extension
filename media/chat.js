@@ -1114,7 +1114,7 @@
 		form.appendChild(el("div", "field-description", "Note for omp:"));
 		const note = form.appendChild(el("textarea"));
 		note.rows = 2;
-		note.placeholder = "What should omp do instead?";
+		note.placeholder = "What should omp do instead? (Enter to send, Shift+Enter for a new line)";
 		const actions = form.appendChild(el("div", "buttons"));
 		const submit = actions.appendChild(el("button", "", "Reject and send"));
 		const cancel = actions.appendChild(el("button", "secondary", "Cancel"));
@@ -1145,8 +1145,17 @@
 			notRunning(toolCallId);
 		};
 		submit.addEventListener("click", send);
+		// The note sends with Enter (Shift+Enter: a new line), as the message input does; the command, often
+		// several lines, keeps Enter for a new line and sends with Cmd/Ctrl+Enter.
 		note.addEventListener("keydown", event => {
-			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) send();
+			if (event.isComposing || event.key !== "Enter" || (event.shiftKey && !event.metaKey && !event.ctrlKey)) return;
+			event.preventDefault();
+			send();
+		});
+		commandBox?.addEventListener("keydown", event => {
+			if (event.isComposing || event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+			event.preventDefault();
+			send();
 		});
 	}
 
