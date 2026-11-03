@@ -337,3 +337,39 @@ test("a read-only text tool's files are judged as paths; jq's filter and printf'
 	assert.deepEqual(readScope("jq '.[] | .name' data.json", folder, undefined, home), { inside: true, sensitive: false }, "the filter is no path");
 	assert.deepEqual(readScope("printf '/etc/%s' x; date +%F", folder, undefined, home), { inside: true, sensitive: false });
 });
+
+test("reading programs' ways of leaking the environment, shortened writing options, a recursive diff and a clock set by digits are caught", () => {
+	const readOnly = [
+		"ps aux | grep node",
+		"ps -ef",
+		"ps -o pid,user,etime -p 42",
+		"ps -C node -o pid=",
+		"sort --numeric-sort data.txt",
+		"date -d 20240101 +%F",
+		"date -r 1700000000",
+		"date +%Y%m%d",
+	];
+	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
+	const notReadOnly = [
+		"ps -E", // macOS: each program's environment
+		"ps -Eww -o command",
+		"ps e",
+		"ps auxe",
+		"ps aux eww",
+		"sort --out=src/app.ts src/app.ts", // GNU takes any unambiguous abbreviation
+		"sort --o=x a",
+		"sort --compress-prog=./x.sh -S1 big",
+		"date --se='2030-01-01'",
+		"date --fi=/etc/hosts",
+		"file --comp -m magic",
+		"date 0101000030",
+		"date 010100002030.59",
+	];
+	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
+
+	const home = path.join(os.tmpdir(), "omp-scope-home");
+	const folder = path.join(home, "project");
+	assert.equal(readScope("diff -rN ~ /tmp/empty", folder, undefined, home).sensitive, true, "a recursive diff of the home folder prints its secrets");
+	assert.equal(readScope("diff --recursive ~ /tmp/empty", folder, undefined, home).sensitive, true);
+	assert.equal(readScope("diff -u a.txt b.txt", folder, undefined, home).sensitive, false);
+});

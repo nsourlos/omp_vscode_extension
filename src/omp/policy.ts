@@ -258,7 +258,11 @@ export function readScope(command: string, folder: string, cwd?: string, home = 
 		if (!READ_ONLY_COMMANDS.has(name) || NO_PATH_ARGS.has(name)) continue;
 		// rg searches folders, as grep does with -r. With no path given, a part reads the folder it
 		// runs in (`ls`, `find`, `rg`), so that folder counts as read too.
-		const recursive = name === "rg" || (name === "grep" && args.some(arg => /^-[a-zA-Z]*[rR]/.test(arg) || /^--(recursive|dereference-recursive)$/.test(arg)));
+		// diff -r compares (and prints) whole folders.
+		const recursive =
+			name === "rg" ||
+			(name === "grep" && args.some(arg => /^-[a-zA-Z]*[rR]/.test(arg) || /^--(recursive|dereference-recursive)$/.test(arg))) ||
+			(name === "diff" && args.some(arg => (/^-[a-zA-Z]*r/.test(arg) && !arg.startsWith("--")) || isLongOption(arg, "--recursive")));
 		read(".", recursive);
 		// jq's first word is its filter (".[] | .name"), not a file, unless the filter comes from one (-f).
 		const filter = name === "jq" && !args.some(arg => arg === "-f" || arg === "--from-file") ? args.find(arg => !arg.startsWith("-")) : undefined;
@@ -285,11 +289,24 @@ function isReadOnlyPart([name, ...args]: string[]): boolean {
 }
 
 /** The ways a program on the read-only list writes a file, runs another program, or changes the system. */
+/**
+ * `arg` gives this long option: in full, with a value (`--output=x`), or shortened (`--out=x`), as
+ * GNU tools take any abbreviation that names only one of their options.
+ */
+function isLongOption(arg: string, option: string): boolean {
+	const given = arg.split("=")[0];
+	return given.length > 2 && option.startsWith(given) && given.startsWith(option.startsWith("--") ? "--" : "-");
+}
+
 function writesAnyway(name: string, args: string[]): boolean {
 	const named = args.filter(arg => !arg.startsWith("-") || arg === "-"); // files (and option values, to be safe)
 	const short = (letters: string) => args.some(arg => new RegExp(`^-[a-zA-Z]*[${letters}]`).test(arg) && !arg.startsWith("--"));
-	const long = (...options: string[]) => args.some(arg => options.some(option => arg === option || arg.startsWith(`${option}=`)));
+	const long = (...options: string[]) => args.some(arg => options.some(option => isLongOption(arg, option)));
+	/** Words that aren't the value of the option before them (`-o pid,user`, `-d yesterday`). */
+	const unlessValueOf = (takesValue: RegExp) => args.filter((arg, i) => i === 0 || !takesValue.test(args[i - 1]));
 	switch (name) {
+		case "ps": // -E (macOS) and the e flag (ps e, ps auxeww) print each program's environment, where tokens often are
+			return short("E") || unlessValueOf(/^-[a-zA-Z]*[oOpPuUgGtTCq]$/).some(arg => /^[a-zA-Z]*e[a-zA-Z]*$/.test(arg));
 		case "sort": // -o FILE writes it; a compress program is run
 			return short("o") || long("--output", "--compress-program");
 		case "uniq": // uniq IN OUT writes OUT
@@ -300,8 +317,8 @@ function writesAnyway(name: string, args: string[]): boolean {
 			return short("oR");
 		case "file": // -C compiles a magic file
 			return short("C") || long("--compile");
-		case "date": // -s sets the clock; -f reads a file and prints its lines back in its errors
-			return short("sf") || long("--set", "--file");
+		case "date": // -s, or a time given as digits (0101000030), sets the clock; -f reads a file and prints its lines back in its errors
+			return short("sf") || long("--set", "--file") || unlessValueOf(/^(-[a-zA-Z]*[drv]|--date|--reference)$/).some(arg => /^\d{4,12}(\.\d{2})?$/.test(arg));
 		case "hostname": // a name, or a file, sets it: only the read-only options
 			return args.some(arg => !/^-(s|f|d|i|I|a|A|-short|-fqdn|-long|-domain|-ip-address|-all-ip-addresses|-alias)$/.test(arg));
 		case "jq": // its env builtin prints the environment, where tokens often are
