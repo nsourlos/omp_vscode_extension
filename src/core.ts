@@ -28,6 +28,8 @@ export { applyDecisions, describeHunk, diffFile, splitLines } from "./review/hun
 export { RpcError } from "./acp/rpc";
 export { completeInFolder, gitStagePaths, mentionsIn, rankMentions, splitMentionQuery } from "./mentions";
 export { mergeChunk } from "./chatHistory";
+export { BackgroundWatch } from "./omp/background";
+export { SessionFileReader, SessionTracker, findSessionFile, ownTurnJobs, ownTurnStopReason, ownTurnUpdates } from "./omp/sessionLog";
 export { newTabState, readTabState, tabStateAfter, unsentFiles, unsentText } from "./tabState";
 export { chatsToShow, continuedIn, forgetDeleted, otherFolderChats } from "./savedChats";
 export {

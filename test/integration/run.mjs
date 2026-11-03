@@ -23,6 +23,8 @@ writeFileSync(
 
 const offline = process.argv[2] === "offline";
 const fakeLog = join(workspace, ".fake-omp.log");
+// Where the fake omp writes its chats' files, as omp does under ~/.omp/agent (the extension reads them for background work).
+const agentDir = offline ? mkdtempSync(join(tmpdir(), "omp-it-agent-")) : undefined;
 // The real suite drags files onto the chat through the window's DevTools protocol, on a free port.
 const cdpPort = offline
 	? undefined
@@ -50,7 +52,11 @@ try {
 		...(process.env.VSCODE_PATH ? { vscodeExecutablePath: process.env.VSCODE_PATH } : {}),
 		extensionDevelopmentPath: root,
 		extensionTestsPath: join(root, "test", "integration", offline ? "offline.js" : "suite.js"),
-		extensionTestsEnv: { OMP_FAKE_LOG: fakeLog, ...(cdpPort ? { OMP_CDP_PORT: String(cdpPort) } : {}) },
+		extensionTestsEnv: {
+			OMP_FAKE_LOG: fakeLog,
+			...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
+			...(cdpPort ? { OMP_CDP_PORT: String(cdpPort) } : {}),
+		},
 		launchArgs: [
 			workspace,
 			"--user-data-dir",

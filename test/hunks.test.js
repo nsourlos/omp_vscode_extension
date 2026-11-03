@@ -282,3 +282,94 @@ test("Windows paths are checked for secrets with / between their parts; elsewher
 	assert.equal(forMatching("C:\\Users\\me\\.ssh\\id_rsa", "\\"), "C:/Users/me/.ssh/id_rsa");
 	assert.equal(forMatching("odd\\name", "/"), "odd\\name");
 });
+
+test("omp's comment lines are skipped, and text tools that only read count as reading; their ways of writing don't", () => {
+	const fromChat = `# The Router ERROR lines carry hh:mm prefix. Extract properly:
+grep -a "Router:ERROR" /tmp/proxy_prev.txt | grep -aoE "^[0-9]{2}:[0-9]{2}" | cut -c1-4 | sort | uniq -c; echo; # what model groups did the timeouts hit?
+grep -a "Router:ERROR" /tmp/proxy_prev.txt | grep -aoE "model_group=[a-zA-Z0-9/.-]+" | sort | uniq -c`;
+	const readOnly = [
+		fromChat,
+		'grep "#include" a.c', // a # inside quotes is not a comment
+		"ls # rm -rf build", // nor run: it's a comment
+		"sort -n -k2 a.txt | uniq -c | sort -rn | head",
+		"cut -d, -f1 data.csv | tr 'a-z' 'A-Z' | nl",
+		"jq '.[] | .name' data.json",
+		"diff a.txt b.txt; cmp a.bin b.bin",
+		"stat a.txt; file a.bin; du -sh src; df -h; tree -L 2",
+		"xxd a.bin | head; od -c a.bin | head; strings a.bin | head",
+		"md5sum a.txt; shasum -a 256 a.txt",
+		"date +%F; whoami; uname -a; hostname; hostname -s; ps aux | grep node; seq 1 5; printf '%s\\n' a",
+		"basename a/b.txt; dirname a/b.txt; realpath a; readlink link; which node",
+		"tac log.txt | rev | fold -w 80 | column -t | paste - - | comm -12 a b",
+	];
+	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
+
+	const writes = [
+		"sort -o out.txt a.txt",
+		"sort --output=out.txt a.txt",
+		"sort -no out.txt a.txt",
+		"sort --compress-program=gzip a.txt",
+		"uniq in.txt out.txt",
+		"xxd a.bin out.hex",
+		"xxd -r a.hex",
+		"tree -o out.txt",
+		"tree -R -H .",
+		"file -C -m magic",
+		"date -s '2020-01-01'",
+		"date -f ~/.ssh/id_rsa",
+		"hostname newname",
+		"hostname -F name.txt",
+		"jq -n env",
+		"sort a | awk '{print $1}'",
+		"cut -f1 a | xargs rm",
+		"sort a | sed -n 1p",
+		"ls #\nrm x", // the line after a comment runs
+	];
+	for (const command of writes) assert.equal(isReadOnlyCommand(command), false, command);
+});
+
+test("a read-only text tool's files are judged as paths; jq's filter and printf's text are not", () => {
+	const folder = path.join(os.tmpdir(), "omp-scope-tools");
+	const home = path.join(os.tmpdir(), "omp-scope-home");
+	assert.deepEqual(readScope("sort data.csv | uniq -c", folder, undefined, home), { inside: true, sensitive: false });
+	assert.deepEqual(readScope("diff a.txt /etc/hosts", folder, undefined, home), { inside: false, sensitive: false });
+	assert.deepEqual(readScope("cut -f1 .env", folder, undefined, home), { inside: true, sensitive: true });
+	assert.deepEqual(readScope("jq '.[] | .name' data.json", folder, undefined, home), { inside: true, sensitive: false }, "the filter is no path");
+	assert.deepEqual(readScope("printf '/etc/%s' x; date +%F", folder, undefined, home), { inside: true, sensitive: false });
+});
+
+test("reading programs' ways of leaking the environment, shortened writing options, a recursive diff and a clock set by digits are caught", () => {
+	const readOnly = [
+		"ps aux | grep node",
+		"ps -ef",
+		"ps -o pid,user,etime -p 42",
+		"ps -C node -o pid=",
+		"sort --numeric-sort data.txt",
+		"date -d 20240101 +%F",
+		"date -r 1700000000",
+		"date +%Y%m%d",
+	];
+	for (const command of readOnly) assert.equal(isReadOnlyCommand(command), true, command);
+	const notReadOnly = [
+		"ps -E", // macOS: each program's environment
+		"ps -Eww -o command",
+		"ps e",
+		"ps auxe",
+		"ps aux eww",
+		"sort --out=src/app.ts src/app.ts", // GNU takes any unambiguous abbreviation
+		"sort --o=x a",
+		"sort --compress-prog=./x.sh -S1 big",
+		"date --se='2030-01-01'",
+		"date --fi=/etc/hosts",
+		"file --comp -m magic",
+		"date 0101000030",
+		"date 010100002030.59",
+	];
+	for (const command of notReadOnly) assert.equal(isReadOnlyCommand(command), false, command);
+
+	const home = path.join(os.tmpdir(), "omp-scope-home");
+	const folder = path.join(home, "project");
+	assert.equal(readScope("diff -rN ~ /tmp/empty", folder, undefined, home).sensitive, true, "a recursive diff of the home folder prints its secrets");
+	assert.equal(readScope("diff --recursive ~ /tmp/empty", folder, undefined, home).sensitive, true);
+	assert.equal(readScope("diff -u a.txt b.txt", folder, undefined, home).sensitive, false);
+});

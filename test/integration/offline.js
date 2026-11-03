@@ -1218,14 +1218,14 @@ exports.run = async function run() {
 
 				const outside = session.controller.send(steps({ permission: "ls /usr" }));
 				const outsideCard = await waitFor(() => cards()[0], "a card for reading outside the folder");
-				assert.deepEqual(outsideCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
-				respond(session.panel, outsideCard, outsideCard.options[1].optionId, "Always allow ls");
+				assert.deepEqual(outsideCard.options.map(o => o.name), ["Allow once", "Always allow reading", "Reject"]);
+				respond(session.panel, outsideCard, outsideCard.options[1].optionId, "Always allow reading");
 				await outside;
 				await session.controller.send(steps({ permission: "ls /var" }));
-				assert.equal(cards().length, 1, "ls is now allowed outside the folder too");
+				assert.equal(cards().length, 1, "reading is now allowed outside the folder too");
 
 				const secret = session.controller.send(steps({ permission: "ls ~/.ssh" }));
-				const secretCard = await waitFor(() => cards()[1], "a secret asks even with ls allowed");
+				const secretCard = await waitFor(() => cards()[1], "a secret asks even with reading allowed");
 				assert.deepEqual(secretCard.options.map(o => o.name), ["Allow once", "Reject"], "and can't be always allowed");
 				assert.match(secretCard.warning, /secret/);
 				respond(session.panel, secretCard, "reject_once", "Reject");
@@ -1253,7 +1253,7 @@ exports.run = async function run() {
 			await turn;
 		},
 
-		async "the checkbox on another command's card allows that command's read-only programs later, never the command itself"() {
+		async "the checkbox on another command's card allows reading later, never the command itself"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);
 			const cards = () => posts.filter(m => m.type === "permission");
@@ -1262,47 +1262,222 @@ exports.run = async function run() {
 
 			const kubectl = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api | head -5" }));
 			const card = await waitFor(() => cards()[0], "the card for a command that is not read-only");
-			assert.deepEqual(card.offerReadOnly, ["grep", "head"], "the checkbox names its read-only programs");
+			assert.equal(card.offerReadOnly, true, "the checkbox is offered");
 			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Reject", allowReadOnly: true });
 			await kubectl;
 			assert.equal(answered().at(-1).optionId, "reject_once", "the command's own answer is the one given");
 
 			await session.controller.send(steps({ permission: "grep -rn foo src | head" }));
-			assert.equal(cards().length, 1, "a later command of only those programs asks nothing");
-			assert.equal(answered().at(-1).optionId, "allow_once");
-
-			const ls = session.controller.send(steps({ permission: "ls -la" }));
-			const lsCard = await waitFor(() => cards()[1], "another read-only program still asks");
-			respond(session.panel, lsCard, "reject_once", "Reject");
-			await ls;
+			await session.controller.send(steps({ permission: "ls -la | sort | uniq -c" }));
+			assert.equal(cards().length, 1, "later commands that only read ask nothing, whichever reading programs they use");
+			assert.deepEqual(answered().slice(-2).map(outcome => outcome.optionId), ["allow_once", "allow_once"]);
 
 			const again = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api" }));
-			const asked = await waitFor(() => cards()[2], "the other command still asks");
-			assert.equal(asked.offerReadOnly, undefined, "grep is already allowed: nothing left to offer");
+			const asked = await waitFor(() => cards()[1], "the other command still asks");
+			assert.equal(asked.offerReadOnly, undefined, "reading is allowed already: nothing left to offer");
 			respond(session.panel, asked, "reject_once", "Reject");
 			await again;
 			session.panel.dispose();
 		},
 
-		async "Reject with note rejects the command, stops the turn and sends the note, with the command as changed, next"() {
+		async "Reject with note adds the note, with the command as changed, to the running turn, which carries on"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);
 			const logged = fakeLog().length;
-			const turn = session.controller.send(steps({ permission: "cd /repo && gh auth status 2>&1 | head -5" }, { untilCancelled: true }));
+			const turn = session.controller.send(steps({ permission: "cd /repo && gh auth status 2>&1 | head -5" }, { say: "Doing it the other way." }));
 			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
 			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a changed command", note: "no need to cd", changedCommand: "gh auth status" });
 			await turn;
-			const sent = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the note to reach omp");
 			const events = fakeLog().slice(logged).map(e => e.event).filter(event => event !== "session/new");
-			assert.deepEqual(events, ["prompt", "permission", "hang", "prompt", "text"], "rejected, stopped, then the note as the next message");
-			assert.equal(fakeLog().slice(logged).find(e => e.event === "permission").result.outcome.optionId, "reject_once", "omp is told the command was rejected");
+			assert.deepEqual(events, ["prompt", "steer", "permission"], "the note joins the turn before omp hears of the rejection, and nothing is stopped");
+			const steer = fakeLog().slice(logged).find(e => e.event === "steer");
+			assert.equal(steer.outcome, "injected");
 			assert.equal(
-				sent.text,
+				steer.text,
 				"I rejected this command, so it did not run:\n```\ncd /repo && gh auth status 2>&1 | head -5\n```\nRun this instead:\n```\ngh auth status\n```\nMy note: no need to cd\nDo what I ask here instead of what I rejected, then continue with the task.",
 			);
+			assert.equal(fakeLog().slice(logged).find(e => e.event === "permission").result.outcome.optionId, "reject_once", "omp is told the command was rejected");
+			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["end_turn"], "one turn, which went on");
+			assert.ok(posts.some(m => m.type === "user" && m.text === steer.text), "the note shows in the chat as the user's message");
+			session.panel.dispose();
+		},
+
+		async "an omp that can't take the note in the running turn gets it as the next message, after the turn stops"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const logged = fakeLog().length;
+			const turn = session.controller.send(steps({ noSteering: true }, { permission: "rm -rf build" }, { untilCancelled: true }));
+			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a note", note: "keep the build" });
+			await turn;
+			const sent = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the note to reach omp");
+			const events = fakeLog().slice(logged).map(e => e.event).filter(event => event !== "session/new");
+			assert.deepEqual(events, ["prompt", "steer", "permission", "hang", "prompt", "text"], "refused, then rejected, stopped, and the note as the next message");
+			assert.match(sent.text, /My note: keep the build/);
 			await waitFor(() => posts.filter(m => m.type === "turnEnd").length === 2, "the note's own turn to end");
-			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["cancelled", "end_turn"], "the turn that asked was stopped");
-			assert.ok(posts.some(m => m.type === "user" && m.text === sent.text), "the note shows in the chat as the user's message");
+			assert.deepEqual(posts.filter(m => m.type === "turnEnd").map(m => m.stopReason), ["cancelled", "end_turn"]);
+
+			// The same while omp runs a command in the background: the note still goes at once.
+			session.panel.setChatTitle("Note"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ background: { jobId: "bg_9", command: "sleep 600", after: 60_000 } }));
+			const before = fakeLog().length;
+			const cards = posts.filter(m => m.type === "permission").length;
+			// Sent now (as with "Send now"): messages otherwise wait for the background job.
+			const next = session.controller.send(steps({ noSteering: true }, { permission: "rm -rf dist" }, { untilCancelled: true }), [], true);
+			const second = await waitFor(() => posts.filter(m => m.type === "permission")[cards], "the second card");
+			session.panel.receive({ type: "respond", requestId: second.requestId, value: "reject_once", label: "Rejected with a note", note: "keep dist" });
+			await next;
+			const note = await waitFor(() => fakeLog().slice(before).find(e => e.event === "text"), "the note to reach omp despite the background job");
+			assert.match(note.text, /My note: keep dist/);
+			session.panel.dispose();
+		},
+
+		async "a rejection's note goes back in the input when omp exits before taking it"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			const notes = notificationsOf(session.panel);
+			const turn = session.controller.send(steps({ exitOnSteer: true }, { permission: "rm -rf build" }, { untilCancelled: true }));
+			const card = await waitFor(() => posts.find(m => m.type === "permission"), "the card");
+			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Rejected with a note", note: "keep the build" });
+			await turn;
+			const back = await waitFor(() => notes.find(m => m.type === "restoreInput"), "the note back in the input");
+			assert.match(back.text, /My note: keep the build/);
+			session.panel.dispose();
+		},
+
+		async "a message omp refuses while busy with work of its own is sent once omp is free; Stop ends the wait"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Busy omp"); // named: no "/rename" after a turn to use up a refusal
+			await session.controller.send(steps({ busyFor: 2 }));
+			let logged = fakeLog().length;
+			await session.controller.send(steps({ say: "got it" }));
+			assert.deepEqual(fakeLog().slice(logged).map(e => e.event), ["busy", "busy", "prompt"], "tried again until omp took it");
+			assert.equal(posts.filter(m => m.type === "notice" && /busy with work of its own/.test(m.text)).length, 1, "said once");
+			assert.equal(posts.filter(m => m.type === "turnEnd").at(-1).stopReason, "end_turn");
+			assert.ok(!posts.some(m => m.type === "notice" && m.level === "error"), "no error");
+
+			await session.controller.send(steps({ busyFor: 3 }));
+			const notes = notificationsOf(session.panel);
+			const waiting = session.controller.send(steps({ say: "never" }));
+			await waitFor(() => fakeLog().slice(logged).filter(e => e.event === "busy").length >= 3, "a refusal");
+			session.controller.cancel();
+			await waiting;
+			assert.ok(posts.some(m => m.type === "notice" && /Stopped while waiting for omp/.test(m.text)), "stopped while waiting");
+			assert.ok(notes.some(m => m.type === "restoreInput" && m.text === steps({ say: "never" })), "the message omp never got is back in the input");
+			assert.ok(posts.some(m => m.type === "notSent"), "and marked so in the chat");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work is not cancelled: only the wait ends");
+			logged = fakeLog().length;
+			await session.controller.send(steps({ say: "after" })); // the fake still refuses the rest
+			assert.equal(fakeLog().slice(logged).filter(e => e.event === "prompt").length, 1);
+			session.panel.dispose();
+		},
+
+		async "work omp moved to the background shows above the input; a message sent meanwhile waits, then follows what omp did by itself"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Background work"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ background: { jobId: "bg_1", command: "python eval.py", after: 2500, reply: "The eval passed." } }));
+			const running = posts.filter(m => m.type === "background").at(-1);
+			assert.deepEqual(running.jobs.map(job => [job.id, job.label]), [["bg_1", "python eval.py"]]);
+			assert.equal(running.continuing, false);
+			assert.ok(!posts.some(m => m.type === "backgroundTurn"), "the chat's first turn, which omp wrote to its file at once, is not taken for omp's own");
+
+			let logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "and then?", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "and then?"), "the message to wait in the queue");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "text"), "not sent while omp works in the background");
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "and then?"), "the message to go once omp is free");
+			const at = check => posts.findIndex(check);
+			const divider = at(m => m.type === "backgroundTurn");
+			const ownReply = at(m => m.type === "update" && m.update.content?.text === "The eval passed.");
+			const sent = at(m => m.type === "user" && m.text === "and then?");
+			assert.ok(divider !== -1 && divider < ownReply && ownReply < sent, "what omp did by itself comes first, then the message");
+			assert.deepEqual(posts[divider].jobs, ["python eval.py"]);
+			assert.deepEqual(posts.filter(m => m.type === "background").at(-1), { type: "background", jobs: [], continuing: false });
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "the message's turn to end");
+
+			// A message sent just as omp starts on a job's result waits for it, rather than going to an omp that refuses it.
+			await session.controller.send(steps({ background: { jobId: "bg_3", command: "make", after: 200, continueFor: 2500, reply: "Built." } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_3"), "omp to start on the job's result");
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "how did it go?", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "how did it go?"), "the message to wait in the queue");
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "how did it go?"), "the message to go once omp is done");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "busy"), "omp never had to refuse it");
+			const built = at(m => m.type === "update" && m.update.content?.text === "Built.");
+			assert.ok(built !== -1 && built < at(m => m.type === "user" && m.text === "how did it go?"), "omp's own work first");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "the message's turn to end");
+
+			// omp asks about a command while carrying on by itself: a note on its rejection stops nothing, and goes once omp is done.
+			const notes = notificationsOf(session.panel);
+			await session.controller.send(steps({ background: { jobId: "bg_4", command: "make", after: 200, askDuring: "rm -rf out" } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_4"), "omp to start on the job's result");
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "waiting one", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "waiting one"), "the message to wait in the queue");
+			const ask = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "rm -rf out"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask.requestId, value: "reject_once", label: "Rejected with a note", note: "keep out" });
+			const both = await waitFor(() => fakeLog().slice(logged).find(e => e.event === "text"), "the waiting message and the note, once omp is done");
+			assert.match(both.text, /^waiting one\n\n/);
+			assert.match(both.text, /My note: keep out/);
+			assert.deepEqual(fakeLog().slice(logged).find(e => e.event === "ownPermission").result, { outcome: { outcome: "selected", optionId: "reject_once" } });
+			assert.ok(!notes.some(m => m.type === "restoreInput"), "the waiting message stayed in the queue");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work was not stopped");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "their turn to end");
+
+			// The same while a message of the user's waits for omp's own work (omp refused it): still nothing is stopped.
+			await session.controller.send(steps({ background: { jobId: "bg_5", command: "make", after: 200, askDuring: "rm -rf tmp" } }));
+			await waitFor(() => fakeLog().some(e => e.event === "ownTurnStart" && e.jobId === "bg_5"), "omp to start on the job's result");
+			await waitFor(() => posts.filter(m => m.type === "background").at(-1)?.continuing === true, "the extension to see omp carry on");
+			logged = fakeLog().length;
+			const shown = posts.length;
+			const waitingTwo = session.controller.send("waiting two", [], true); // as Send now would
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "busy"), "omp to refuse it");
+			const ask2 = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "rm -rf tmp"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask2.requestId, value: "reject_once", label: "Rejected with a note", note: "keep tmp" });
+			await waitingTwo;
+			const texts = await waitFor(() => {
+				const sent = fakeLog().slice(logged).filter(e => e.event === "text").map(e => e.text);
+				return sent.length === 2 && sent;
+			}, "the waiting message, then the note");
+			assert.equal(texts[0], "waiting two");
+			assert.match(texts[1], /My note: keep tmp/);
+			assert.ok(!posts.slice(shown).some(m => m.type === "notSent"), "the waiting message was not thrown back");
+			assert.ok(!fakeLog().slice(logged).some(e => e.event === "idleCancel"), "omp's own work was not stopped");
+			await waitFor(() => posts.at(-1).type === "status" && posts.at(-1).state === "idle", "their turns to end");
+
+			// "Send now" doesn't wait for the background work.
+			await session.controller.send(steps({ background: { jobId: "bg_2", command: "sleep 600", after: 60_000 } }));
+			logged = fakeLog().length;
+			session.panel.receive({ type: "send", text: "right away", attachments: [] });
+			await waitFor(() => posts.some(m => m.type === "queued" && m.text === "right away"), "the message to wait in the queue");
+			session.panel.receive({ type: "sendNow" });
+			await waitFor(() => fakeLog().slice(logged).some(e => e.event === "text" && e.text === "right away"), "the message sent now");
+			session.panel.dispose();
+		},
+
+		async "a process omp started shows without holding messages; what omp does once it exits, or when woken by anything else, is shown"() {
+			const session = await newSession();
+			const posts = postsOf(session.panel);
+			session.panel.setChatTitle("Processes"); // named: no "/rename" after a turn
+			await session.controller.send(steps({ process: { name: "a-verify", command: "python3 verify.py", after: 2500, reply: "Verification reproduced." } }));
+			assert.deepEqual(posts.filter(m => m.type === "background").at(-1).jobs.map(job => [job.id, job.kind]), [["a-verify", "process"]]);
+			let logged = fakeLog().length;
+			await session.controller.send("meanwhile");
+			assert.ok(fakeLog().slice(logged).some(e => e.event === "text" && e.text === "meanwhile"), "not held back by a process");
+			await waitFor(() => posts.some(m => m.type === "update" && m.update.content?.text === "Verification reproduced."), "what omp did once the process exited");
+			assert.deepEqual(posts.find(m => m.type === "backgroundTurn").jobs, ["a-verify"]);
+			await waitFor(() => posts.filter(m => m.type === "background").at(-1).jobs.length === 0, "the process gone from the bar");
+
+			// Woken by something the extension isn't told of: its question shows, then, once it's done, its work.
+			logged = fakeLog().length;
+			await session.controller.send(steps({ wake: { after: 300, askDuring: "python3 compare.py", reply: "A verification complete." } }));
+			const ask = await waitFor(() => posts.find(m => m.type === "permission" && m.command === "python3 compare.py"), "omp's question");
+			session.panel.receive({ type: "respond", requestId: ask.requestId, value: "allow_once", label: "Allow once" });
+			await waitFor(() => posts.some(m => m.type === "update" && m.update.content?.text === "A verification complete."), "omp's work after it");
+			const ran = posts.find(m => m.type === "update" && m.update.sessionUpdate === "tool_call_update" && m.update.toolCallId === "own-wake");
+			assert.equal(ran.update.status, "completed", "the approved command's card is told it ran");
 			session.panel.dispose();
 		},
 
@@ -1378,7 +1553,7 @@ exports.run = async function run() {
 		},
 
 		// Last but one: it leaves ls, cd, grep and head auto-allowed in session 1, which no later test expects.
-		async "\"Always allow\" on a read-only command allows only its programs, only while they read, for this chat only"() {
+		async "\"Always allow reading\" on a read-only command allows commands that only read, anywhere, for this chat only"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);
 			const cards = () => posts.slice(seen).filter(m => m.type === "permission");
@@ -1389,34 +1564,29 @@ exports.run = async function run() {
 			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
 			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
 			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way");
-			assert.equal(writeCard.offerReadOnly, undefined, "and no read-only program in it to allow");
+			assert.equal(writeCard.offerReadOnly, undefined, "and nothing in it that only reads");
 			respond(panel, writeCard, "reject_once", "Reject");
 			await writeCommand;
 
 			const first = controller.send(steps({ permission: "ls -la" }));
 			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
-			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow reading", "Reject"]);
 			assert.equal(readCard.offerReadOnly, undefined, "a button rather than the checkbox");
-			respond(panel, readCard, readCard.options[1].optionId, "Always allow ls");
+			respond(panel, readCard, readCard.options[1].optionId, "Always allow reading");
 			await first;
 			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");
 
-			await controller.send(steps({ permission: "ls src" }));
-			assert.equal(cards().length, 2, "a later ls asks nothing");
-			assert.deepEqual(posts.slice(seen).find(m => m.type === "autoAllowed")?.names, ["ls"], "and its row says why");
+			await controller.send(steps({ permission: "# count them\nsort -n data.txt | uniq -c | head" }));
+			await controller.send(steps({ permission: "cat /tmp/proxy.log | cut -c1-4" }));
+			assert.equal(cards().length, 2, "later commands that only read ask nothing, with other programs, a comment, or outside the folder");
+			assert.equal(posts.slice(seen).find(m => m.type === "autoAllowed")?.inFolder, false, "and their row says why");
 
-			const mixed = controller.send(steps({ permission: "cd src && ls | head" }));
-			const mixedCard = await waitFor(() => cards()[2], "a command with other read-only programs still asks");
-			assert.deepEqual(mixedCard.options.map(o => o.name), ["Allow once", "Always allow cd, head", "Reject"], "offering only the ones not allowed yet");
-			respond(panel, mixedCard, mixedCard.options[1].optionId, "Always allow cd, head");
-			await mixed;
-			await controller.send(steps({ permission: "cd lib; head -3 a.txt | ls" }));
-			assert.equal(cards().length, 3, "now allowed together");
-
-			const write = controller.send(steps({ permission: "ls > notes.md" }));
-			const asked = await waitFor(() => cards()[3], "an allowed program used to write still asks");
-			respond(panel, asked, "reject_once", "Reject");
-			await write;
+			for (const command of ["ls > notes.md", "sort -o out.txt data.txt", "cat .env"]) {
+				const asking = controller.send(steps({ permission: command }));
+				const asked = await waitFor(() => cards().find(card => card.command === command), `${command} still asks`);
+				respond(panel, asked, "reject_once", "Reject");
+				await asking;
+			}
 
 			const second = await newSession();
 			const secondPosts = postsOf(second.panel);
