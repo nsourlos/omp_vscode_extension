@@ -267,7 +267,7 @@ test("Reject with note… sends with Enter in the note (Shift+Enter: a new line)
 
 test("Reject with note… counts the read-only checkbox too", () => {
 	const chat = openChat();
-	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: ["cat"] });
+	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: true });
 	const ask = chat.log.querySelector(".tool-ask");
 	ask.querySelector(".always-read-only input").checked = true;
 	[...ask.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
@@ -277,7 +277,7 @@ test("Reject with note… counts the read-only checkbox too", () => {
 		type: "respond",
 		requestId: "7",
 		value: "reject_once",
-		label: "Rejected with a note · cat allowed from now on",
+		label: "Rejected with a note · reading allowed from now on",
 		note: "don't pipe into sh",
 		allowReadOnly: true,
 	});
@@ -285,9 +285,9 @@ test("Reject with note… counts the read-only checkbox too", () => {
 
 test("a command that is not read-only offers a checkbox for later read-only commands, sent with the answer", () => {
 	const chat = openChat();
-	chat.deliver({ ...permission, command: "kubectl get pods | grep api | head", offerReadOnly: ["grep", "head"] });
+	chat.deliver({ ...permission, command: "kubectl get pods | grep api | head", offerReadOnly: true });
 	const ask = chat.log.querySelector(".tool-ask");
-	assert.equal(ask.querySelector(".always-read-only").textContent, " From now on, allow grep, head without asking in this chat", "names the programs it allows");
+	assert.equal(ask.querySelector(".always-read-only").textContent, " From now on, allow commands that only read without asking in this chat");
 	const box = ask.querySelector(".always-read-only input");
 	assert.equal(box.checked, false, "off until ticked");
 	box.checked = true;
@@ -296,7 +296,7 @@ test("a command that is not read-only offers a checkbox for later read-only comm
 		type: "respond",
 		requestId: "7",
 		value: "reject_once",
-		label: "Reject · grep, head allowed from now on",
+		label: "Reject · reading allowed from now on",
 		allowReadOnly: true,
 	});
 	assert.equal(box.disabled, true);

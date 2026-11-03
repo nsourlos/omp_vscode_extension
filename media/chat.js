@@ -1049,14 +1049,13 @@
 		for (const path of msg.locations || []) node.appendChild(el("div", "location", path));
 		addWarning(node, msg.warning);
 		let readOnlyBox = null;
-		const toAllow = Array.isArray(msg.offerReadOnly) ? msg.offerReadOnly.join(", ") : "";
-		if (toAllow) {
-			// Not a button: this command is not read-only, so it still needs its own answer.
+		if (msg.offerReadOnly) {
+			// Not a button: this command doesn't only read, so it still needs its own answer.
 			const label = node.appendChild(el("label", "choice always-read-only"));
 			readOnlyBox = label.appendChild(el("input"));
 			readOnlyBox.type = "checkbox";
-			label.appendChild(document.createTextNode(` From now on, allow ${toAllow} without asking in this chat`));
-			label.title = `Later commands made only of these programs run without asking, when they only read. Anything else, this command included, still asks.`;
+			label.appendChild(document.createTextNode(" From now on, allow commands that only read without asking in this chat"));
+			label.title = "Later commands that only read run without asking, in any folder. One that writes or changes files, runs another program, or reads a secret, this command included, still asks.";
 		}
 		const buttons = node.appendChild(el("div", "buttons"));
 		for (const option of msg.options || []) {
@@ -1064,7 +1063,7 @@
 			const hint = option.description || OPTION_HINTS[option.kind];
 			if (hint) button.title = hint;
 			button.addEventListener("click", () => {
-				if (readOnlyBox?.checked) respond(msg.requestId, option.optionId, `${option.name} · ${toAllow} allowed from now on`, { allowReadOnly: true });
+				if (readOnlyBox?.checked) respond(msg.requestId, option.optionId, `${option.name} · reading allowed from now on`, { allowReadOnly: true });
 				else respond(msg.requestId, option.optionId, option.name);
 				if (!option.kind.startsWith("allow")) notRunning(id); // a rejected tool never runs, and omp may not say so
 			});
@@ -1139,7 +1138,7 @@
 			// The checkbox counts whatever the answer, as with the other buttons.
 			const allowed = readOnlyBox?.checked ? { allowReadOnly: true } : {};
 			const label = changed ? "Rejected with a changed command" : "Rejected with a note";
-			respond(msg.requestId, reject.optionId, readOnlyBox?.checked ? `${label} · ${msg.offerReadOnly.join(", ")} allowed from now on` : label, {
+			respond(msg.requestId, reject.optionId, readOnlyBox?.checked ? `${label} · reading allowed from now on` : label, {
 				note: text,
 				changedCommand: changed || undefined,
 				...allowed,
@@ -1168,8 +1167,7 @@
 
 	function onAutoAllowed(msg) {
 		const tool = tools.get(msg.toolCallId);
-		const names = Array.isArray(msg.names) && msg.names.length ? msg.names.join(", ") : "read-only commands";
-		const why = msg.inFolder ? "it only reads inside this folder" : `you always allow ${names} in this chat`;
+		const why = msg.inFolder ? "it only reads inside this folder" : "you always allow reading in this chat";
 		if (tool) tool.card.insertBefore(el("div", "tool-note", `Allowed automatically: ${why}`), tool.details);
 	}
 

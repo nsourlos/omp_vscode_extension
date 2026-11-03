@@ -1218,14 +1218,14 @@ exports.run = async function run() {
 
 				const outside = session.controller.send(steps({ permission: "ls /usr" }));
 				const outsideCard = await waitFor(() => cards()[0], "a card for reading outside the folder");
-				assert.deepEqual(outsideCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
-				respond(session.panel, outsideCard, outsideCard.options[1].optionId, "Always allow ls");
+				assert.deepEqual(outsideCard.options.map(o => o.name), ["Allow once", "Always allow reading", "Reject"]);
+				respond(session.panel, outsideCard, outsideCard.options[1].optionId, "Always allow reading");
 				await outside;
 				await session.controller.send(steps({ permission: "ls /var" }));
-				assert.equal(cards().length, 1, "ls is now allowed outside the folder too");
+				assert.equal(cards().length, 1, "reading is now allowed outside the folder too");
 
 				const secret = session.controller.send(steps({ permission: "ls ~/.ssh" }));
-				const secretCard = await waitFor(() => cards()[1], "a secret asks even with ls allowed");
+				const secretCard = await waitFor(() => cards()[1], "a secret asks even with reading allowed");
 				assert.deepEqual(secretCard.options.map(o => o.name), ["Allow once", "Reject"], "and can't be always allowed");
 				assert.match(secretCard.warning, /secret/);
 				respond(session.panel, secretCard, "reject_once", "Reject");
@@ -1253,7 +1253,7 @@ exports.run = async function run() {
 			await turn;
 		},
 
-		async "the checkbox on another command's card allows that command's read-only programs later, never the command itself"() {
+		async "the checkbox on another command's card allows reading later, never the command itself"() {
 			const session = await newSession();
 			const posts = postsOf(session.panel);
 			const cards = () => posts.filter(m => m.type === "permission");
@@ -1262,23 +1262,19 @@ exports.run = async function run() {
 
 			const kubectl = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api | head -5" }));
 			const card = await waitFor(() => cards()[0], "the card for a command that is not read-only");
-			assert.deepEqual(card.offerReadOnly, ["grep", "head"], "the checkbox names its read-only programs");
+			assert.equal(card.offerReadOnly, true, "the checkbox is offered");
 			session.panel.receive({ type: "respond", requestId: card.requestId, value: "reject_once", label: "Reject", allowReadOnly: true });
 			await kubectl;
 			assert.equal(answered().at(-1).optionId, "reject_once", "the command's own answer is the one given");
 
 			await session.controller.send(steps({ permission: "grep -rn foo src | head" }));
-			assert.equal(cards().length, 1, "a later command of only those programs asks nothing");
-			assert.equal(answered().at(-1).optionId, "allow_once");
-
-			const ls = session.controller.send(steps({ permission: "ls -la" }));
-			const lsCard = await waitFor(() => cards()[1], "another read-only program still asks");
-			respond(session.panel, lsCard, "reject_once", "Reject");
-			await ls;
+			await session.controller.send(steps({ permission: "ls -la | sort | uniq -c" }));
+			assert.equal(cards().length, 1, "later commands that only read ask nothing, whichever reading programs they use");
+			assert.deepEqual(answered().slice(-2).map(outcome => outcome.optionId), ["allow_once", "allow_once"]);
 
 			const again = session.controller.send(steps({ permission: "kubectl -n dev get pods | grep api" }));
-			const asked = await waitFor(() => cards()[2], "the other command still asks");
-			assert.equal(asked.offerReadOnly, undefined, "grep is already allowed: nothing left to offer");
+			const asked = await waitFor(() => cards()[1], "the other command still asks");
+			assert.equal(asked.offerReadOnly, undefined, "reading is allowed already: nothing left to offer");
 			respond(session.panel, asked, "reject_once", "Reject");
 			await again;
 			session.panel.dispose();
@@ -1557,7 +1553,7 @@ exports.run = async function run() {
 		},
 
 		// Last but one: it leaves ls, cd, grep and head auto-allowed in session 1, which no later test expects.
-		async "\"Always allow\" on a read-only command allows only its programs, only while they read, for this chat only"() {
+		async "\"Always allow reading\" on a read-only command allows commands that only read, anywhere, for this chat only"() {
 			const panel = api.sessions.all[0].panel;
 			const posts = postsOf(panel);
 			const cards = () => posts.slice(seen).filter(m => m.type === "permission");
@@ -1568,34 +1564,29 @@ exports.run = async function run() {
 			const writeCommand = controller.send(steps({ permission: "rm -rf build" }));
 			const writeCard = await waitFor(() => cards()[0], "the card for a command that writes");
 			assert.deepEqual(writeCard.options.map(o => o.name), ["Allow once", "Reject"], "no 'always' for every command either way");
-			assert.equal(writeCard.offerReadOnly, undefined, "and no read-only program in it to allow");
+			assert.equal(writeCard.offerReadOnly, undefined, "and nothing in it that only reads");
 			respond(panel, writeCard, "reject_once", "Reject");
 			await writeCommand;
 
 			const first = controller.send(steps({ permission: "ls -la" }));
 			const readCard = await waitFor(() => cards()[1], "the card for a read-only command");
-			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow ls", "Reject"]);
+			assert.deepEqual(readCard.options.map(o => o.name), ["Allow once", "Always allow reading", "Reject"]);
 			assert.equal(readCard.offerReadOnly, undefined, "a button rather than the checkbox");
-			respond(panel, readCard, readCard.options[1].optionId, "Always allow ls");
+			respond(panel, readCard, readCard.options[1].optionId, "Always allow reading");
 			await first;
 			assert.equal(answered().at(-1), "allow_once", "omp is only ever told 'allow once'");
 
-			await controller.send(steps({ permission: "ls src" }));
-			assert.equal(cards().length, 2, "a later ls asks nothing");
-			assert.deepEqual(posts.slice(seen).find(m => m.type === "autoAllowed")?.names, ["ls"], "and its row says why");
+			await controller.send(steps({ permission: "# count them\nsort -n data.txt | uniq -c | head" }));
+			await controller.send(steps({ permission: "cat /tmp/proxy.log | cut -c1-4" }));
+			assert.equal(cards().length, 2, "later commands that only read ask nothing, with other programs, a comment, or outside the folder");
+			assert.equal(posts.slice(seen).find(m => m.type === "autoAllowed")?.inFolder, false, "and their row says why");
 
-			const mixed = controller.send(steps({ permission: "cd src && ls | head" }));
-			const mixedCard = await waitFor(() => cards()[2], "a command with other read-only programs still asks");
-			assert.deepEqual(mixedCard.options.map(o => o.name), ["Allow once", "Always allow cd, head", "Reject"], "offering only the ones not allowed yet");
-			respond(panel, mixedCard, mixedCard.options[1].optionId, "Always allow cd, head");
-			await mixed;
-			await controller.send(steps({ permission: "cd lib; head -3 a.txt | ls" }));
-			assert.equal(cards().length, 3, "now allowed together");
-
-			const write = controller.send(steps({ permission: "ls > notes.md" }));
-			const asked = await waitFor(() => cards()[3], "an allowed program used to write still asks");
-			respond(panel, asked, "reject_once", "Reject");
-			await write;
+			for (const command of ["ls > notes.md", "sort -o out.txt data.txt", "cat .env"]) {
+				const asking = controller.send(steps({ permission: command }));
+				const asked = await waitFor(() => cards().find(card => card.command === command), `${command} still asks`);
+				respond(panel, asked, "reject_once", "Reject");
+				await asking;
+			}
 
 			const second = await newSession();
 			const secondPosts = postsOf(second.panel);

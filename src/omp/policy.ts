@@ -42,7 +42,15 @@ export function fileChangeWarning(command: string): string | undefined {
  * with its `cwd` option, or a `cd` before it in the command), and a planted repository's settings
  * (core.fsmonitor, diff.external) run programs.
  */
-const READ_ONLY_COMMANDS = new Set(["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "echo"]);
+const READ_ONLY_COMMANDS = new Set([
+	...["cd", "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "echo"],
+	// Text tools: read files (or the pipe) and write only to the screen, except as WRITES_ANYWAY says.
+	...["cut", "sort", "uniq", "tr", "nl", "rev", "tac", "paste", "column", "comm", "join", "fold", "strings", "od", "hexdump", "xxd", "jq"],
+	...["diff", "cmp", "stat", "file", "du", "df", "tree", "basename", "dirname", "realpath", "readlink", "which", "md5sum", "shasum", "sha256sum"],
+	...["date", "whoami", "uname", "hostname", "ps", "pgrep", "seq", "printf"],
+]);
+/** Programs whose arguments name no file they read: not judged as paths (see readScope). */
+const NO_PATH_ARGS = new Set(["echo", "pwd", "printf", "seq", "date", "whoami", "uname", "hostname", "ps", "pgrep", "tr", "which"]);
 /** Options that make an otherwise read-only command write files or run another program. */
 const WRITING_FLAGS = /^(-exec|-execdir|-ok|-okdir|-delete|-fprint\w*|-fls)$/;
 /** ripgrep options that start other programs: a preprocessor, a hostname helper, decompressors (-z). */
@@ -88,6 +96,12 @@ function splitCommand(command: string): string[][] | undefined {
 		if (quote === "'") {
 			if (c === "'") quote = undefined;
 			else addToWord(c);
+			continue;
+		}
+		// A comment, as bash reads one: from a # that starts a word to the end of the line (omp's notes to itself).
+		if (c === "#" && quote === undefined && !inWord) {
+			const end = command.indexOf("\n", i);
+			i = (end === -1 ? command.length : end) - 1;
 			continue;
 		}
 		// Command substitution runs another command; a variable's value (even ${IFS}) is not known here.
@@ -241,12 +255,15 @@ export function readScope(command: string, folder: string, cwd?: string, home = 
 			dir = target === "-" ? undefined : pathOf(target);
 			continue;
 		}
-		if (!READ_ONLY_COMMANDS.has(name) || name === "echo" || name === "pwd") continue;
+		if (!READ_ONLY_COMMANDS.has(name) || NO_PATH_ARGS.has(name)) continue;
 		// rg searches folders, as grep does with -r. With no path given, a part reads the folder it
 		// runs in (`ls`, `find`, `rg`), so that folder counts as read too.
 		const recursive = name === "rg" || (name === "grep" && args.some(arg => /^-[a-zA-Z]*[rR]/.test(arg) || /^--(recursive|dereference-recursive)$/.test(arg)));
 		read(".", recursive);
+		// jq's first word is its filter (".[] | .name"), not a file, unless the filter comes from one (-f).
+		const filter = name === "jq" && !args.some(arg => arg === "-f" || arg === "--from-file") ? args.find(arg => !arg.startsWith("-")) : undefined;
 		for (const arg of args) {
+			if (arg === filter) continue;
 			if (followsLinks(name, arg)) inside = false;
 			if (!arg.startsWith("-")) read(arg, recursive);
 			else if (arg.includes("=")) read(arg.slice(arg.indexOf("=") + 1), recursive);
@@ -263,7 +280,35 @@ export function readScope(command: string, folder: string, cwd?: string, home = 
 function isReadOnlyPart([name, ...args]: string[]): boolean {
 	if (!READ_ONLY_COMMANDS.has(name)) return false; // also rules out "VAR=x cmd" and paths to programs
 	if (name === "rg" && args.some(arg => RG_RUNS_PROGRAMS.test(arg))) return false;
-	return !args.some(arg => WRITING_FLAGS.test(arg));
+	if (args.some(arg => WRITING_FLAGS.test(arg))) return false;
+	return !writesAnyway(name, args);
+}
+
+/** The ways a program on the read-only list writes a file, runs another program, or changes the system. */
+function writesAnyway(name: string, args: string[]): boolean {
+	const named = args.filter(arg => !arg.startsWith("-") || arg === "-"); // files (and option values, to be safe)
+	const short = (letters: string) => args.some(arg => new RegExp(`^-[a-zA-Z]*[${letters}]`).test(arg) && !arg.startsWith("--"));
+	const long = (...options: string[]) => args.some(arg => options.some(option => arg === option || arg.startsWith(`${option}=`)));
+	switch (name) {
+		case "sort": // -o FILE writes it; a compress program is run
+			return short("o") || long("--output", "--compress-program");
+		case "uniq": // uniq IN OUT writes OUT
+			return named.length > 1;
+		case "xxd": // xxd IN OUT writes OUT; -r turns a dump back into a file
+			return named.length > 1 || short("r") || long("-revert");
+		case "tree": // -o FILE writes it; -R writes a file in every folder
+			return short("oR");
+		case "file": // -C compiles a magic file
+			return short("C") || long("--compile");
+		case "date": // -s sets the clock; -f reads a file and prints its lines back in its errors
+			return short("sf") || long("--set", "--file");
+		case "hostname": // a name, or a file, sets it: only the read-only options
+			return args.some(arg => !/^-(s|f|d|i|I|a|A|-short|-fqdn|-long|-domain|-ip-address|-all-ip-addresses|-alias)$/.test(arg));
+		case "jq": // its env builtin prints the environment, where tokens often are
+			return args.some(arg => /\benv\b|\$ENV/.test(arg));
+		default:
+			return false;
+	}
 }
 
 /**

@@ -59,7 +59,7 @@ import type { ReviewManager } from "./review/reviewManager";
 interface PendingRequest {
 	resolve: (value: any) => void;
 	cancelValue: unknown;
-	/** A command's card: allows its read-only programs from now on (the checkbox). */
+	/** A command's card: allows reading from now on (the checkbox). */
 	allowReadOnly?: () => void;
 	/**
 	 * A permission's card: sends the note given with "Reject with note…", and the command as changed
@@ -105,8 +105,11 @@ export class Controller implements vscode.Disposable {
 	/** Counts the user's turns, so a late answer can tell whether the turn it was about still runs. */
 	#turnCount = 0;
 	#stopRequested = false;
-	/** The read-only programs (cd, grep…) the user chose to always allow; for as long as this chat tab is open. */
-	#allowedReadOnly = new Set<string>();
+	/**
+	 * The user chose "Always allow reading": a command that only reads (see commandParts) runs without asking,
+	 * in any folder, for as long as this chat tab is open. A secret still asks.
+	 */
+	#allowReading = false;
 	#namingAttempts = 0;
 	/** The omp session whose conversation the chat already shows, so loading it again replays nothing. */
 	#shownSessionId: string | undefined;
@@ -1102,34 +1105,34 @@ export class Controller implements vscode.Disposable {
 		if (readOnly && !sensitive) {
 			const config = vscode.workspace.getConfiguration("omp");
 			const inFolder = scope?.inside === true && config.get<boolean>("autoAllowReadsInFolder", true);
-			if (inFolder || parts.every(part => this.#allowedReadOnly.has(part.name))) {
-				const names = [...new Set(parts.map(part => part.name))];
+			if (inFolder || this.#allowReading) {
 				this.log(`auto-allowed a read-only command${inFolder ? " inside the folder" : ""}: ${command}`);
-				this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId, names, inFolder });
+				this.chat.post({ type: "autoAllowed", toolCallId: params.toolCall.toolCallId, inFolder });
 				return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
 			}
 		}
-		// The read-only programs in this command not allowed yet, which "always allow" would add.
-		const toAllow = [...new Set((parts ?? []).filter(part => part.readOnly && !this.#allowedReadOnly.has(part.name)).map(part => part.name))];
-		const allowThem = () => {
-			for (const name of toAllow) this.#allowedReadOnly.add(name);
+		// "Always allow reading" is offered until chosen, on a command with a part that only reads.
+		const offerReading = !this.#allowReading && (parts ?? []).some(part => part.readOnly);
+		const allowReading = () => {
+			this.#allowReading = true;
 		};
 
 		// omp's own "always" answers cover every later shell command in the session: "always allow"
 		// would let writes through and "always reject" would silently refuse even `ls`. Neither is
-		// offered for commands. Instead, "always" covers the read-only programs this command runs: a
-		// button on a read-only command, and on any other a checkbox that leaves this one's answer to the user.
+		// offered for commands. Instead, "always" covers commands that only read: a button on such a
+		// command, and on any other a checkbox that leaves this one's answer to the user.
 		const options: (PermissionOption & { description?: string })[] = [];
 		for (const option of params.options) {
 			if (command !== undefined && (option.kind === "allow_always" || option.kind === "reject_always")) continue;
 			options.push(option);
 			// Not on a command that reads a secret: those ask every time.
-			if (readOnly && !sensitive && toAllow.length > 0 && option === allowOnce) {
+			if (readOnly && !sensitive && offerReading && option === allowOnce) {
 				options.push({
 					optionId: ALLOW_READ_ONLY,
-					name: `Always allow ${toAllow.join(", ")}`,
+					name: "Always allow reading",
 					kind: "allow_always",
-					description: `Allow this, and later commands in this chat made only of ${[...this.#allowedReadOnly, ...toAllow].join(", ")}, when they only read, in any folder. Any other program, an option that writes or runs one, or a secret (.env, keys, ~/.ssh, …) still asks.`,
+					description:
+						"Allow this, and from now on in this chat any command that only reads, in any folder. A command that writes or changes files, runs another program, or reads a secret (.env, keys, ~/.ssh, …) still asks.",
 				});
 			}
 		}
@@ -1149,12 +1152,12 @@ export class Controller implements vscode.Disposable {
 						: undefined,
 				locations: params.toolCall.locations?.map(l => l.path),
 				options,
-				// The checkbox: the read-only programs to allow from now on, whatever this command's answer.
-				offerReadOnly: !readOnly && toAllow.length > 0 ? toAllow : undefined,
+				// The checkbox: allow reading from now on, whatever this command's answer.
+				offerReadOnly: !readOnly && offerReading ? true : undefined,
 			},
 			undefined,
 			{
-				allowReadOnly: allowThem,
+				allowReadOnly: allowReading,
 				// omp tells the model only "rejected by user". The note is added to the running turn first, so the
 				// model reads it with the rejection and carries on. If omp can't take it there (an omp without
 				// steering, or the turn has ended), the turn stops and the note follows as the next message.
@@ -1199,7 +1202,7 @@ export class Controller implements vscode.Disposable {
 			},
 		);
 		if (optionId === ALLOW_READ_ONLY) {
-			allowThem();
+			allowReading();
 			return { outcome: { outcome: "selected", optionId: allowOnce!.optionId } };
 		}
 		return optionId ? { outcome: { outcome: "selected", optionId } } : { outcome: { outcome: "cancelled" } };
