@@ -17,6 +17,7 @@ const BODY = `<div id="question-bar" hidden>
 </div>
 <div id="log"></div>
 <div id="activity" hidden></div>
+<div id="background" hidden></div>
 <div id="queue"></div>
 <footer>
   <div id="settings"></div>
@@ -234,9 +235,39 @@ test("Reject with note… sends a note and the command as changed, and needs one
 	assert.deepEqual(chat.posted.at(-1), { type: "respond", requestId: "8", value: "reject_once", label: "Rejected with a note", note: "use rg" }, "an unchanged command is not sent as a change");
 });
 
+test("Reject with note… sends with Enter in the note (Shift+Enter: a new line), and with Cmd/Ctrl+Enter in the command", () => {
+	const chat = openChat();
+	const keydown = (target, init) => {
+		const event = new chat.window.KeyboardEvent("keydown", { key: "Enter", cancelable: true, ...init });
+		target.dispatchEvent(event);
+		return event.defaultPrevented;
+	};
+	const answers = () => chat.posted.filter(m => m.type === "respond");
+	const open = requestId => {
+		chat.deliver({ ...permission, requestId, toolCallId: `t${requestId}`, command: "make build" });
+		const ask = [...chat.log.querySelectorAll(".tool-ask")].at(-1);
+		[...ask.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
+		return ask.querySelectorAll(".reject-note textarea");
+	};
+
+	const [commandBox, note] = open("7");
+	note.value = "restart the container first";
+	assert.equal(keydown(note, { shiftKey: true }), false, "Shift+Enter: a new line");
+	assert.equal(keydown(note, { isComposing: true }), false, "Enter that confirms typed characters (Japanese, Chinese…) sends nothing");
+	assert.equal(keydown(commandBox, {}), false, "Enter in the command: a new line");
+	assert.equal(answers().length, 0);
+	assert.equal(keydown(note, {}), true);
+	assert.deepEqual(answers().at(-1), { type: "respond", requestId: "7", value: "reject_once", label: "Rejected with a note", note: "restart the container first" });
+
+	const [secondCommand] = open("8");
+	secondCommand.value = "make build-fast";
+	assert.equal(keydown(secondCommand, { metaKey: true }), true);
+	assert.equal(answers().at(-1).changedCommand, "make build-fast");
+});
+
 test("Reject with note… counts the read-only checkbox too", () => {
 	const chat = openChat();
-	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: ["cat"] });
+	chat.deliver({ ...permission, command: "cat a | sh", offerReadOnly: true });
 	const ask = chat.log.querySelector(".tool-ask");
 	ask.querySelector(".always-read-only input").checked = true;
 	[...ask.querySelectorAll(".buttons button")].find(button => button.textContent === "Reject with note…").click();
@@ -246,7 +277,7 @@ test("Reject with note… counts the read-only checkbox too", () => {
 		type: "respond",
 		requestId: "7",
 		value: "reject_once",
-		label: "Rejected with a note · cat allowed from now on",
+		label: "Rejected with a note · reading allowed from now on",
 		note: "don't pipe into sh",
 		allowReadOnly: true,
 	});
@@ -254,9 +285,9 @@ test("Reject with note… counts the read-only checkbox too", () => {
 
 test("a command that is not read-only offers a checkbox for later read-only commands, sent with the answer", () => {
 	const chat = openChat();
-	chat.deliver({ ...permission, command: "kubectl get pods | grep api | head", offerReadOnly: ["grep", "head"] });
+	chat.deliver({ ...permission, command: "kubectl get pods | grep api | head", offerReadOnly: true });
 	const ask = chat.log.querySelector(".tool-ask");
-	assert.equal(ask.querySelector(".always-read-only").textContent, " From now on, allow grep, head without asking in this chat", "names the programs it allows");
+	assert.equal(ask.querySelector(".always-read-only").textContent, " From now on, allow commands that only read without asking in this chat");
 	const box = ask.querySelector(".always-read-only input");
 	assert.equal(box.checked, false, "off until ticked");
 	box.checked = true;
@@ -265,7 +296,7 @@ test("a command that is not read-only offers a checkbox for later read-only comm
 		type: "respond",
 		requestId: "7",
 		value: "reject_once",
-		label: "Reject · grep, head allowed from now on",
+		label: "Reject · reading allowed from now on",
 		allowReadOnly: true,
 	});
 	assert.equal(box.disabled, true);
@@ -1508,4 +1539,98 @@ test("unsent text put back in a restored tab doesn't take the keyboard; text put
 	assert.notEqual(doc.activeElement, input);
 	chat.deliver({ type: "restoreInput", text: "queued", attachments: [] });
 	assert.equal(doc.activeElement, input);
+});
+
+test("work omp still runs in the background shows above the input, with Send now once a message waits; its command's card says so", () => {
+	const chat = openChat();
+	const bar = chat.window.document.getElementById("background");
+	const jobId = "bg_1";
+	const details = { async: { state: "running", jobId, type: "bash" } };
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "c1", title: "$ python eval.py", kind: "execute", status: "pending", rawInput: { command: "python eval.py" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed", rawOutput: { content: [], details } } },
+	);
+	const badge = chat.log.querySelector(".tool-background");
+	assert.equal(badge.textContent, "moved to background", "whether it still runs is told once the reply ends");
+	assert.equal(bar.hidden, true, "nothing said before the reply ends");
+
+	chat.deliver({ type: "background", jobs: [{ id: jobId, kind: "command", label: "python eval.py", startedAt: Date.now() - 185_000 }], continuing: false });
+	assert.equal(badge.textContent, "⏳ running in background");
+	assert.equal(bar.hidden, false);
+	assert.equal(
+		bar.textContent,
+		"⏳ omp is still running 1 command in the background: $ python eval.py (3 min). It will report back and carry on by itself. A message you send now will wait until it's done.",
+	);
+	assert.equal(bar.querySelector("button"), null, "no Send now with nothing waiting");
+	chat.deliver({ type: "status", state: "busy" }, { type: "queued", id: "1", text: "and then?", attachments: [] });
+	assert.equal(bar.querySelector("button"), null, "nor while a turn of the user's runs: the message goes after it anyway");
+	chat.deliver({ type: "status", state: "idle" });
+	bar.querySelector("button").click();
+	assert.deepEqual(chat.posted.at(-1), { type: "sendNow" });
+	chat.deliver({ type: "background", jobs: [], continuing: true });
+	assert.match(bar.textContent, /^⏳ omp is carrying on by itself after background work reported back…/);
+	assert.equal(bar.querySelector("button"), null, "no Send now while omp carries on by itself: it takes no message then");
+	chat.deliver({ type: "dequeued", ids: ["1"] });
+	assert.equal(badge.textContent, "finished in background");
+	chat.deliver({ type: "backgroundTurn", jobs: ["python eval.py"] }, chunk("The eval passed."), { type: "turnEnd", stopReason: "end_turn" }, { type: "background", jobs: [], continuing: false });
+	assert.equal(bar.hidden, true);
+	const divider = chat.log.querySelector(".background-divider");
+	assert.equal(divider.textContent, "Background job finished: omp carried on by itself");
+	assert.equal(divider.nextElementSibling.textContent.trim(), "The eval passed.");
+
+	// omp restarts: a job still running ended with it, and a new omp's bg_1 is another job.
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "c2", title: "$ sleep 600", kind: "execute", status: "pending", rawInput: { command: "sleep 600" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "c2", status: "completed", rawOutput: { content: [], details: { async: { state: "running", jobId: "bg_2", type: "bash" } } } } },
+		{ type: "background", jobs: [{ id: "bg_2", kind: "command", label: "sleep 600", startedAt: Date.now() }], continuing: false },
+	);
+	const second = chat.log.querySelectorAll(".tool-background")[1];
+	assert.equal(second.textContent, "⏳ running in background");
+	chat.deliver({ type: "background", jobs: [], continuing: false, ompStopped: true });
+	assert.equal(second.textContent, "stopped with omp");
+	assert.equal(badge.textContent, "finished in background", "a finished one stays so");
+	chat.deliver({ type: "background", jobs: [{ id: "bg_1", kind: "command", label: "make", startedAt: Date.now() }], continuing: false });
+	assert.equal(badge.textContent, "finished in background", "the new omp's bg_1 is not this card's job");
+});
+
+test("a message that never reached omp is marked so", () => {
+	const chat = openChat();
+	chat.deliver({ type: "user", text: "first", attachments: [], sentAt: Date.now() }, { type: "user", text: "fix X", attachments: [], sentAt: Date.now() }, { type: "notSent" });
+	const [first, second] = chat.log.querySelectorAll(".msg.user");
+	assert.equal(first.classList.contains("not-sent"), false);
+	assert.equal(second.classList.contains("not-sent"), true);
+});
+
+test("a loaded chat's replayed command cards forget their jobs, whose names a new omp uses afresh", () => {
+	const chat = openChat();
+	chat.deliver(
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "old-1", title: "$ make", kind: "execute", status: "completed", rawInput: { command: "make" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "old-1", status: "completed", rawOutput: { content: [], details: { async: { state: "running", jobId: "bg_1", type: "bash" } } } } },
+		{ type: "background", jobs: [], continuing: false, forget: true },
+		{ type: "background", jobs: [{ id: "bg_1", kind: "command", label: "sleep 9", startedAt: Date.now() }], continuing: false },
+	);
+	assert.equal(chat.log.querySelector(".tool-background").textContent, "moved to background", "not the new omp's bg_1");
+});
+
+test("a process omp runs in the background is shown, and messages don't wait for it", () => {
+	const chat = openChat();
+	const bar = chat.window.document.getElementById("background");
+	chat.deliver(
+		{ type: "status", state: "idle" },
+		{ type: "update", update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "$ python3 run.py", kind: "execute", status: "pending", rawInput: { command: "python3 run.py" } } },
+		{ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed", rawOutput: { content: [], details: { service: { name: "a-verify", state: "running", pid: 5516 } } } } },
+		{ type: "background", jobs: [{ id: "a-verify", kind: "process", label: "a-verify", startedAt: Date.now() - 12 * 60_000 }], continuing: false },
+	);
+	assert.equal(bar.textContent, "⏳ omp is running 1 process in the background: a-verify (12 min). It reports back when it ends; you can keep chatting.");
+	assert.equal(chat.log.querySelector(".tool-background").textContent, "⏳ running in background");
+
+	chat.deliver({
+		type: "background",
+		jobs: [
+			{ id: "bg_1", kind: "command", label: "make", startedAt: Date.now() },
+			{ id: "a-verify", kind: "process", label: "a-verify", startedAt: Date.now() },
+		],
+		continuing: false,
+	});
+	assert.match(bar.textContent, /^⏳ omp is still running 1 command in the background: \$ make \(0s\)\. It will report back.* omp also runs 1 process in the background\.$/);
 });

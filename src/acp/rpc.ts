@@ -19,7 +19,16 @@ export class RpcError extends Error {
 }
 
 /** The agent answered a request with an error (as opposed to the connection closing). */
-export class AgentError extends Error {}
+/** An error omp answered with: its JSON-RPC code, and the reason it gives in its data, if any. */
+export class AgentError extends Error {
+	constructor(
+		message: string,
+		readonly code?: number,
+		readonly reason?: string,
+	) {
+		super(message);
+	}
+}
 
 /**
  * A session request's line for the log, with each MCP server reduced to its name and type: tokens
@@ -107,7 +116,8 @@ export class JsonRpcConnection {
 				// omp often says only "Internal error" and puts the cause in data.details.
 				const details = message.error.data?.details;
 				const text = message.error.message ?? "Agent error";
-				pending.reject(new AgentError(typeof details === "string" && details ? `${text}: ${details}` : text));
+				const reason = typeof message.error.data?.reason === "string" ? message.error.data.reason : undefined;
+				pending.reject(new AgentError(typeof details === "string" && details ? `${text}: ${details}` : text, message.error.code, reason));
 			} else {
 				pending.resolve(message.result);
 			}

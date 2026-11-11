@@ -323,6 +323,23 @@ export class OmpAgent {
 		if (this.#sessionId) this.#rpc?.notify("session/cancel", { sessionId: this.#sessionId });
 	}
 
+	/**
+	 * Add a message to the turn that is running, without stopping it (omp's `_session/steering`): the
+	 * model reads it at its next step. True if omp took it; false when there is no turn to add it to
+	 * (it has ended, or is omp's own), or this omp can't steer, so it has to be sent as a message.
+	 */
+	async steer(text: string): Promise<boolean> {
+		try {
+			const result = await this.#requireRpc().request<{ outcome?: string }>("_session/steering", {
+				sessionId: this.#requireSession(),
+				prompt: [{ type: "text", text }],
+			});
+			return result?.outcome === "injected";
+		} catch {
+			return false;
+		}
+	}
+
 	async setConfigOption(configId: string, value: string): Promise<ConfigOption[]> {
 		const result = await this.#requireRpc().request<{ configOptions?: ConfigOption[] }>(
 			"session/set_config_option",

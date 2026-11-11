@@ -228,6 +228,7 @@ function chatHtml(webview: vscode.Webview, media: vscode.Uri, markdown: vscode.U
 </div>
 <div id="log" role="log" aria-live="polite"></div>
 <div id="activity" hidden></div>
+<div id="background" role="status" hidden></div>
 <div id="queue"></div>
 <footer>
   <div id="settings"></div>
