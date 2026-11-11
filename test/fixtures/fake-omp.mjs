@@ -221,8 +221,9 @@ async function runSteps(steps) {
 		} else if (step.process) {
 			const { name, command, after = 1000, continueFor = 0, reply = "Done.", askDuring } = step.process;
 			const toolCallId = `call-${name}`;
-			const content = [{ type: "text", text: `${name}: running pid=4242` }];
-			const details = { service: { name, state: "running", ready: true, pid: 4242 } };
+			// Its pid is this fake omp's own: a process that runs, as the extension checks.
+			const content = [{ type: "text", text: `${name}: running pid=${process.pid}` }];
+			const details = { service: { name, state: "running", ready: true, pid: process.pid } };
 			writeMessage({ role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command } }], stopReason: "toolUse" });
 			send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "tool_call", toolCallId, title: `$ ${command}`, kind: "execute", status: "pending", rawInput: { command } } } });
 			writeMessage({ role: "toolResult", toolCallId, toolName: "bash", content, details });
