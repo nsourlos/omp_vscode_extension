@@ -21,6 +21,8 @@ export interface BackgroundJob {
 	startedAt: number;
 	/** When omp kills it, if it said (ms). */
 	deadline?: number;
+	/** A process's id on this machine, to see whether it still runs (see SessionTracker.dropEnded). */
+	pid?: number;
 }
 
 /** How long after its deadline a job still listed is taken to be over: omp killed it, and its result went unseen. */
@@ -189,6 +191,18 @@ export class SessionTracker {
 	}
 
 	/**
+	 * Drop the processes no longer running on this machine, whatever omp's file says (one can end
+	 * without a word there). True if any was.
+	 */
+	dropEnded(runs: (pid: number) => boolean): boolean {
+		let dropped = false;
+		for (const job of [...this.jobs.values()]) {
+			if (job.kind === "process" && job.pid !== undefined && !runs(job.pid)) dropped = this.jobs.delete(job.id) || dropped;
+		}
+		return dropped;
+	}
+
+	/**
 	 * A job's result started a turn of omp's own, but omp has written no reply since, for OWN_TURN_SILENCE_MS:
 	 * it isn't carrying on (e.g. it holds a result back after a turn was stopped). True if so; once omp has
 	 * replied, a long command in its turn writes nothing for a while and is no sign of this.
@@ -285,9 +299,24 @@ export class SessionTracker {
 		const service = message.details?.service;
 		if (typeof service?.name === "string") {
 			if (service.state === "running" || service.state === "ready") {
-				this.jobs.set(service.name, { id: service.name, kind: "process", label: service.name, startedAt: call?.at ?? at });
+				const pid = typeof service.pid === "number" ? { pid: service.pid } : {};
+				this.jobs.set(service.name, { id: service.name, kind: "process", label: service.name, startedAt: call?.at ?? at, ...pid });
 			} else {
 				this.jobs.delete(service.name);
+			}
+		}
+		// omp's proc:// paths: a process stopped (write proc://NAME/kill) or read, and the list of them all (read proc://).
+		const proc = message.details?.proc;
+		if (proc) {
+			const runs = (daemon: any) => daemon?.state === "running" || daemon?.state === "ready";
+			if (typeof proc.daemon?.name === "string" && !runs(proc.daemon)) this.jobs.delete(proc.daemon.name);
+			if (Array.isArray(proc.daemons)) {
+				const running = new Set(proc.daemons.filter(runs).map((daemon: any) => daemon.name));
+				for (const job of [...this.jobs.values()]) if (job.kind === "process" && !running.has(job.id)) this.jobs.delete(job.id);
+			}
+			for (const job of arrayOf(proc.jobs)) {
+				const id = job?.id ?? job?.jobId;
+				if (typeof id === "string" && FINISHED.has(job.status)) this.jobs.delete(id);
 			}
 		}
 		// Helper agents started in the background, as older omp lists them: "- `Name` (job `Name`)".

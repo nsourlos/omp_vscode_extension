@@ -132,6 +132,7 @@ export class BackgroundWatch {
 		if (this.#disposed) return;
 		if (this.#tracker.expire(Date.now())) this.handlers.log("a background job is long past its deadline with no result seen: taken to be over");
 		if (this.#tracker.endSilentTurn(Date.now())) this.handlers.log("omp wrote nothing after a background job's result for 3 minutes: taken not to be carrying on");
+		if (this.#tracker.dropEnded(processRuns)) this.handlers.log("a background process no longer runs, though omp's file didn't say so: taken to be over");
 		const state = this.state;
 		const key = JSON.stringify(state);
 		if (key !== this.#reported) {
@@ -150,5 +151,15 @@ export class BackgroundWatch {
 	dispose(): void {
 		this.#disposed = true;
 		this.#stopTimer();
+	}
+}
+
+/** A process with this id runs on this machine (one of another user's counts too: it exists). */
+function processRuns(pid: number): boolean {
+	try {
+		process.kill(pid, 0); // signal 0 only checks
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 }

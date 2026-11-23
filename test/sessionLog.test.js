@@ -314,3 +314,38 @@ test("a read whose report fails in an unforeseen way doesn't stop the later ones
 	watch.dispose();
 	fs.rmSync(agentDir, { recursive: true, force: true });
 });
+
+test("a process omp stops (proc://NAME/kill), or lists as ended, or that no longer runs, is gone from the bar", async () => {
+	const tracker = new SessionTracker();
+	const started = (toolCallId, name, pid) =>
+		entry({ type: "message", message: { role: "toolResult", toolCallId, toolName: "bash", content: [{ type: "text", text: `${name}: ready pid=${pid}` }], details: { service: { name, state: "ready", pid } } } });
+	const proc = (toolCallId, toolName, details) => entry({ type: "message", message: { role: "toolResult", toolCallId, toolName, content: [{ type: "text", text: "" }], details: { proc: details } } });
+	tracker.apply([user("serve"), started("c1", "litellm-4137", 36598), started("c2", "vj-b-8001", 37378), started("c3", "vj-scw-8002", 37412), reply([])]);
+	tracker.askedTurnEnded();
+	assert.deepEqual([...tracker.jobs.keys()], ["litellm-4137", "vj-b-8001", "vj-scw-8002"]);
+	assert.equal(tracker.jobs.get("litellm-4137").pid, 36598);
+
+	// As omp wrote it on 11 Nov: "Stopped litellm-4137 [service] — exited — up 22h8m".
+	tracker.apply([user("stop it"), proc("w1", "write", { action: "stop", daemon: { name: "litellm-4137", state: "exited", exitCode: 1 } })]);
+	assert.deepEqual([...tracker.jobs.keys()], ["vj-b-8001", "vj-scw-8002"]);
+	// read proc:// lists them all: one ended, one not listed at all.
+	tracker.apply([proc("r1", "read", { jobs: [], agents: [], daemons: [{ name: "omp.browser.headless", state: "ready" }, { name: "vj-b-8001", state: "exited" }] })]);
+	assert.equal(tracker.jobs.size, 0);
+
+	// One that ended without a word in the file: its process id no longer runs.
+	tracker.apply([started("c4", "web", 4242)]);
+	assert.equal(tracker.dropEnded(pid => pid !== 4242), true);
+	assert.equal(tracker.jobs.size, 0);
+
+	// The watcher checks the machine itself.
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-agent-"));
+	fs.mkdirSync(path.join(agentDir, "sessions", "-project"), { recursive: true });
+	const file = path.join(agentDir, "sessions", "-project", "2026-11-11T09-00-00-000Z_chat-7.jsonl");
+	const states = [];
+	const watch = new BackgroundWatch("chat-7", { changed: state => states.push(state), ownTurn: () => {}, log: () => {} }, agentDir, 20);
+	fs.writeFileSync(file, [user("serve"), started("c1", "alive", process.pid), started("c2", "gone", 2 ** 22 + 12345), reply([])].map(value => `${JSON.stringify(value)}\n`).join(""));
+	await watch.turnEnded();
+	assert.deepEqual(states.at(-1).jobs.map(job => job.id), ["alive"], "a process id that doesn't exist is no process");
+	watch.dispose();
+	fs.rmSync(agentDir, { recursive: true, force: true });
+});
